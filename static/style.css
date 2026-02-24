@@ -1412,6 +1412,10 @@ body.terminal-raised {
     .tm-command {
         max-width: 150px;
     }
+
+    .tm-refresh-btn {
+        display: none;
+    }
 }
 
 .hidden {

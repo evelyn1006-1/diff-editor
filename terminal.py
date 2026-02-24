@@ -965,6 +965,10 @@ def _get_processes() -> list[dict]:
             for line in lines[1:150]:  # Increased limit for tree view
                 parts = line.split(None, 11)
                 if len(parts) >= 12:
+                    cmd = parts[11]
+                    # Skip the ps command itself
+                    if cmd.startswith("ps axo") or cmd.startswith("ps ax"):
+                        continue
                     processes.append({
                         "user": parts[0],
                         "pid": int(parts[1]),
@@ -977,7 +981,7 @@ def _get_processes() -> list[dict]:
                         "stat": parts[8],
                         "start": parts[9],
                         "time": parts[10],
-                        "command": parts[11],
+                        "command": cmd,
                     })
     except (subprocess.TimeoutExpired, OSError, ValueError):
         pass
