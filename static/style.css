@@ -1273,31 +1273,83 @@ body.terminal-raised {
     align-items: center;
 }
 
-.tm-signal-btn {
-    padding: 0.25rem 0.5rem;
-    font-size: 0.75rem;
-    border-radius: 8px;
-    color: #e67e22;
-    border-color: #e67e22;
+/* Split button container */
+.tm-split-btn {
+    display: flex;
+    position: relative;
 }
 
-.tm-signal-btn:hover {
+.tm-split-main {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 6px 0 0 6px;
+    color: #e67e22;
+    border: 1px solid #e67e22;
+    border-right: none;
+    background: transparent;
+    cursor: pointer;
+    min-width: 3rem;
+    transition: background 0.15s ease;
+}
+
+.tm-split-main:hover {
     background: rgba(230, 126, 34, 0.15);
 }
 
-.tm-signal-select {
-    padding: 0.2rem 0.3rem;
-    font-size: 0.7rem;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--bg-secondary);
-    color: var(--text-primary);
+.tm-split-arrow {
+    padding: 0.25rem 0.35rem;
+    font-size: 0.65rem;
+    border-radius: 0 6px 6px 0;
+    color: #e67e22;
+    border: 1px solid #e67e22;
+    background: transparent;
     cursor: pointer;
+    transition: background 0.15s ease;
 }
 
-.tm-signal-select:focus {
-    outline: none;
-    border-color: var(--accent);
+.tm-split-arrow:hover {
+    background: rgba(230, 126, 34, 0.15);
+}
+
+/* Dropdown menu */
+.tm-split-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 2px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 100;
+    min-width: 120px;
+    overflow: hidden;
+}
+
+.tm-split-option {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background 0.1s ease;
+}
+
+.tm-split-option:hover {
+    background: var(--bg-secondary);
+}
+
+.tm-split-option.selected {
+    background: rgba(214, 51, 132, 0.1);
+    color: var(--accent);
+}
+
+.tm-sig-desc {
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+    font-style: italic;
 }
 
 /* Tree view */

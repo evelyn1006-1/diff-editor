@@ -1000,35 +1000,66 @@ function renderTaskManagerTable() {
                 </div>
             </td>
             <td class="tm-actions">
-                <button class="tm-signal-btn" data-pid="${p.pid}" title="Send signal">Send</button>
-                <select class="tm-signal-select" data-pid="${p.pid}">
-                    <option value="TERM"${savedSignal === 'TERM' ? ' selected' : ''}>TERM</option>
-                    <option value="HUP"${savedSignal === 'HUP' ? ' selected' : ''}>HUP</option>
-                    <option value="INT"${savedSignal === 'INT' ? ' selected' : ''}>INT</option>
-                    <option value="KILL"${savedSignal === 'KILL' ? ' selected' : ''}>KILL</option>
-                    <option value="STOP"${savedSignal === 'STOP' ? ' selected' : ''}>STOP</option>
-                    <option value="CONT"${savedSignal === 'CONT' ? ' selected' : ''}>CONT</option>
-                </select>
+                <div class="tm-split-btn" data-pid="${p.pid}">
+                    <button class="tm-split-main" title="Send ${savedSignal}">${savedSignal}</button>
+                    <button class="tm-split-arrow" title="Choose signal">&#9662;</button>
+                    <div class="tm-split-menu hidden">
+                        <div class="tm-split-option${savedSignal === 'TERM' ? ' selected' : ''}" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful</span></div>
+                        <div class="tm-split-option${savedSignal === 'HUP' ? ' selected' : ''}" data-signal="HUP">HUP <span class="tm-sig-desc">Reload</span></div>
+                        <div class="tm-split-option${savedSignal === 'INT' ? ' selected' : ''}" data-signal="INT">INT <span class="tm-sig-desc">Interrupt</span></div>
+                        <div class="tm-split-option${savedSignal === 'KILL' ? ' selected' : ''}" data-signal="KILL">KILL <span class="tm-sig-desc">Force</span></div>
+                        <div class="tm-split-option${savedSignal === 'STOP' ? ' selected' : ''}" data-signal="STOP">STOP <span class="tm-sig-desc">Pause</span></div>
+                        <div class="tm-split-option${savedSignal === 'CONT' ? ' selected' : ''}" data-signal="CONT">CONT <span class="tm-sig-desc">Resume</span></div>
+                    </div>
+                </div>
             </td>
         </tr>
     `;
     }).join('');
 
-    // Attach signal button and dropdown handlers
-    tbody.querySelectorAll('.tm-signal-btn').forEach(btn => {
-        btn.onclick = () => {
-            const pid = parseInt(btn.dataset.pid);
-            const select = btn.nextElementSibling;
-            const signal = select.value;
+    // Attach split button handlers
+    tbody.querySelectorAll('.tm-split-btn').forEach(container => {
+        const pid = parseInt(container.dataset.pid);
+        const mainBtn = container.querySelector('.tm-split-main');
+        const arrowBtn = container.querySelector('.tm-split-arrow');
+        const menu = container.querySelector('.tm-split-menu');
+
+        // Main button sends the signal
+        mainBtn.onclick = (e) => {
+            e.stopPropagation();
+            const signal = taskManagerSignalSelections.get(pid) || 'TERM';
             killProcess(pid, signal);
         };
-    });
-    tbody.querySelectorAll('.tm-signal-select').forEach(select => {
-        select.onchange = () => {
-            const pid = parseInt(select.dataset.pid);
-            taskManagerSignalSelections.set(pid, select.value);
+
+        // Arrow button toggles menu
+        arrowBtn.onclick = (e) => {
+            e.stopPropagation();
+            // Close other menus first
+            document.querySelectorAll('.tm-split-menu').forEach(m => {
+                if (m !== menu) m.classList.add('hidden');
+            });
+            menu.classList.toggle('hidden');
         };
+
+        // Menu option selection
+        menu.querySelectorAll('.tm-split-option').forEach(opt => {
+            opt.onclick = (e) => {
+                e.stopPropagation();
+                const signal = opt.dataset.signal;
+                taskManagerSignalSelections.set(pid, signal);
+                mainBtn.textContent = signal;
+                mainBtn.title = `Send ${signal}`;
+                menu.querySelectorAll('.tm-split-option').forEach(o => o.classList.remove('selected'));
+                opt.classList.add('selected');
+                menu.classList.add('hidden');
+            };
+        });
     });
+
+    // Close menus when clicking elsewhere
+    document.addEventListener('click', () => {
+        document.querySelectorAll('.tm-split-menu').forEach(m => m.classList.add('hidden'));
+    }, { once: true });
 
     // Attach command text click handlers (click text to expand/collapse command)
     tbody.querySelectorAll('.tm-command-text').forEach(span => {
