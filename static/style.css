@@ -760,3 +760,24 @@ body.terminal-raised {
     color: var(--text-secondary);
     font-style: italic;
 }
+
+/* Completion Status Indicator */
+.completion-status {
+    padding: 0.25rem 0.75rem;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+.completion-status.loading {
+    color: var(--accent);
+}
+
+.completion-status.error {
+    color: #ff6b6b;
+}
+
+.hidden {
+    display: none !important;
+}

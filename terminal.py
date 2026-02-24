@@ -3,6 +3,7 @@ Terminal routes and SocketIO handlers.
 """
 
 import glob
+import json
 import os
 import shlex
 import subprocess
@@ -236,8 +237,6 @@ def complete():
     completions = []
 
     if comp_type == "command":
-        if not prefix:
-            return jsonify([])
         # Use compgen to get command completions
         try:
             result = subprocess.run(
@@ -333,6 +332,8 @@ def _complete_argument(command: str, prefix: str, arg_index: int, cwd: str | Non
 
     if command == "systemctl":
         completions = _complete_systemctl(prefix, arg_index)
+    elif command == "sudo":
+        completions = _complete_sudo(prefix, arg_index)
     elif command == "git":
         if arg_index == 0:
             completions = _complete_git(prefix, arg_index)
@@ -342,6 +343,10 @@ def _complete_argument(command: str, prefix: str, arg_index: int, cwd: str | Non
         completions = _complete_apt(prefix, arg_index)
     elif command == "ssh":
         completions = _complete_ssh(prefix)
+    elif command in ("pip", "pip3"):
+        completions = _complete_pip(command, subcommand, prefix, arg_index, cwd)
+    elif command == "npm":
+        completions = _complete_npm(subcommand, prefix, arg_index, cwd)
 
     return completions
 
@@ -377,6 +382,23 @@ def _complete_systemctl(prefix: str, arg_index: int) -> list[str]:
         except (subprocess.TimeoutExpired, OSError):
             pass
     return []
+
+
+def _complete_sudo(prefix: str, arg_index: int) -> list[str]:
+    """Complete sudo options."""
+    del arg_index
+    options = [
+        "-A", "-b", "-E", "-e", "-H", "-h", "-i", "-K", "-k", "-l", "-n",
+        "-P", "-p", "-S", "-s", "-U", "-u", "-V", "-v",
+        "--askpass", "--background", "--close-from", "--preserve-env",
+        "--edit", "--set-home", "--help", "--login", "--non-interactive",
+        "--preserve-groups", "--prompt", "--stdin", "--shell", "--other-user",
+        "--user", "--version", "--validate", "--remove-timestamp", "--reset-timestamp",
+    ]
+
+    if not prefix:
+        return sorted(options)[:50]
+    return sorted([o for o in options if o.startswith(prefix)])[:50]
 
 
 def _complete_git(prefix: str, arg_index: int) -> list[str]:
@@ -530,3 +552,210 @@ def _complete_ssh(prefix: str) -> list[str]:
             pass
 
     return sorted(hosts)[:50]
+
+
+def _complete_pip(pip_cmd: str, subcommand: str, prefix: str, arg_index: int, cwd: str | None = None) -> list[str]:
+    """Complete pip subcommands/options with local hints and global package fallback."""
+    subcommands = [
+        "install", "uninstall", "list", "show", "freeze", "check", "config", "search",
+        "cache", "index", "download", "wheel", "hash", "completion", "debug",
+        "inspect", "help",
+    ]
+    global_opts = [
+        "-h", "--help", "-V", "--version", "-q", "--quiet", "-v", "--verbose",
+        "--no-cache-dir", "--disable-pip-version-check", "--proxy", "--timeout",
+        "--retries", "--trusted-host", "--cert", "--client-cert", "--exists-action",
+    ]
+    install_opts = [
+        "-r", "--requirement", "-e", "--editable", "-U", "--upgrade",
+        "--upgrade-strategy", "--pre", "--no-deps", "--user", "--target",
+        "--root", "--prefix", "--force-reinstall", "--ignore-installed",
+        "--break-system-packages",
+    ]
+
+    if prefix.startswith("-"):
+        opts = global_opts + (install_opts if subcommand in ("install", "download", "wheel") else [])
+        return sorted(set(o for o in opts if o.startswith(prefix)))[:50]
+
+    if arg_index == 0:
+        return sorted([s for s in subcommands if s.startswith(prefix)])[:50]
+
+    completions: set[str] = set()
+
+    # Prefer environment-visible installed packages first, then fall back to python -m pip.
+    pip_candidates = [[pip_cmd, "list", "--format=freeze"]]
+    if pip_cmd != "pip":
+        pip_candidates.append(["pip", "list", "--format=freeze"])
+    if pip_cmd != "pip3":
+        pip_candidates.append(["pip3", "list", "--format=freeze"])
+    pip_candidates.extend(
+        [
+            ["python3", "-m", "pip", "list", "--format=freeze"],
+            ["python", "-m", "pip", "list", "--format=freeze"],
+        ]
+    )
+
+    seen_cmds: set[tuple[str, ...]] = set()
+    cwd_candidates = [cwd, os.path.expanduser("~")]
+    for cmd in pip_candidates:
+        cmd_key = tuple(cmd)
+        if cmd_key in seen_cmds:
+            continue
+        seen_cmds.add(cmd_key)
+        for run_cwd in cwd_candidates:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=run_cwd,
+                    timeout=2,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                continue
+            if result.returncode != 0:
+                continue
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "==" in line:
+                    name = line.split("==", 1)[0].strip()
+                elif " @ " in line:
+                    name = line.split(" @ ", 1)[0].strip()
+                else:
+                    name = line.split()[0].strip()
+                if name and name.startswith(prefix):
+                    completions.add(name)
+
+    # Helpful when completing `pip install -r req...`
+    base_cwd = Path(cwd or os.path.expanduser("~"))
+    for req_file in ("requirements.txt", "requirements-dev.txt", "requirements/base.txt", "requirements-prod.txt"):
+        if req_file.startswith(prefix) and (base_cwd / req_file).exists():
+            completions.add(req_file)
+
+    return sorted(completions)[:50]
+
+
+def _load_package_json(cwd: str | None) -> dict:
+    """Load package.json from cwd if present."""
+    base_cwd = Path(cwd or os.path.expanduser("~"))
+    package_json = base_cwd / "package.json"
+    if not package_json.exists():
+        return {}
+    try:
+        with open(package_json) as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _complete_npm(subcommand: str, prefix: str, arg_index: int, cwd: str | None = None) -> list[str]:
+    """Complete npm with local package.json hints and global package fallback."""
+    subcommands = [
+        "install", "i", "uninstall", "remove", "rm", "update", "up",
+        "run", "run-script", "test", "start", "stop", "build", "publish",
+        "pack", "link", "list", "ls", "outdated", "audit", "init", "create",
+        "login", "logout", "whoami", "ci", "exec", "cache", "config",
+    ]
+    npm_opts = [
+        "-g", "--global", "-D", "--save-dev", "-O", "--save-optional",
+        "--save-peer", "--no-save", "--omit", "--include", "--workspace",
+        "--workspaces", "--if-present", "--silent", "--yes", "--force",
+    ]
+
+    if arg_index == 0:
+        return sorted([s for s in subcommands if s.startswith(prefix)])[:50]
+
+    if prefix.startswith("-"):
+        return sorted([o for o in npm_opts if o.startswith(prefix)])[:50]
+
+    completions: set[str] = set()
+    package_data = _load_package_json(cwd)
+
+    if subcommand in ("run", "run-script"):
+        scripts = package_data.get("scripts", {})
+        if isinstance(scripts, dict):
+            for name in scripts:
+                if isinstance(name, str) and name.startswith(prefix):
+                    completions.add(name)
+
+    if subcommand in ("install", "i", "uninstall", "remove", "rm", "update", "up"):
+        dep_sections = ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+        for section in dep_sections:
+            deps = package_data.get(section, {})
+            if isinstance(deps, dict):
+                for dep in deps:
+                    if isinstance(dep, str) and dep.startswith(prefix):
+                        completions.add(dep)
+
+    # Global fallback for package-targeting npm commands (useful outside project dirs).
+    if subcommand in ("install", "i", "uninstall", "remove", "rm", "update", "up", "exec"):
+        completions.update(_complete_npm_global_packages(prefix, cwd))
+
+    return sorted(completions)[:50]
+
+
+def _complete_npm_global_packages(prefix: str, cwd: str | None = None) -> set[str]:
+    """Return globally installed npm package names matching prefix."""
+    completions: set[str] = set()
+    cwd_candidates = [cwd, os.path.expanduser("~")]
+
+    for run_cwd in cwd_candidates:
+        try:
+            result = subprocess.run(
+                ["npm", "ls", "-g", "--depth=0", "--json"],
+                capture_output=True,
+                text=True,
+                cwd=run_cwd,
+                timeout=5,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            result = None
+
+        # npm can exit non-zero even when useful JSON is present.
+        if result and result.stdout.strip():
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                data = None
+            deps = data.get("dependencies", {}) if isinstance(data, dict) else {}
+            if isinstance(deps, dict):
+                for dep_name in deps:
+                    if isinstance(dep_name, str) and dep_name.startswith(prefix):
+                        completions.add(dep_name)
+
+        # Fallback: inspect global node_modules directly.
+        try:
+            root_result = subprocess.run(
+                ["npm", "root", "-g"],
+                capture_output=True,
+                text=True,
+                cwd=run_cwd,
+                timeout=2,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            root_result = None
+
+        if root_result and root_result.returncode == 0:
+            root_path = Path(root_result.stdout.strip())
+            if root_path.is_dir():
+                try:
+                    for entry in root_path.iterdir():
+                        name = entry.name
+                        if not name or name.startswith("."):
+                            continue
+                        if name.startswith("@") and entry.is_dir():
+                            for scoped in entry.iterdir():
+                                scoped_name = f"{name}/{scoped.name}"
+                                if scoped.is_dir() and scoped_name.startswith(prefix):
+                                    completions.add(scoped_name)
+                        elif entry.is_dir() and name.startswith(prefix):
+                            completions.add(name)
+                except OSError:
+                    pass
+
+    return completions

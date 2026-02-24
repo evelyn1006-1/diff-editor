@@ -137,6 +137,228 @@ function clearOutput() {
     outputEl.innerHTML = '';
 }
 
+function parseShellWords(beforeCursor) {
+    const tokens = [];
+    let tokenStart = -1;
+    let raw = '';
+    let value = '';
+    let quote = null;  // "'" or '"'
+    let escaped = false;
+
+    function pushToken(endIdx) {
+        if (tokenStart === -1) return;
+        tokens.push({ raw: raw, value: value, start: tokenStart, end: endIdx });
+        tokenStart = -1;
+        raw = '';
+        value = '';
+    }
+
+    for (let i = 0; i < beforeCursor.length; i++) {
+        const ch = beforeCursor[i];
+
+        if (tokenStart === -1) {
+            if (/\s/.test(ch)) continue;
+            tokenStart = i;
+        }
+
+        if (quote === null && !escaped && /\s/.test(ch)) {
+            pushToken(i);
+            continue;
+        }
+
+        raw += ch;
+
+        if (quote === '\'') {
+            if (ch === '\'') {
+                quote = null;
+            } else {
+                value += ch;
+            }
+            continue;
+        }
+
+        if (quote === '"') {
+            if (escaped) {
+                value += ch;
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === '"') {
+                quote = null;
+            } else {
+                value += ch;
+            }
+            continue;
+        }
+
+        if (escaped) {
+            value += ch;
+            escaped = false;
+        } else if (ch === '\\') {
+            escaped = true;
+        } else if (ch === '\'') {
+            quote = '\'';
+        } else if (ch === '"') {
+            quote = '"';
+        } else {
+            value += ch;
+        }
+    }
+
+    if (tokenStart !== -1) {
+        if (escaped) value += '\\';
+        pushToken(beforeCursor.length);
+    }
+
+    const endedWithWhitespace = beforeCursor.length > 0 && /\s/.test(beforeCursor[beforeCursor.length - 1]);
+    const current = (!endedWithWhitespace && tokens.length > 0)
+        ? tokens[tokens.length - 1]
+        : { raw: '', value: '', start: beforeCursor.length, end: beforeCursor.length };
+
+    return { tokens, current, endedWithWhitespace };
+}
+
+function resolveCommandContext(tokens, endedWithWhitespace) {
+    const longNeedsArg = new Set(['user', 'group', 'host', 'prompt', 'chdir', 'chroot', 'other-user']);
+    const shortNeedsArg = new Set(['u', 'g', 'h', 'p', 'C', 'T', 'R', 'r', 't']);
+
+    let commandLookupIndex = 0;
+    let commandIndex = -1;
+    let baseCommand = '';
+
+    if (tokens.length > 0) {
+        if (tokens[0].value !== 'sudo') {
+            commandLookupIndex = 0;
+            commandIndex = 0;
+            baseCommand = tokens[0].value;
+        } else {
+            let i = 1;
+            let expectValue = false;
+
+            while (i < tokens.length) {
+                const tok = tokens[i].value;
+                if (expectValue) {
+                    expectValue = false;
+                    i++;
+                    continue;
+                }
+
+                if (tok === '--') {
+                    i++;
+                    break;
+                }
+
+                if (!tok.startsWith('-') || tok === '-') break;
+
+                if (tok.startsWith('--')) {
+                    const eqIdx = tok.indexOf('=');
+                    const name = eqIdx === -1 ? tok.slice(2) : tok.slice(2, eqIdx);
+                    if (eqIdx === -1 && longNeedsArg.has(name)) {
+                        expectValue = true;
+                    }
+                    i++;
+                    continue;
+                }
+
+                const flags = tok.slice(1);
+                for (let j = 0; j < flags.length; j++) {
+                    const f = flags[j];
+                    if (shortNeedsArg.has(f)) {
+                        if (j === flags.length - 1) expectValue = true;
+                        break;
+                    }
+                }
+                i++;
+            }
+
+            commandLookupIndex = i;
+            const pointsToCurrentOptionToken =
+                !endedWithWhitespace &&
+                i === tokens.length - 1 &&
+                tokens[i].value.startsWith('-');
+            if (i < tokens.length && !pointsToCurrentOptionToken) {
+                commandIndex = i;
+                baseCommand = tokens[i].value;
+            }
+        }
+    }
+
+    const currentTokenIndex = endedWithWhitespace ? tokens.length : Math.max(0, tokens.length - 1);
+    const completingCommand = (commandIndex === -1)
+        ? currentTokenIndex === commandLookupIndex
+        : (currentTokenIndex === commandIndex && !endedWithWhitespace);
+
+    let argIndex = 0;
+    if (commandIndex >= 0 && !completingCommand) {
+        const firstArgIdx = commandIndex + 1;
+        if (endedWithWhitespace) {
+            argIndex = Math.max(0, tokens.length - firstArgIdx);
+        } else {
+            argIndex = Math.max(0, (tokens.length - 1) - firstArgIdx);
+        }
+    }
+
+    let subcommand = '';
+    if (commandIndex >= 0 && tokens.length > commandIndex + 1) {
+        subcommand = tokens[commandIndex + 1].value;
+    }
+
+    return {
+        baseCommand: baseCommand,
+        commandIndex: commandIndex,
+        commandLookupIndex: commandLookupIndex,
+        completingCommand: completingCommand,
+        argIndex: argIndex,
+        subcommand: subcommand,
+    };
+}
+
+function longestCommonPrefix(items) {
+    if (!items || items.length === 0) return '';
+    let prefix = items[0];
+    for (let i = 1; i < items.length; i++) {
+        const item = items[i];
+        let j = 0;
+        while (j < prefix.length && j < item.length && prefix[j] === item[j]) j++;
+        prefix = prefix.slice(0, j);
+        if (!prefix) break;
+    }
+    return prefix;
+}
+
+function getUnclosedQuote(rawToken) {
+    let quote = null;
+    let escaped = false;
+
+    for (let i = 0; i < rawToken.length; i++) {
+        const ch = rawToken[i];
+        if (quote === '\'') {
+            if (ch === '\'') quote = null;
+            continue;
+        }
+        if (quote === '"') {
+            if (escaped) {
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === '"') {
+                quote = null;
+            }
+            continue;
+        }
+
+        if (escaped) {
+            escaped = false;
+        } else if (ch === '\\') {
+            escaped = true;
+        } else if (ch === '\'' || ch === '"') {
+            quote = ch;
+        }
+    }
+
+    return quote;
+}
+
 async function openTabCompletion() {
     const inputEl = document.getElementById('terminal-input');
     const text = inputEl.value;
@@ -146,39 +368,55 @@ async function openTabCompletion() {
     const beforeCursor = text.substring(0, cursorPos);
     const afterCursor = text.substring(cursorPos);
 
-    // Parse the command line into parts
-    const trimmedBeforeCursor = beforeCursor.trim();
-    const parts = trimmedBeforeCursor ? trimmedBeforeCursor.split(/\s+/) : [];
-    const lastSpaceIdx = beforeCursor.lastIndexOf(' ');
-    const currentWord = beforeCursor.substring(lastSpaceIdx + 1);
-    const beforeWord = beforeCursor.substring(0, lastSpaceIdx + 1);
+    // Parse shell words with quote and escape awareness.
+    const parsed = parseShellWords(beforeCursor);
+    const parts = parsed.tokens;
+    const currentWord = parsed.current.value;
+    const currentRawWord = parsed.current.raw;
+    let replaceStart = parsed.current.start;
+    const unclosedQuote = getUnclosedQuote(currentRawWord);
+    if (
+        unclosedQuote &&
+        currentRawWord.startsWith(unclosedQuote) &&
+        currentRawWord.indexOf(unclosedQuote, 1) === -1
+    ) {
+        // Preserve an opening quote already typed by user.
+        replaceStart += 1;
+    }
+    const beforeWord = beforeCursor.substring(0, replaceStart);
+    const context = resolveCommandContext(parts, parsed.endedWithWhitespace);
 
     // Commands that always expect paths
     const pathCommands = ['cd', 'nano', 'vim', 'vi', 'nvim', 'emacs', 'pico', 'edit', 'cat', 'less', 'more', 'head', 'tail'];
     // Commands with special argument completion
-    const argCommands = ['systemctl', 'git', 'apt', 'apt-get', 'ssh'];
+    const argCommands = ['systemctl', 'git', 'apt', 'apt-get', 'ssh', 'pip', 'pip3', 'npm'];
 
-    // Determine the base command (skip sudo)
-    let cmdIndex = 0;
-    if (parts[0] === 'sudo' && parts.length > 1) cmdIndex = 1;
-    const baseCommand = parts[cmdIndex] || '';
-
-    // Calculate argument index (0 = first arg after command)
-    const endsWithWhitespace = beforeCursor.length > 0 && /\s$/.test(beforeCursor);
-    let argIndex = parts.length - cmdIndex - 2;
-    if (endsWithWhitespace) argIndex += 1;
-    argIndex = Math.max(0, argIndex);
+    const baseCommand = context.baseCommand;
+    const argIndex = context.argIndex;
 
     // Determine completion type
     let compType = 'path';
     let url = '';
     const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
 
-    const isFirstWord = beforeWord.trim() === '' || beforeWord.trim() === 'sudo';
-    const looksLikePath = currentWord.includes('/') || currentWord.startsWith('~') || currentWord.startsWith('.');
-    const endsWithSlash = currentWord.endsWith('/');
+    const looksLikePath =
+        currentRawWord.includes('/') ||
+        currentWord.includes('/') ||
+        currentRawWord.startsWith('~') ||
+        currentWord.startsWith('~') ||
+        currentRawWord.startsWith('.') ||
+        currentWord.startsWith('.');
+    const endsWithSlash = currentRawWord.endsWith('/') || currentWord.endsWith('/');
+    const inSudoOptionContext =
+        parts.length > 0 &&
+        parts[0].value === 'sudo' &&
+        !context.baseCommand &&
+        currentRawWord.startsWith('-');
 
-    if (isFirstWord && !looksLikePath) {
+    if (inSudoOptionContext) {
+        compType = 'argument';
+        url = `${basePath}/terminal/complete?type=argument&command=sudo&prefix=${encodeURIComponent(currentWord)}&arg_index=${argIndex}`;
+    } else if (context.completingCommand && !looksLikePath) {
         // First word: command completion
         compType = 'command';
         url = `${basePath}/terminal/complete?type=command&prefix=${encodeURIComponent(currentWord)}`;
@@ -195,10 +433,9 @@ async function openTabCompletion() {
         compType = 'argument';
         url = `${basePath}/terminal/complete?type=argument&command=${encodeURIComponent(baseCommand)}&prefix=${encodeURIComponent(currentWord)}&arg_index=${argIndex}`;
 
-        // For git, also pass subcommand context
-        if (baseCommand === 'git' && argIndex > 0 && parts.length > cmdIndex + 1) {
-            const gitSubcmd = parts[cmdIndex + 1];
-            url += `&subcommand=${encodeURIComponent(gitSubcmd)}`;
+        // Pass subcommand context for commands whose completion depends on it.
+        if (argIndex > 0 && context.subcommand) {
+            url += `&subcommand=${encodeURIComponent(context.subcommand)}`;
         }
     } else {
         // Default to path completion
@@ -209,24 +446,65 @@ async function openTabCompletion() {
         url += `&session_id=${encodeURIComponent(socket.id)}`;
     }
 
+    // Status indicator helpers
+    const statusEl = document.getElementById('completion-status');
+    function showStatus(msg, type = '') {
+        statusEl.textContent = msg;
+        statusEl.className = 'completion-status' + (type ? ` ${type}` : '');
+    }
+    function hideStatus() {
+        statusEl.className = 'completion-status hidden';
+        statusEl.textContent = '';
+    }
+
     // Fetch completions from backend
+    showStatus('Loading...', 'loading');
     let completions = [];
     try {
         const resp = await fetch(url);
         if (resp.ok) {
             completions = await resp.json();
+            hideStatus();
+        } else {
+            showStatus('Failed', 'error');
+            setTimeout(hideStatus, 1500);
+            return;
         }
     } catch (e) {
         console.error('Completion fetch failed:', e);
+        showStatus('Failed', 'error');
+        setTimeout(hideStatus, 1500);
         return;
     }
 
-    if (completions.length === 0) return;
+    if (completions.length === 0) {
+        hideStatus();
+        return;
+    }
+
+    function selectAndApply(item, addSpace = true) {
+        const needsSpace =
+            addSpace &&
+            !unclosedQuote &&
+            !item.endsWith('/') &&
+            !item.endsWith(' ') &&
+            (afterCursor.length === 0 || /^\s/.test(afterCursor));
+        const suffix = needsSpace ? ' ' : '';
+        inputEl.value = beforeWord + item + suffix + afterCursor;
+        const caretPos = beforeWord.length + item.length + suffix.length;
+        inputEl.selectionStart = inputEl.selectionEnd = caretPos;
+    }
 
     // If single match, auto-complete directly
     if (completions.length === 1) {
-        inputEl.value = beforeWord + completions[0] + afterCursor;
-        inputEl.selectionStart = inputEl.selectionEnd = beforeWord.length + completions[0].length;
+        selectAndApply(completions[0], true);
+        return;
+    }
+
+    // If multiple matches share a longer common prefix, expand first.
+    const sharedPrefix = longestCommonPrefix(completions);
+    if (sharedPrefix && sharedPrefix.length > currentWord.length) {
+        selectAndApply(sharedPrefix, false);
         return;
     }
 
@@ -260,8 +538,7 @@ async function openTabCompletion() {
     }
 
     function selectCompletion(item) {
-        inputEl.value = beforeWord + item + afterCursor;
-        inputEl.selectionStart = inputEl.selectionEnd = beforeWord.length + item.length;
+        selectAndApply(item, true);
         closePopup();
     }
 
