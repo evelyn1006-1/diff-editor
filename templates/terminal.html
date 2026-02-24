@@ -47,6 +47,51 @@
                 </div>
             </div>
         </div>
+        <!-- Task Manager Popup -->
+        <div id="task-manager-overlay" class="task-manager-overlay hidden">
+            <div class="task-manager-popup">
+                <div class="task-manager-header">
+                    <h2>Task Manager</h2>
+                    <button id="tm-close" class="tm-close-btn" title="Close">&times;</button>
+                </div>
+                <div class="task-manager-stats">
+                    <div class="tm-stat">
+                        <span class="tm-stat-label">CPU</span>
+                        <span id="tm-cpu" class="tm-stat-value">0%</span>
+                    </div>
+                    <div class="tm-stat">
+                        <span class="tm-stat-label">Memory</span>
+                        <span id="tm-memory" class="tm-stat-value">0 / 0 GB (0%)</span>
+                    </div>
+                </div>
+                <div class="task-manager-controls">
+                    <input type="text" id="tm-filter" class="tm-filter" placeholder="Filter processes...">
+                    <select id="tm-sort" class="tm-sort">
+                        <option value="cpu">Sort by CPU</option>
+                        <option value="mem">Sort by Memory</option>
+                        <option value="pid">Sort by PID</option>
+                        <option value="user">Sort by User</option>
+                        <option value="name">Sort by Name</option>
+                    </select>
+                    <button id="tm-refresh" class="tm-refresh-btn" title="Refresh">Refresh</button>
+                </div>
+                <div class="task-manager-table-wrapper">
+                    <table class="task-manager-table">
+                        <thead>
+                            <tr>
+                                <th data-sort="pid">PID</th>
+                                <th data-sort="user">User</th>
+                                <th data-sort="cpu">CPU %</th>
+                                <th data-sort="mem">Mem %</th>
+                                <th data-sort="name">Command</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="tm-process-list"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </main>
     <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.4/dist/socket.io.min.js"></script>
     <script src="{{ static_url('js/terminal.js') }}"></script>

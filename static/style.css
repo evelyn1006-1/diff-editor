@@ -778,6 +778,299 @@ body.terminal-raised {
     color: #ff6b6b;
 }
 
+/* Task Manager Popup */
+.task-manager-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(74, 25, 66, 0.4);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.task-manager-popup {
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(214, 51, 132, 0.25);
+    width: 95%;
+    max-width: 900px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    backdrop-filter: blur(12px);
+}
+
+.task-manager-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.task-manager-header h2 {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin: 0;
+}
+
+.tm-close-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.75rem;
+    cursor: pointer;
+    padding: 0 0.5rem;
+    line-height: 1;
+}
+
+.tm-close-btn:hover {
+    color: var(--accent);
+    background: none;
+    transform: none;
+}
+
+.task-manager-stats {
+    display: flex;
+    gap: 2rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+}
+
+.tm-stat {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.tm-stat-label {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.tm-stat-value {
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.9rem;
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.task-manager-controls {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+
+.tm-filter {
+    flex: 1;
+    min-width: 150px;
+    background: var(--bg-secondary);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 0.5rem 0.75rem;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.tm-filter:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.tm-filter::placeholder {
+    color: var(--text-secondary);
+}
+
+.tm-sort {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 0.5rem 0.75rem;
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.tm-sort:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.tm-refresh-btn {
+    padding: 0.5rem 1rem;
+}
+
+.task-manager-table-wrapper {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.task-manager-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.task-manager-table th {
+    font-family: 'Comic Neue', sans-serif;
+    text-align: left;
+    padding: 0.6rem 0.75rem;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+    cursor: pointer;
+    user-select: none;
+    border-bottom: 2px solid var(--border);
+}
+
+.task-manager-table th:hover {
+    background: var(--border);
+    color: var(--accent);
+}
+
+.task-manager-table th.sorted {
+    color: var(--accent);
+}
+
+.task-manager-table th.sorted::after {
+    content: ' ▼';
+    font-size: 0.7em;
+}
+
+.task-manager-table th.sorted.asc::after {
+    content: ' ▲';
+}
+
+.task-manager-table td {
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid rgba(255, 179, 217, 0.3);
+    font-family: "SF Mono", Monaco, monospace;
+}
+
+.task-manager-table td:last-child {
+    font-family: 'Comic Neue', sans-serif;
+}
+
+.task-manager-table tr:hover {
+    background: var(--bg-tertiary);
+}
+
+.task-manager-table tr.selected {
+    background: rgba(214, 51, 132, 0.15);
+}
+
+.tm-command {
+    max-width: 300px;
+    position: relative;
+}
+
+.tm-command-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: block;
+}
+
+.tm-command.expanded .tm-command-text {
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.tm-expand-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    padding: 0;
+    margin-right: 0.25rem;
+    font-size: 0.65rem;
+    border-radius: 4px;
+    vertical-align: middle;
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+}
+
+.tm-command.expanded .tm-expand-btn {
+    transform: rotate(90deg);
+}
+
+.tm-command-wrapper {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+
+.tm-actions {
+    display: flex;
+    gap: 0.25rem;
+}
+
+.tm-kill-btn {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    border-radius: 8px;
+}
+
+.tm-kill-btn.term {
+    color: #e67e22;
+    border-color: #e67e22;
+}
+
+.tm-kill-btn.term:hover {
+    background: rgba(230, 126, 34, 0.15);
+}
+
+.tm-kill-btn.kill {
+    color: var(--error);
+    border-color: var(--error);
+}
+
+.tm-kill-btn.kill:hover {
+    background: var(--error-bg);
+}
+
+.tm-empty {
+    padding: 2rem;
+    text-align: center;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Mobile: Stack controls */
+@media (max-width: 600px) {
+    .task-manager-stats {
+        flex-direction: column;
+        gap: 0.5rem;
+    }
+
+    .task-manager-table th,
+    .task-manager-table td {
+        padding: 0.4rem 0.5rem;
+        font-size: 0.8rem;
+    }
+
+    .tm-command {
+        max-width: 150px;
+    }
+}
+
 .hidden {
     display: none !important;
 }

@@ -74,6 +74,10 @@ function connect() {
         handleEditorRedirect(data.url);
     });
 
+    socket.on('task_manager_popup', () => {
+        openTaskManager();
+    });
+
     socket.on('disconnect', () => {
         statusEl.textContent = 'Disconnected';
         statusEl.className = 'status error';
@@ -690,6 +694,260 @@ function setTerminalRaised(raised, buttonEl) {
     if (buttonEl) {
         buttonEl.textContent = raised ? 'Lower Panel' : 'Raise Panel';
         buttonEl.setAttribute('aria-pressed', raised ? 'true' : 'false');
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task Manager
+// ─────────────────────────────────────────────────────────────────────────────
+
+let taskManagerRefreshInterval = null;
+let taskManagerProcesses = [];
+let taskManagerSortColumn = 'cpu';
+let taskManagerSortAsc = false;
+let taskManagerFilter = '';
+let taskManagerExpandedPids = new Set();
+
+function openTaskManager() {
+    const overlay = document.getElementById('task-manager-overlay');
+    if (!overlay) return;
+
+    overlay.classList.remove('hidden');
+
+    // Set up event listeners
+    const closeBtn = document.getElementById('tm-close');
+    const filterInput = document.getElementById('tm-filter');
+    const sortSelect = document.getElementById('tm-sort');
+    const refreshBtn = document.getElementById('tm-refresh');
+
+    closeBtn.onclick = closeTaskManager;
+    filterInput.oninput = (e) => {
+        taskManagerFilter = e.target.value.toLowerCase();
+        renderTaskManagerTable();
+    };
+    sortSelect.onchange = (e) => {
+        taskManagerSortColumn = e.target.value;
+        renderTaskManagerTable();
+    };
+    refreshBtn.onclick = fetchTaskManagerData;
+
+    // Close on overlay click
+    overlay.onclick = (e) => {
+        if (e.target === overlay) closeTaskManager();
+    };
+
+    // Close on Escape key
+    document.addEventListener('keydown', handleTaskManagerKeydown);
+
+    // Set up sortable headers
+    document.querySelectorAll('.task-manager-table th[data-sort]').forEach(th => {
+        th.onclick = () => {
+            const col = th.dataset.sort;
+            if (taskManagerSortColumn === col) {
+                taskManagerSortAsc = !taskManagerSortAsc;
+            } else {
+                taskManagerSortColumn = col;
+                taskManagerSortAsc = false;
+            }
+            sortSelect.value = col;
+            renderTaskManagerTable();
+        };
+    });
+
+    // Fetch initial data and start auto-refresh
+    fetchTaskManagerData();
+    taskManagerRefreshInterval = setInterval(fetchTaskManagerData, 2000);
+}
+
+function closeTaskManager() {
+    const overlay = document.getElementById('task-manager-overlay');
+    if (overlay) {
+        overlay.classList.add('hidden');
+    }
+
+    // Clean up
+    if (taskManagerRefreshInterval) {
+        clearInterval(taskManagerRefreshInterval);
+        taskManagerRefreshInterval = null;
+    }
+    document.removeEventListener('keydown', handleTaskManagerKeydown);
+    taskManagerExpandedPids.clear();
+
+    // Return focus to terminal input
+    document.getElementById('terminal-input')?.focus();
+}
+
+function handleTaskManagerKeydown(e) {
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        closeTaskManager();
+    }
+}
+
+async function fetchTaskManagerData() {
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    try {
+        const resp = await fetch(`${basePath}/terminal/processes`);
+        if (!resp.ok) {
+            console.error('Failed to fetch processes:', resp.status);
+            return;
+        }
+
+        const data = await resp.json();
+
+        // Update stats display
+        document.getElementById('tm-cpu').textContent = `${data.cpu_percent}%`;
+        const mem = data.memory;
+        document.getElementById('tm-memory').textContent =
+            `${mem.used_gb} / ${mem.total_gb} GB (${mem.percent}%)`;
+
+        // Store processes and render
+        taskManagerProcesses = data.processes || [];
+        renderTaskManagerTable();
+    } catch (e) {
+        console.error('Failed to fetch task manager data:', e);
+    }
+}
+
+function renderTaskManagerTable() {
+    const tbody = document.getElementById('tm-process-list');
+    if (!tbody) return;
+
+    // Filter processes
+    let filtered = taskManagerProcesses;
+    if (taskManagerFilter) {
+        filtered = filtered.filter(p =>
+            p.command.toLowerCase().includes(taskManagerFilter) ||
+            p.user.toLowerCase().includes(taskManagerFilter) ||
+            String(p.pid).includes(taskManagerFilter)
+        );
+    }
+
+    // Sort processes
+    filtered.sort((a, b) => {
+        let valA, valB;
+        switch (taskManagerSortColumn) {
+            case 'pid':
+                valA = a.pid;
+                valB = b.pid;
+                break;
+            case 'user':
+                valA = a.user.toLowerCase();
+                valB = b.user.toLowerCase();
+                break;
+            case 'cpu':
+                valA = a.cpu;
+                valB = b.cpu;
+                break;
+            case 'mem':
+                valA = a.mem;
+                valB = b.mem;
+                break;
+            case 'name':
+                valA = a.command.toLowerCase();
+                valB = b.command.toLowerCase();
+                break;
+            default:
+                valA = a.cpu;
+                valB = b.cpu;
+        }
+
+        if (valA < valB) return taskManagerSortAsc ? -1 : 1;
+        if (valA > valB) return taskManagerSortAsc ? 1 : -1;
+        return 0;
+    });
+
+    // Update header sort indicators
+    document.querySelectorAll('.task-manager-table th[data-sort]').forEach(th => {
+        th.classList.remove('sorted', 'asc');
+        if (th.dataset.sort === taskManagerSortColumn) {
+            th.classList.add('sorted');
+            if (taskManagerSortAsc) th.classList.add('asc');
+        }
+    });
+
+    // Render rows
+    if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="tm-empty">No processes found</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = filtered.map(p => `
+        <tr data-pid="${p.pid}">
+            <td>${p.pid}</td>
+            <td>${escapeHtml(p.user)}</td>
+            <td>${p.cpu.toFixed(1)}</td>
+            <td>${p.mem.toFixed(1)}</td>
+            <td class="tm-command">
+                <div class="tm-command-wrapper">
+                    <button class="tm-expand-btn" title="Expand/collapse">&#9654;</button>
+                    <span class="tm-command-text" title="${escapeHtml(p.command)}">${escapeHtml(p.command)}</span>
+                </div>
+            </td>
+            <td class="tm-actions">
+                <button class="tm-kill-btn term" data-pid="${p.pid}" data-signal="TERM" title="SIGTERM">Term</button>
+                <button class="tm-kill-btn kill" data-pid="${p.pid}" data-signal="KILL" title="SIGKILL">Kill</button>
+            </td>
+        </tr>
+    `).join('');
+
+    // Attach kill button handlers
+    tbody.querySelectorAll('.tm-kill-btn').forEach(btn => {
+        btn.onclick = () => killProcess(parseInt(btn.dataset.pid), btn.dataset.signal);
+    });
+
+    // Attach expand button handlers and restore expanded state
+    tbody.querySelectorAll('.tm-expand-btn').forEach(btn => {
+        const row = btn.closest('tr');
+        const pid = parseInt(row.dataset.pid);
+        const cell = btn.closest('.tm-command');
+
+        // Restore expanded state
+        if (taskManagerExpandedPids.has(pid)) {
+            cell.classList.add('expanded');
+        }
+
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            cell.classList.toggle('expanded');
+            if (cell.classList.contains('expanded')) {
+                taskManagerExpandedPids.add(pid);
+            } else {
+                taskManagerExpandedPids.delete(pid);
+            }
+        };
+    });
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function killProcess(pid, signal) {
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    try {
+        const resp = await fetch(`${basePath}/terminal/process/kill`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pid, signal }),
+        });
+
+        const data = await resp.json();
+
+        if (resp.ok && data.success) {
+            appendOutput(`${data.message}\n`, 'info');
+            // Refresh the process list
+            setTimeout(fetchTaskManagerData, 500);
+        } else {
+            appendOutput(`Error: ${data.error || 'Failed to kill process'}\n`, 'error');
+        }
+    } catch (e) {
+        console.error('Failed to kill process:', e);
+        appendOutput(`Error: ${e.message}\n`, 'error');
     }
 }
 

@@ -24,6 +24,8 @@ CLOUD_COMMAND_REDIRECTS = {
     "codex": ("https://chatgpt.com/codex", "Codex Cloud"),
     "claude": ("https://claude.ai/code", "Claude Code"),
 }
+# Commands that should open the task manager popup
+TASK_MANAGER_COMMANDS = {"top", "htop"}
 
 
 def init_terminal_socketio(socketio):
@@ -78,6 +80,13 @@ def init_terminal_socketio(socketio):
             emit("output", {"data": f"{command}\nRedirecting to diff editor...\n"})
             emit("editor_redirect", {"url": redirect_url})
             # Ask shell for a fresh prompt so terminal feels natural after interception.
+            session.write("\n")
+            return
+
+        # Check for task manager commands (top, htop)
+        if check_task_manager_command(command):
+            emit("output", {"data": f"{command}\nOpening task manager...\n"})
+            emit("task_manager_popup", {})
             session.write("\n")
             return
 
@@ -214,6 +223,15 @@ def check_editor_redirect(command: str, cwd: str | None = None) -> str | None:
 
     # Editor without file - redirect to file browser
     return "/diff/"
+
+
+def check_task_manager_command(command: str) -> bool:
+    """Check if command should open task manager popup instead of running."""
+    parsed = parse_intercept_command(command)
+    if not parsed:
+        return False
+    parts, idx = parsed
+    return parts[idx] in TASK_MANAGER_COMMANDS
 
 
 @terminal_bp.route("/terminal")
@@ -759,3 +777,148 @@ def _complete_npm_global_packages(prefix: str, cwd: str | None = None) -> set[st
                     pass
 
     return completions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Task Manager Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Store previous CPU times for calculating usage percentage
+_prev_cpu_times: dict[str, int] = {}
+
+
+def _get_cpu_percent() -> float:
+    """Calculate CPU usage percentage from /proc/stat."""
+    global _prev_cpu_times
+    try:
+        with open("/proc/stat") as f:
+            line = f.readline()
+        parts = line.split()
+        # cpu user nice system idle iowait irq softirq steal guest guest_nice
+        times = [int(p) for p in parts[1:8]]
+        total = sum(times)
+        idle = times[3] + times[4]  # idle + iowait
+
+        prev_total = _prev_cpu_times.get("total", 0)
+        prev_idle = _prev_cpu_times.get("idle", 0)
+
+        _prev_cpu_times["total"] = total
+        _prev_cpu_times["idle"] = idle
+
+        if prev_total == 0:
+            return 0.0
+
+        total_diff = total - prev_total
+        idle_diff = idle - prev_idle
+
+        if total_diff == 0:
+            return 0.0
+
+        return round((1.0 - idle_diff / total_diff) * 100, 1)
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def _get_memory_info() -> dict:
+    """Get memory stats from /proc/meminfo."""
+    try:
+        mem = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    key = parts[0].rstrip(":")
+                    val = int(parts[1])  # in kB
+                    mem[key] = val
+
+        total_kb = mem.get("MemTotal", 0)
+        available_kb = mem.get("MemAvailable", mem.get("MemFree", 0))
+        used_kb = total_kb - available_kb
+
+        return {
+            "total_gb": round(total_kb / 1024 / 1024, 2),
+            "used_gb": round(used_kb / 1024 / 1024, 2),
+            "percent": round(used_kb / total_kb * 100, 1) if total_kb > 0 else 0.0,
+        }
+    except (OSError, ValueError):
+        return {"total_gb": 0, "used_gb": 0, "percent": 0}
+
+
+def _get_processes() -> list[dict]:
+    """Get process list using ps aux."""
+    processes = []
+    try:
+        result = subprocess.run(
+            ["ps", "aux", "--sort=-%cpu"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().split("\n")
+            # Skip header line
+            for line in lines[1:100]:  # Limit to top 100 processes
+                parts = line.split(None, 10)
+                if len(parts) >= 11:
+                    processes.append({
+                        "user": parts[0],
+                        "pid": int(parts[1]),
+                        "cpu": float(parts[2]),
+                        "mem": float(parts[3]),
+                        "vsz": int(parts[4]),
+                        "rss": int(parts[5]),
+                        "tty": parts[6],
+                        "stat": parts[7],
+                        "start": parts[8],
+                        "time": parts[9],
+                        "command": parts[10],
+                    })
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        pass
+    return processes
+
+
+@terminal_bp.route("/terminal/processes")
+def get_processes():
+    """Return system stats and process list for task manager."""
+    return jsonify({
+        "cpu_percent": _get_cpu_percent(),
+        "memory": _get_memory_info(),
+        "processes": _get_processes(),
+    })
+
+
+@terminal_bp.route("/terminal/process/kill", methods=["POST"])
+def kill_process():
+    """Kill a process by PID."""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Missing request body"}), 400
+
+    pid = data.get("pid")
+    signal_name = data.get("signal", "TERM")
+
+    if not pid or not isinstance(pid, int):
+        return jsonify({"error": "Invalid PID"}), 400
+
+    if signal_name not in ("TERM", "KILL"):
+        return jsonify({"error": "Invalid signal (use TERM or KILL)"}), 400
+
+    sig = "-SIGTERM" if signal_name == "TERM" else "-SIGKILL"
+
+    try:
+        result = subprocess.run(
+            ["kill", sig, str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return jsonify({"success": True, "message": f"Sent {signal_name} to PID {pid}"})
+        else:
+            error = result.stderr.strip() or f"Failed to kill process {pid}"
+            return jsonify({"error": error}), 400
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Kill command timed out"}), 500
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
