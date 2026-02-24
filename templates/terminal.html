@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terminal</title>
+    <link rel="stylesheet" href="{{ static_url('style.css') }}">
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="/diff/" class="logo">Terminal</a>
+            <span class="spacer"></span>
+            <span class="terminal-title">{{ cwd or '~' }}</span>
+            <span id="status" class="status">Connecting...</span>
+            <button id="btn-raise-terminal" title="Raise or lower terminal panel">Raise Panel</button>
+            <button id="btn-clear" title="Clear output">Clear</button>
+        </nav>
+    </header>
+    <main>
+        <div class="terminal-container">
+            <div id="terminal-output" class="terminal-output"></div>
+            <div class="terminal-input-area">
+                <div class="special-keys">
+                    <button class="key-btn" data-signal="SIGINT" title="Ctrl+C">^C</button>
+                    <button class="key-btn" data-signal="EOF" title="Ctrl+D">^D</button>
+                    <button class="key-btn" data-signal="SIGTSTP" title="Ctrl+Z">^Z</button>
+                    <button class="key-btn" data-signal="SIGQUIT" title="Ctrl+\">^\</button>
+                    <button class="key-btn" data-action="delete-word" title="Ctrl+W">^W</button>
+                    <button class="key-btn" data-action="search" title="Ctrl+R">^R</button>
+                    <button class="key-btn" data-history="up" title="Previous command">&#x2191;</button>
+                    <button class="key-btn" data-history="down" title="Next command">&#x2193;</button>
+                    <button class="key-btn" data-action="complete" title="Tab completion">Tab</button>
+                </div>
+                <div class="input-row">
+                    <textarea
+                        id="terminal-input"
+                        class="terminal-input"
+                        placeholder="Enter command..."
+                        rows="1"
+                        autocomplete="off"
+                        autocapitalize="off"
+                        spellcheck="false"
+                    ></textarea>
+                    <button id="btn-send" class="btn-primary" title="Send (Enter)">Send</button>
+                </div>
+            </div>
+        </div>
+    </main>
+    <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.4/dist/socket.io.min.js"></script>
+    <script src="{{ static_url('js/terminal.js') }}"></script>
+</body>
+</html>

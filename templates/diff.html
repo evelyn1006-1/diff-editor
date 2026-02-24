@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}{{ file_path | basename }} - Diff Editor{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/editor/editor.main.css">
+{% endblock %}
+
+{% block nav %}
+<span class="file-path" title="{{ file_path }}">{{ file_path }}</span>
+<span id="status" class="status"></span>
+<button id="btn-ai-review" title="Get AI review of changes">AI Review</button>
+<button id="btn-wrap" title="Toggle line wrapping">Wrap</button>
+<button id="btn-save" class="btn-primary" disabled>Save</button>
+{% endblock %}
+
+{% block content %}
+<div id="editor-container"></div>
+<div id="ai-review-panel" class="ai-review-panel hidden">
+    <div class="ai-review-header">
+        <span>AI Review</span>
+        <button id="btn-close-review" title="Close">&times;</button>
+    </div>
+    <div id="ai-review-content" class="ai-review-content">
+        <div class="loading">Analyzing changes...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    window.FILE_PATH = {{ file_path | tojson }};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+<script src="{{ static_url('js/diff-editor.js') }}"></script>
+{% endblock %}

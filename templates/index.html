@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}File Browser - Diff Editor{% endblock %}
+
+{% block nav %}
+<a href="/terminal" id="btn-terminal" title="Open terminal">Terminal</a>
+{% endblock %}
+
+{% block content %}
+<div class="browser-container">
+    <div class="browser-header">
+        <button id="btn-up" title="Go up">../</button>
+        <button id="btn-new-file" title="Create a new file in this directory">New File</button>
+        <input type="text" id="path-input" value="{{ default_root }}" placeholder="/path/to/directory">
+        <label class="toggle">
+            <input type="checkbox" id="show-hidden">
+            <span>Show hidden</span>
+        </label>
+    </div>
+
+    {% if error %}
+    <div class="error-box">{{ error }}</div>
+    {% endif %}
+
+    <div id="file-list" class="file-list">
+        <div class="loading">Loading...</div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_url('js/file-browser.js') }}"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        initFileBrowser({{ default_root | tojson }});
+    });
+</script>
+{% endblock %}

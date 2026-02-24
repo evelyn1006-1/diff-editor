@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Diff Editor{% endblock %}</title>
+    <link rel="stylesheet" href="{{ static_url('style.css') }}">
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header>
+        <nav>
+            <a href="{{ url_for('index') }}" class="logo">Diff Editor</a>
+            <span class="spacer"></span>
+            {% block nav %}{% endblock %}
+        </nav>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+        window.CSRF_TOKEN = {{ csrf_token() | tojson }};
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
