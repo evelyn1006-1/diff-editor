@@ -712,6 +712,7 @@ let taskManagerTreeMode = false;
 let taskManagerStatsExpanded = false;
 let taskManagerSignalSelections = new Map();  // PID -> selected signal
 let taskManagerProcessDetails = new Map();    // PID -> {ports, connections, loading}
+let taskManagerOpenMenuPid = null;            // PID with open signal dropdown
 
 function openTaskManager() {
     const overlay = document.getElementById('task-manager-overlay');
@@ -796,6 +797,7 @@ function closeTaskManager() {
     taskManagerExpandedDetails.clear();
     taskManagerSignalSelections.clear();
     taskManagerProcessDetails.clear();
+    taskManagerOpenMenuPid = null;
     taskManagerTreeMode = false;
     taskManagerStatsExpanded = false;
 
@@ -1004,10 +1006,10 @@ function renderTaskManagerTable() {
                     <button class="tm-split-main" title="Send ${savedSignal}">${savedSignal}</button>
                     <button class="tm-split-arrow" title="Choose signal">&#9662;</button>
                     <div class="tm-split-menu hidden">
-                        <div class="tm-split-option${savedSignal === 'TERM' ? ' selected' : ''}" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful</span></div>
-                        <div class="tm-split-option${savedSignal === 'HUP' ? ' selected' : ''}" data-signal="HUP">HUP <span class="tm-sig-desc">Reload</span></div>
+                        <div class="tm-split-option${savedSignal === 'TERM' ? ' selected' : ''}" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful stop</span></div>
+                        <div class="tm-split-option${savedSignal === 'HUP' ? ' selected' : ''}" data-signal="HUP">HUP <span class="tm-sig-desc">Restart/reload</span></div>
                         <div class="tm-split-option${savedSignal === 'INT' ? ' selected' : ''}" data-signal="INT">INT <span class="tm-sig-desc">Interrupt</span></div>
-                        <div class="tm-split-option${savedSignal === 'KILL' ? ' selected' : ''}" data-signal="KILL">KILL <span class="tm-sig-desc">Force</span></div>
+                        <div class="tm-split-option${savedSignal === 'KILL' ? ' selected' : ''}" data-signal="KILL">KILL <span class="tm-sig-desc">Force kill</span></div>
                         <div class="tm-split-option${savedSignal === 'STOP' ? ' selected' : ''}" data-signal="STOP">STOP <span class="tm-sig-desc">Pause</span></div>
                         <div class="tm-split-option${savedSignal === 'CONT' ? ' selected' : ''}" data-signal="CONT">CONT <span class="tm-sig-desc">Resume</span></div>
                     </div>
@@ -1024,6 +1026,11 @@ function renderTaskManagerTable() {
         const arrowBtn = container.querySelector('.tm-split-arrow');
         const menu = container.querySelector('.tm-split-menu');
 
+        // Restore open menu state after refresh
+        if (taskManagerOpenMenuPid === pid) {
+            menu.classList.remove('hidden');
+        }
+
         // Main button sends the signal
         mainBtn.onclick = (e) => {
             e.stopPropagation();
@@ -1038,10 +1045,11 @@ function renderTaskManagerTable() {
             document.querySelectorAll('.tm-split-menu').forEach(m => {
                 if (m !== menu) m.classList.add('hidden');
             });
-            menu.classList.toggle('hidden');
+            const nowHidden = menu.classList.toggle('hidden');
+            taskManagerOpenMenuPid = nowHidden ? null : pid;
         };
 
-        // Menu option selection
+        // Menu option selection - send signal immediately
         menu.querySelectorAll('.tm-split-option').forEach(opt => {
             opt.onclick = (e) => {
                 e.stopPropagation();
@@ -1052,6 +1060,9 @@ function renderTaskManagerTable() {
                 menu.querySelectorAll('.tm-split-option').forEach(o => o.classList.remove('selected'));
                 opt.classList.add('selected');
                 menu.classList.add('hidden');
+                taskManagerOpenMenuPid = null;
+                // Send signal immediately
+                killProcess(pid, signal);
             };
         });
     });
@@ -1059,6 +1070,7 @@ function renderTaskManagerTable() {
     // Close menus when clicking elsewhere
     document.addEventListener('click', () => {
         document.querySelectorAll('.tm-split-menu').forEach(m => m.classList.add('hidden'));
+        taskManagerOpenMenuPid = null;
     }, { once: true });
 
     // Attach command text click handlers (click text to expand/collapse command)
