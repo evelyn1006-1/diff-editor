@@ -838,30 +838,183 @@ body.terminal-raised {
 
 .task-manager-stats {
     display: flex;
-    gap: 2rem;
+    flex-direction: column;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-secondary);
 }
 
-.tm-stat {
+.tm-stat-row {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+}
+
+.tm-stat-main {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    flex: 1;
+    min-width: 150px;
 }
 
 .tm-stat-label {
     font-family: 'Comic Neue', sans-serif;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     color: var(--text-secondary);
     font-weight: 600;
+    min-width: 50px;
 }
 
 .tm-stat-value {
     font-family: "SF Mono", Monaco, monospace;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     color: var(--accent);
     font-weight: 600;
+    min-width: 45px;
+    text-align: right;
+}
+
+/* Progress bars */
+.tm-bar {
+    flex: 1;
+    height: 12px;
+    background: var(--bg-primary);
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    min-width: 80px;
+}
+
+.tm-bar-small {
+    height: 8px;
+    min-width: 50px;
+    flex: 0 0 50px;
+}
+
+.tm-bar-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 0.3s ease;
+}
+
+.tm-bar-fill.cpu {
+    background: linear-gradient(90deg, var(--accent), #e84899);
+}
+
+.tm-bar-fill.mem {
+    background: linear-gradient(90deg, #27ae60, #2ecc71);
+}
+
+.tm-bar-fill.swap {
+    background: linear-gradient(90deg, #e67e22, #f39c12);
+}
+
+.tm-bar-fill.core {
+    background: linear-gradient(90deg, #9b59b6, #8e44ad);
+}
+
+.tm-expand-stats-btn {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    transition: transform 0.2s ease;
+}
+
+.tm-expand-stats-btn:hover {
+    color: var(--accent);
+    background: none;
+    transform: none;
+}
+
+.tm-expand-stats-btn.expanded {
+    transform: rotate(180deg);
+}
+
+/* Expandable stats detail */
+.tm-stats-detail {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+}
+
+.tm-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+}
+
+.tm-detail-section {
+    background: var(--panel-bg);
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+}
+
+.tm-detail-title {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 0.4rem;
+}
+
+.tm-detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    padding: 0.15rem 0;
+    color: var(--text-secondary);
+}
+
+.tm-detail-row span:last-child {
+    font-family: "SF Mono", Monaco, monospace;
+    color: var(--text-primary);
+}
+
+.tm-cores {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.tm-core-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.75rem;
+}
+
+.tm-core-row span {
+    min-width: 30px;
+    color: var(--text-secondary);
+}
+
+.tm-core-row .tm-bar {
+    height: 8px;
+    flex: 1;
+}
+
+.tm-core-row .tm-stat-value {
+    font-size: 0.7rem;
+    min-width: 35px;
+}
+
+/* Tree view toggle */
+.tm-tree-btn {
+    padding: 0.5rem 0.75rem;
+}
+
+.tm-tree-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
 }
 
 .task-manager-controls {
@@ -992,6 +1145,74 @@ body.terminal-raised {
     word-break: break-all;
 }
 
+.tm-command-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+    flex: 1;
+}
+
+/* Process details (ports, connections) */
+.tm-details {
+    font-size: 0.75rem;
+    padding: 0.35rem 0.5rem;
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    margin-top: 0.25rem;
+    border-left: 2px solid var(--accent);
+    display: none;
+}
+
+.tm-command.expanded .tm-details {
+    display: block;
+}
+
+.tm-details-loading {
+    color: var(--accent);
+    font-style: italic;
+}
+
+.tm-details-error {
+    color: #e74c3c;
+}
+
+.tm-detail-row {
+    padding: 0.1rem 0;
+    color: var(--text-secondary);
+}
+
+.tm-detail-label {
+    color: var(--accent);
+    font-weight: 600;
+    margin-right: 0.25rem;
+}
+
+.tm-detail-none {
+    font-style: italic;
+    color: var(--text-secondary);
+    opacity: 0.7;
+}
+
+.tm-port {
+    display: inline-block;
+    background: rgba(214, 51, 132, 0.15);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    margin-right: 0.25rem;
+    font-family: "SF Mono", Monaco, monospace;
+    color: var(--accent);
+}
+
+/* Ancestor rows (dimmed when filtering in tree mode) */
+.task-manager-table tr.tm-tree-ancestor {
+    opacity: 0.55;
+}
+
+.task-manager-table tr.tm-tree-ancestor td {
+    color: var(--text-secondary);
+}
+
 .tm-expand-btn {
     display: inline-flex;
     align-items: center;
@@ -1020,30 +1241,55 @@ body.terminal-raised {
 .tm-actions {
     display: flex;
     gap: 0.25rem;
+    align-items: center;
 }
 
-.tm-kill-btn {
+.tm-signal-btn {
     padding: 0.25rem 0.5rem;
     font-size: 0.75rem;
     border-radius: 8px;
-}
-
-.tm-kill-btn.term {
     color: #e67e22;
     border-color: #e67e22;
 }
 
-.tm-kill-btn.term:hover {
+.tm-signal-btn:hover {
     background: rgba(230, 126, 34, 0.15);
 }
 
-.tm-kill-btn.kill {
-    color: var(--error);
-    border-color: var(--error);
+.tm-signal-select {
+    padding: 0.2rem 0.3rem;
+    font-size: 0.7rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
 }
 
-.tm-kill-btn.kill:hover {
-    background: var(--error-bg);
+.tm-signal-select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* Tree view */
+.tm-tree-indent {
+    display: inline-block;
+    width: 1rem;
+    color: var(--border);
+    text-align: center;
+}
+
+.tm-tree-branch {
+    color: var(--text-secondary);
+    font-family: monospace;
+}
+
+.task-manager-table tr.tm-tree-child {
+    background: rgba(214, 51, 132, 0.03);
+}
+
+.task-manager-table tr.tm-tree-child:hover {
+    background: rgba(214, 51, 132, 0.08);
 }
 
 .tm-empty {

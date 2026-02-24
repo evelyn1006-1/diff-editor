@@ -707,6 +707,10 @@ let taskManagerSortColumn = 'cpu';
 let taskManagerSortAsc = false;
 let taskManagerFilter = '';
 let taskManagerExpandedPids = new Set();
+let taskManagerTreeMode = false;
+let taskManagerStatsExpanded = false;
+let taskManagerSignalSelections = new Map();  // PID -> selected signal
+let taskManagerProcessDetails = new Map();    // PID -> {ports, connections, loading}
 
 function openTaskManager() {
     const overlay = document.getElementById('task-manager-overlay');
@@ -719,6 +723,8 @@ function openTaskManager() {
     const filterInput = document.getElementById('tm-filter');
     const sortSelect = document.getElementById('tm-sort');
     const refreshBtn = document.getElementById('tm-refresh');
+    const expandStatsBtn = document.getElementById('tm-expand-stats');
+    const treeToggleBtn = document.getElementById('tm-tree-toggle');
 
     closeBtn.onclick = closeTaskManager;
     filterInput.oninput = (e) => {
@@ -730,6 +736,20 @@ function openTaskManager() {
         renderTaskManagerTable();
     };
     refreshBtn.onclick = fetchTaskManagerData;
+
+    // Expand/collapse stats
+    expandStatsBtn.onclick = () => {
+        taskManagerStatsExpanded = !taskManagerStatsExpanded;
+        document.getElementById('tm-stats-detail').classList.toggle('hidden', !taskManagerStatsExpanded);
+        expandStatsBtn.classList.toggle('expanded', taskManagerStatsExpanded);
+    };
+
+    // Tree view toggle
+    treeToggleBtn.onclick = () => {
+        taskManagerTreeMode = !taskManagerTreeMode;
+        treeToggleBtn.classList.toggle('active', taskManagerTreeMode);
+        renderTaskManagerTable();
+    };
 
     // Close on overlay click
     overlay.onclick = (e) => {
@@ -772,6 +792,15 @@ function closeTaskManager() {
     }
     document.removeEventListener('keydown', handleTaskManagerKeydown);
     taskManagerExpandedPids.clear();
+    taskManagerSignalSelections.clear();
+    taskManagerProcessDetails.clear();
+    taskManagerTreeMode = false;
+    taskManagerStatsExpanded = false;
+
+    // Reset UI state
+    document.getElementById('tm-stats-detail')?.classList.add('hidden');
+    document.getElementById('tm-expand-stats')?.classList.remove('expanded');
+    document.getElementById('tm-tree-toggle')?.classList.remove('active');
 
     // Return focus to terminal input
     document.getElementById('terminal-input')?.focus();
@@ -796,11 +825,19 @@ async function fetchTaskManagerData() {
 
         const data = await resp.json();
 
-        // Update stats display
-        document.getElementById('tm-cpu').textContent = `${data.cpu_percent}%`;
+        // Update main stats with bars
+        const cpuPercent = data.cpu_percent || 0;
+        document.getElementById('tm-cpu').textContent = `${cpuPercent}%`;
+        document.getElementById('tm-cpu-bar').style.width = `${cpuPercent}%`;
+
         const mem = data.memory;
-        document.getElementById('tm-memory').textContent =
-            `${mem.used_gb} / ${mem.total_gb} GB (${mem.percent}%)`;
+        document.getElementById('tm-memory').textContent = `${mem.percent}%`;
+        document.getElementById('tm-mem-bar').style.width = `${mem.percent}%`;
+
+        // Update expanded stats if visible
+        if (taskManagerStatsExpanded) {
+            updateExpandedStats(data);
+        }
 
         // Store processes and render
         taskManagerProcesses = data.processes || [];
@@ -810,53 +847,107 @@ async function fetchTaskManagerData() {
     }
 }
 
+function updateExpandedStats(data) {
+    // System info
+    document.getElementById('tm-uptime').textContent = data.uptime?.formatted || '-';
+    const load = data.load;
+    if (load) {
+        document.getElementById('tm-load').textContent = `${load['1min']} / ${load['5min']} / ${load['15min']}`;
+    }
+    const counts = data.process_counts;
+    if (counts) {
+        document.getElementById('tm-proc-counts').textContent =
+            `${counts.total} (${counts.running}R ${counts.sleeping}S ${counts.zombie}Z)`;
+    }
+
+    // CPU breakdown
+    const cpu = data.cpu;
+    if (cpu?.breakdown) {
+        document.getElementById('tm-cpu-user').textContent = `${cpu.breakdown.user}%`;
+        document.getElementById('tm-cpu-system').textContent = `${cpu.breakdown.system}%`;
+        document.getElementById('tm-cpu-iowait').textContent = `${cpu.breakdown.iowait}%`;
+    }
+
+    // Memory breakdown
+    const mem = data.memory;
+    if (mem) {
+        document.getElementById('tm-mem-used').textContent = `${mem.used_gb} / ${mem.total_gb} GB`;
+        document.getElementById('tm-mem-buffers').textContent = `${mem.buffers_mb} MB`;
+        document.getElementById('tm-mem-cached').textContent = `${mem.cached_mb} MB`;
+        document.getElementById('tm-swap').textContent =
+            `${mem.swap_used_gb} / ${mem.swap_total_gb} GB`;
+        document.getElementById('tm-swap-bar').style.width = `${mem.swap_percent}%`;
+    }
+
+    // Per-core CPU
+    const coresEl = document.getElementById('tm-cores');
+    if (cpu?.cores && coresEl) {
+        coresEl.innerHTML = cpu.cores.map(core => `
+            <div class="tm-core-row">
+                <span>${core.name.replace('cpu', 'Core ')}</span>
+                <div class="tm-bar">
+                    <div class="tm-bar-fill core" style="width: ${core.percent}%"></div>
+                </div>
+                <span class="tm-stat-value">${core.percent}%</span>
+            </div>
+        `).join('');
+    }
+}
+
 function renderTaskManagerTable() {
     const tbody = document.getElementById('tm-process-list');
     if (!tbody) return;
 
-    // Filter processes
-    let filtered = taskManagerProcesses;
-    if (taskManagerFilter) {
-        filtered = filtered.filter(p =>
-            p.command.toLowerCase().includes(taskManagerFilter) ||
-            p.user.toLowerCase().includes(taskManagerFilter) ||
-            String(p.pid).includes(taskManagerFilter)
-        );
-    }
-
-    // Sort processes
-    filtered.sort((a, b) => {
-        let valA, valB;
-        switch (taskManagerSortColumn) {
-            case 'pid':
-                valA = a.pid;
-                valB = b.pid;
-                break;
-            case 'user':
-                valA = a.user.toLowerCase();
-                valB = b.user.toLowerCase();
-                break;
-            case 'cpu':
-                valA = a.cpu;
-                valB = b.cpu;
-                break;
-            case 'mem':
-                valA = a.mem;
-                valB = b.mem;
-                break;
-            case 'name':
-                valA = a.command.toLowerCase();
-                valB = b.command.toLowerCase();
-                break;
-            default:
-                valA = a.cpu;
-                valB = b.cpu;
+    // Build tree structure or filter/sort flat list
+    let displayList;
+    if (taskManagerTreeMode) {
+        // In tree mode, build tree with optional filter
+        displayList = buildProcessTree(taskManagerProcesses, taskManagerFilter);
+    } else {
+        // Flat view with filter
+        let filtered = taskManagerProcesses;
+        if (taskManagerFilter) {
+            filtered = filtered.filter(p =>
+                p.command.toLowerCase().includes(taskManagerFilter) ||
+                p.user.toLowerCase().includes(taskManagerFilter) ||
+                String(p.pid).includes(taskManagerFilter)
+            );
         }
+        // Sort processes for flat view
+        filtered.sort((a, b) => {
+            let valA, valB;
+            switch (taskManagerSortColumn) {
+                case 'pid':
+                    valA = a.pid;
+                    valB = b.pid;
+                    break;
+                case 'user':
+                    valA = a.user.toLowerCase();
+                    valB = b.user.toLowerCase();
+                    break;
+                case 'cpu':
+                    valA = a.cpu;
+                    valB = b.cpu;
+                    break;
+                case 'mem':
+                    valA = a.mem;
+                    valB = b.mem;
+                    break;
+                case 'name':
+                    valA = a.command.toLowerCase();
+                    valB = b.command.toLowerCase();
+                    break;
+                default:
+                    valA = a.cpu;
+                    valB = b.cpu;
+            }
 
-        if (valA < valB) return taskManagerSortAsc ? -1 : 1;
-        if (valA > valB) return taskManagerSortAsc ? 1 : -1;
-        return 0;
-    });
+            if (valA < valB) return taskManagerSortAsc ? -1 : 1;
+            if (valA > valB) return taskManagerSortAsc ? 1 : -1;
+            return 0;
+        });
+        displayList = filtered.map(p => ({ ...p, depth: 0 }));
+    }
 
     // Update header sort indicators
     document.querySelectorAll('.task-manager-table th[data-sort]').forEach(th => {
@@ -868,33 +959,64 @@ function renderTaskManagerTable() {
     });
 
     // Render rows
-    if (filtered.length === 0) {
+    if (displayList.length === 0) {
         tbody.innerHTML = '<tr><td colspan="6" class="tm-empty">No processes found</td></tr>';
         return;
     }
 
-    tbody.innerHTML = filtered.map(p => `
-        <tr data-pid="${p.pid}">
+    tbody.innerHTML = displayList.map(p => {
+        const indent = taskManagerTreeMode ? '<span class="tm-tree-indent"></span>'.repeat(p.depth) : '';
+        const branch = taskManagerTreeMode && p.depth > 0 ? '<span class="tm-tree-branch">└─</span>' : '';
+        const childClass = taskManagerTreeMode && p.depth > 0 ? ' tm-tree-child' : '';
+        const matchClass = p.isMatch === false ? ' tm-tree-ancestor' : '';
+        const savedSignal = taskManagerSignalSelections.get(p.pid) || 'TERM';
+        const details = taskManagerProcessDetails.get(p.pid);
+        const detailsHtml = details ? formatProcessDetails(details) : '';
+
+        return `
+        <tr data-pid="${p.pid}" class="${childClass}${matchClass}">
             <td>${p.pid}</td>
             <td>${escapeHtml(p.user)}</td>
             <td>${p.cpu.toFixed(1)}</td>
             <td>${p.mem.toFixed(1)}</td>
             <td class="tm-command">
                 <div class="tm-command-wrapper">
-                    <button class="tm-expand-btn" title="Expand/collapse">&#9654;</button>
-                    <span class="tm-command-text" title="${escapeHtml(p.command)}">${escapeHtml(p.command)}</span>
+                    <button class="tm-expand-btn" title="Expand/collapse (shows ports & network)">&#9654;</button>
+                    <div class="tm-command-content">
+                        <span class="tm-command-text" title="${escapeHtml(p.command)}">${indent}${branch}${escapeHtml(p.command)}</span>
+                        ${detailsHtml}
+                    </div>
                 </div>
             </td>
             <td class="tm-actions">
-                <button class="tm-kill-btn term" data-pid="${p.pid}" data-signal="TERM" title="SIGTERM">Term</button>
-                <button class="tm-kill-btn kill" data-pid="${p.pid}" data-signal="KILL" title="SIGKILL">Kill</button>
+                <button class="tm-signal-btn" data-pid="${p.pid}" title="Send signal">Send</button>
+                <select class="tm-signal-select" data-pid="${p.pid}">
+                    <option value="TERM"${savedSignal === 'TERM' ? ' selected' : ''}>TERM</option>
+                    <option value="HUP"${savedSignal === 'HUP' ? ' selected' : ''}>HUP</option>
+                    <option value="INT"${savedSignal === 'INT' ? ' selected' : ''}>INT</option>
+                    <option value="KILL"${savedSignal === 'KILL' ? ' selected' : ''}>KILL</option>
+                    <option value="STOP"${savedSignal === 'STOP' ? ' selected' : ''}>STOP</option>
+                    <option value="CONT"${savedSignal === 'CONT' ? ' selected' : ''}>CONT</option>
+                </select>
             </td>
         </tr>
-    `).join('');
+    `;
+    }).join('');
 
-    // Attach kill button handlers
-    tbody.querySelectorAll('.tm-kill-btn').forEach(btn => {
-        btn.onclick = () => killProcess(parseInt(btn.dataset.pid), btn.dataset.signal);
+    // Attach signal button and dropdown handlers
+    tbody.querySelectorAll('.tm-signal-btn').forEach(btn => {
+        btn.onclick = () => {
+            const pid = parseInt(btn.dataset.pid);
+            const select = btn.nextElementSibling;
+            const signal = select.value;
+            killProcess(pid, signal);
+        };
+    });
+    tbody.querySelectorAll('.tm-signal-select').forEach(select => {
+        select.onchange = () => {
+            const pid = parseInt(select.dataset.pid);
+            taskManagerSignalSelections.set(pid, select.value);
+        };
     });
 
     // Attach expand button handlers and restore expanded state
@@ -910,9 +1032,14 @@ function renderTaskManagerTable() {
 
         btn.onclick = (e) => {
             e.stopPropagation();
+            const wasExpanded = cell.classList.contains('expanded');
             cell.classList.toggle('expanded');
-            if (cell.classList.contains('expanded')) {
+            if (!wasExpanded) {
                 taskManagerExpandedPids.add(pid);
+                // Fetch details if not already loaded
+                if (!taskManagerProcessDetails.has(pid)) {
+                    fetchProcessDetails(pid);
+                }
             } else {
                 taskManagerExpandedPids.delete(pid);
             }
@@ -920,10 +1047,175 @@ function renderTaskManagerTable() {
     });
 }
 
+function buildProcessTree(processes, filter = '') {
+    // Build a map of pid -> process
+    const byPid = new Map();
+    processes.forEach(p => byPid.set(p.pid, { ...p, children: [], depth: 0, isMatch: true }));
+
+    // If filtering, find matching processes and their ancestors
+    let matchingPids = new Set();
+    if (filter) {
+        const lowerFilter = filter.toLowerCase();
+        // First pass: find direct matches
+        byPid.forEach((p, pid) => {
+            if (p.command.toLowerCase().includes(lowerFilter) ||
+                p.user.toLowerCase().includes(lowerFilter) ||
+                String(pid).includes(lowerFilter)) {
+                matchingPids.add(pid);
+                p.isMatch = true;
+            } else {
+                p.isMatch = false;
+            }
+        });
+
+        // Second pass: add all ancestors of matching processes
+        const ancestorsToAdd = new Set();
+        matchingPids.forEach(pid => {
+            let current = byPid.get(pid);
+            while (current) {
+                const parent = byPid.get(current.ppid);
+                if (parent && parent.pid !== current.pid && !matchingPids.has(parent.pid)) {
+                    ancestorsToAdd.add(parent.pid);
+                }
+                current = parent;
+            }
+        });
+
+        // Mark ancestors (they're visible but not the actual matches)
+        ancestorsToAdd.forEach(pid => {
+            const p = byPid.get(pid);
+            if (p) p.isMatch = false;  // ancestor, not a direct match
+        });
+
+        // Combine matches and ancestors
+        const visiblePids = new Set([...matchingPids, ...ancestorsToAdd]);
+
+        // Remove processes that aren't visible
+        byPid.forEach((_, pid) => {
+            if (!visiblePids.has(pid)) {
+                byPid.delete(pid);
+            }
+        });
+    }
+
+    // Build tree structure
+    const roots = [];
+    byPid.forEach(p => {
+        const parent = byPid.get(p.ppid);
+        if (parent && parent.pid !== p.pid) {
+            parent.children.push(p);
+        } else {
+            roots.push(p);
+        }
+    });
+
+    // Sort roots by CPU (descending), but prioritize matches when filtering
+    roots.sort((a, b) => {
+        if (filter) {
+            // Matches first
+            if (a.isMatch && !b.isMatch) return -1;
+            if (!a.isMatch && b.isMatch) return 1;
+        }
+        return b.cpu - a.cpu;
+    });
+
+    // Flatten tree to list with depth info
+    const result = [];
+    function flatten(node, depth) {
+        node.depth = depth;
+        result.push(node);
+        // Sort children by CPU, matches first when filtering
+        node.children.sort((a, b) => {
+            if (filter) {
+                if (a.isMatch && !b.isMatch) return -1;
+                if (!a.isMatch && b.isMatch) return 1;
+            }
+            return b.cpu - a.cpu;
+        });
+        node.children.forEach(child => flatten(child, depth + 1));
+    }
+    roots.forEach(root => flatten(root, 0));
+
+    return result;
+}
+
 function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+async function fetchProcessDetails(pid) {
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    // Mark as loading
+    taskManagerProcessDetails.set(pid, { loading: true, ports: [], connections: [] });
+    renderTaskManagerTable();
+
+    try {
+        const resp = await fetch(`${basePath}/terminal/process/${pid}/details`);
+        if (!resp.ok) {
+            taskManagerProcessDetails.set(pid, { loading: false, error: 'Failed to fetch', ports: [], connections: [] });
+            renderTaskManagerTable();
+            return;
+        }
+
+        const data = await resp.json();
+        taskManagerProcessDetails.set(pid, {
+            loading: false,
+            ports: data.ports || [],
+            connections: data.connections || [],
+            netRate: data.net_rate || null,
+        });
+        renderTaskManagerTable();
+    } catch (e) {
+        console.error('Failed to fetch process details:', e);
+        taskManagerProcessDetails.set(pid, { loading: false, error: e.message, ports: [], connections: [] });
+        renderTaskManagerTable();
+    }
+}
+
+function formatProcessDetails(details) {
+    if (details.loading) {
+        return '<div class="tm-details tm-details-loading">Loading...</div>';
+    }
+    if (details.error) {
+        return `<div class="tm-details tm-details-error">${escapeHtml(details.error)}</div>`;
+    }
+
+    const parts = [];
+
+    // Listening ports
+    if (details.ports && details.ports.length > 0) {
+        const portList = details.ports.map(p => {
+            const addr = p.local_addr === '*' || p.local_addr === '0.0.0.0' || p.local_addr === '::'
+                ? `*:${p.local_port}`
+                : `${p.local_addr}:${p.local_port}`;
+            return `<span class="tm-port">${escapeHtml(addr)}</span>`;
+        }).join(' ');
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Ports:</span> ${portList}</div>`);
+    }
+
+    // Active connections (show count + sample)
+    if (details.connections && details.connections.length > 0) {
+        const connCount = details.connections.length;
+        const sample = details.connections.slice(0, 3).map(c =>
+            `${c.remote_addr}:${c.remote_port}`
+        ).join(', ');
+        const more = connCount > 3 ? ` (+${connCount - 3} more)` : '';
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Connections:</span> ${escapeHtml(sample)}${more}</div>`);
+    }
+
+    // Network rate if available
+    if (details.netRate) {
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Net I/O:</span> ↓${details.netRate.rx}/s ↑${details.netRate.tx}/s</div>`);
+    }
+
+    if (parts.length === 0) {
+        parts.push('<div class="tm-detail-row tm-detail-none">No network activity</div>');
+    }
+
+    return `<div class="tm-details">${parts.join('')}</div>`;
 }
 
 async function killProcess(pid, signal) {

@@ -55,13 +55,55 @@
                     <button id="tm-close" class="tm-close-btn" title="Close">&times;</button>
                 </div>
                 <div class="task-manager-stats">
-                    <div class="tm-stat">
-                        <span class="tm-stat-label">CPU</span>
-                        <span id="tm-cpu" class="tm-stat-value">0%</span>
+                    <div class="tm-stat-row">
+                        <div class="tm-stat-main">
+                            <span class="tm-stat-label">CPU</span>
+                            <div class="tm-bar">
+                                <div id="tm-cpu-bar" class="tm-bar-fill cpu"></div>
+                            </div>
+                            <span id="tm-cpu" class="tm-stat-value">0%</span>
+                        </div>
+                        <div class="tm-stat-main">
+                            <span class="tm-stat-label">Memory</span>
+                            <div class="tm-bar">
+                                <div id="tm-mem-bar" class="tm-bar-fill mem"></div>
+                            </div>
+                            <span id="tm-memory" class="tm-stat-value">0%</span>
+                        </div>
+                        <button id="tm-expand-stats" class="tm-expand-stats-btn" title="Show detailed stats">&#9660;</button>
                     </div>
-                    <div class="tm-stat">
-                        <span class="tm-stat-label">Memory</span>
-                        <span id="tm-memory" class="tm-stat-value">0 / 0 GB (0%)</span>
+                    <div id="tm-stats-detail" class="tm-stats-detail hidden">
+                        <div class="tm-stats-grid">
+                            <div class="tm-detail-section">
+                                <div class="tm-detail-title">System</div>
+                                <div class="tm-detail-row"><span>Uptime</span><span id="tm-uptime">-</span></div>
+                                <div class="tm-detail-row"><span>Load</span><span id="tm-load">-</span></div>
+                                <div class="tm-detail-row"><span>Processes</span><span id="tm-proc-counts">-</span></div>
+                            </div>
+                            <div class="tm-detail-section">
+                                <div class="tm-detail-title">CPU Breakdown</div>
+                                <div class="tm-detail-row"><span>User</span><span id="tm-cpu-user">-</span></div>
+                                <div class="tm-detail-row"><span>System</span><span id="tm-cpu-system">-</span></div>
+                                <div class="tm-detail-row"><span>I/O Wait</span><span id="tm-cpu-iowait">-</span></div>
+                            </div>
+                            <div class="tm-detail-section">
+                                <div class="tm-detail-title">Memory</div>
+                                <div class="tm-detail-row"><span>Used</span><span id="tm-mem-used">-</span></div>
+                                <div class="tm-detail-row"><span>Buffers</span><span id="tm-mem-buffers">-</span></div>
+                                <div class="tm-detail-row"><span>Cached</span><span id="tm-mem-cached">-</span></div>
+                                <div class="tm-detail-row">
+                                    <span>Swap</span>
+                                    <div class="tm-bar tm-bar-small">
+                                        <div id="tm-swap-bar" class="tm-bar-fill swap"></div>
+                                    </div>
+                                    <span id="tm-swap">-</span>
+                                </div>
+                            </div>
+                            <div class="tm-detail-section">
+                                <div class="tm-detail-title">Per-Core CPU</div>
+                                <div id="tm-cores" class="tm-cores"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="task-manager-controls">
@@ -73,6 +115,7 @@
                         <option value="user">Sort by User</option>
                         <option value="name">Sort by Name</option>
                     </select>
+                    <button id="tm-tree-toggle" class="tm-tree-btn" title="Toggle tree view">Tree</button>
                     <button id="tm-refresh" class="tm-refresh-btn" title="Refresh">Refresh</button>
                 </div>
                 <div class="task-manager-table-wrapper">

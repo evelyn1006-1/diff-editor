@@ -783,44 +783,134 @@ def _complete_npm_global_packages(prefix: str, cwd: str | None = None) -> set[st
 # Task Manager Endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Store previous CPU times for calculating usage percentage
-_prev_cpu_times: dict[str, int] = {}
+# Store previous CPU times for calculating usage percentage (overall + per-core)
+_prev_cpu_times: dict[str, dict[str, int]] = {}
 
 
-def _get_cpu_percent() -> float:
-    """Calculate CPU usage percentage from /proc/stat."""
+def _get_cpu_stats() -> dict:
+    """Get CPU stats including overall %, breakdown, and per-core usage."""
     global _prev_cpu_times
+    result = {
+        "percent": 0.0,
+        "breakdown": {"user": 0, "system": 0, "nice": 0, "idle": 0, "iowait": 0},
+        "cores": [],
+    }
+
     try:
         with open("/proc/stat") as f:
-            line = f.readline()
-        parts = line.split()
-        # cpu user nice system idle iowait irq softirq steal guest guest_nice
-        times = [int(p) for p in parts[1:8]]
-        total = sum(times)
-        idle = times[3] + times[4]  # idle + iowait
+            lines = f.readlines()
 
-        prev_total = _prev_cpu_times.get("total", 0)
-        prev_idle = _prev_cpu_times.get("idle", 0)
+        for line in lines:
+            parts = line.split()
+            if not parts:
+                continue
 
-        _prev_cpu_times["total"] = total
-        _prev_cpu_times["idle"] = idle
+            name = parts[0]
+            if not name.startswith("cpu"):
+                continue
 
-        if prev_total == 0:
-            return 0.0
+            # cpu user nice system idle iowait irq softirq steal
+            times = [int(p) for p in parts[1:8]]
+            total = sum(times)
+            idle = times[3] + times[4]  # idle + iowait
 
-        total_diff = total - prev_total
-        idle_diff = idle - prev_idle
+            prev = _prev_cpu_times.get(name, {})
+            prev_total = prev.get("total", 0)
+            prev_idle = prev.get("idle", 0)
 
-        if total_diff == 0:
-            return 0.0
+            _prev_cpu_times[name] = {"total": total, "idle": idle, "times": times}
 
-        return round((1.0 - idle_diff / total_diff) * 100, 1)
+            if prev_total == 0:
+                usage = 0.0
+            else:
+                total_diff = total - prev_total
+                idle_diff = idle - prev_idle
+                usage = round((1.0 - idle_diff / total_diff) * 100, 1) if total_diff > 0 else 0.0
+
+            if name == "cpu":
+                # Overall CPU
+                result["percent"] = usage
+                # Calculate breakdown percentages
+                if total > 0:
+                    result["breakdown"] = {
+                        "user": round(times[0] / total * 100, 1),
+                        "nice": round(times[1] / total * 100, 1),
+                        "system": round(times[2] / total * 100, 1),
+                        "idle": round(times[3] / total * 100, 1),
+                        "iowait": round(times[4] / total * 100, 1),
+                    }
+            else:
+                # Per-core (cpu0, cpu1, etc.)
+                result["cores"].append({"name": name, "percent": usage})
+
     except (OSError, ValueError, IndexError):
-        return 0.0
+        pass
+
+    return result
+
+
+def _get_load_average() -> dict:
+    """Get load average from /proc/loadavg."""
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+        return {
+            "1min": float(parts[0]),
+            "5min": float(parts[1]),
+            "15min": float(parts[2]),
+        }
+    except (OSError, ValueError, IndexError):
+        return {"1min": 0, "5min": 0, "15min": 0}
+
+
+def _get_uptime() -> dict:
+    """Get system uptime from /proc/uptime."""
+    try:
+        with open("/proc/uptime") as f:
+            uptime_seconds = float(f.read().split()[0])
+        days = int(uptime_seconds // 86400)
+        hours = int((uptime_seconds % 86400) // 3600)
+        minutes = int((uptime_seconds % 3600) // 60)
+        return {
+            "seconds": uptime_seconds,
+            "formatted": f"{days}d {hours}h {minutes}m" if days else f"{hours}h {minutes}m",
+        }
+    except (OSError, ValueError, IndexError):
+        return {"seconds": 0, "formatted": "unknown"}
+
+
+def _get_process_counts() -> dict:
+    """Get process state counts."""
+    counts = {"total": 0, "running": 0, "sleeping": 0, "stopped": 0, "zombie": 0}
+    try:
+        result = subprocess.run(
+            ["ps", "axo", "stat"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split("\n")[1:]:  # Skip header
+                stat = line.strip()
+                if not stat:
+                    continue
+                counts["total"] += 1
+                first_char = stat[0]
+                if first_char == "R":
+                    counts["running"] += 1
+                elif first_char in ("S", "D", "I"):
+                    counts["sleeping"] += 1
+                elif first_char == "T":
+                    counts["stopped"] += 1
+                elif first_char == "Z":
+                    counts["zombie"] += 1
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    return counts
 
 
 def _get_memory_info() -> dict:
-    """Get memory stats from /proc/meminfo."""
+    """Get memory stats from /proc/meminfo including breakdown."""
     try:
         mem = {}
         with open("/proc/meminfo") as f:
@@ -834,22 +924,37 @@ def _get_memory_info() -> dict:
         total_kb = mem.get("MemTotal", 0)
         available_kb = mem.get("MemAvailable", mem.get("MemFree", 0))
         used_kb = total_kb - available_kb
+        buffers_kb = mem.get("Buffers", 0)
+        cached_kb = mem.get("Cached", 0) + mem.get("SReclaimable", 0)
+        swap_total_kb = mem.get("SwapTotal", 0)
+        swap_free_kb = mem.get("SwapFree", 0)
+        swap_used_kb = swap_total_kb - swap_free_kb
 
         return {
             "total_gb": round(total_kb / 1024 / 1024, 2),
             "used_gb": round(used_kb / 1024 / 1024, 2),
             "percent": round(used_kb / total_kb * 100, 1) if total_kb > 0 else 0.0,
+            "buffers_mb": round(buffers_kb / 1024, 1),
+            "cached_mb": round(cached_kb / 1024, 1),
+            "swap_total_gb": round(swap_total_kb / 1024 / 1024, 2),
+            "swap_used_gb": round(swap_used_kb / 1024 / 1024, 2),
+            "swap_percent": round(swap_used_kb / swap_total_kb * 100, 1) if swap_total_kb > 0 else 0.0,
         }
     except (OSError, ValueError):
-        return {"total_gb": 0, "used_gb": 0, "percent": 0}
+        return {
+            "total_gb": 0, "used_gb": 0, "percent": 0,
+            "buffers_mb": 0, "cached_mb": 0,
+            "swap_total_gb": 0, "swap_used_gb": 0, "swap_percent": 0,
+        }
 
 
 def _get_processes() -> list[dict]:
-    """Get process list using ps aux."""
+    """Get process list with PPID for tree view."""
     processes = []
     try:
+        # Use custom format to get PPID
         result = subprocess.run(
-            ["ps", "aux", "--sort=-%cpu"],
+            ["ps", "axo", "user,pid,ppid,%cpu,%mem,vsz,rss,tty,stat,start,time,command", "--sort=-%cpu"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -857,21 +962,22 @@ def _get_processes() -> list[dict]:
         if result.returncode == 0:
             lines = result.stdout.strip().split("\n")
             # Skip header line
-            for line in lines[1:100]:  # Limit to top 100 processes
-                parts = line.split(None, 10)
-                if len(parts) >= 11:
+            for line in lines[1:150]:  # Increased limit for tree view
+                parts = line.split(None, 11)
+                if len(parts) >= 12:
                     processes.append({
                         "user": parts[0],
                         "pid": int(parts[1]),
-                        "cpu": float(parts[2]),
-                        "mem": float(parts[3]),
-                        "vsz": int(parts[4]),
-                        "rss": int(parts[5]),
-                        "tty": parts[6],
-                        "stat": parts[7],
-                        "start": parts[8],
-                        "time": parts[9],
-                        "command": parts[10],
+                        "ppid": int(parts[2]),
+                        "cpu": float(parts[3]),
+                        "mem": float(parts[4]),
+                        "vsz": int(parts[5]),
+                        "rss": int(parts[6]),
+                        "tty": parts[7],
+                        "stat": parts[8],
+                        "start": parts[9],
+                        "time": parts[10],
+                        "command": parts[11],
                     })
     except (subprocess.TimeoutExpired, OSError, ValueError):
         pass
@@ -881,16 +987,33 @@ def _get_processes() -> list[dict]:
 @terminal_bp.route("/terminal/processes")
 def get_processes():
     """Return system stats and process list for task manager."""
+    cpu_stats = _get_cpu_stats()
     return jsonify({
-        "cpu_percent": _get_cpu_percent(),
+        "cpu_percent": cpu_stats["percent"],
+        "cpu": cpu_stats,
         "memory": _get_memory_info(),
+        "load": _get_load_average(),
+        "uptime": _get_uptime(),
+        "process_counts": _get_process_counts(),
         "processes": _get_processes(),
     })
 
 
+ALLOWED_SIGNALS = {
+    "TERM": "-SIGTERM",
+    "KILL": "-SIGKILL",
+    "HUP": "-SIGHUP",
+    "INT": "-SIGINT",
+    "STOP": "-SIGSTOP",
+    "CONT": "-SIGCONT",
+    "USR1": "-SIGUSR1",
+    "USR2": "-SIGUSR2",
+}
+
+
 @terminal_bp.route("/terminal/process/kill", methods=["POST"])
 def kill_process():
-    """Kill a process by PID."""
+    """Send a signal to a process by PID."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "Missing request body"}), 400
@@ -901,10 +1024,10 @@ def kill_process():
     if not pid or not isinstance(pid, int):
         return jsonify({"error": "Invalid PID"}), 400
 
-    if signal_name not in ("TERM", "KILL"):
-        return jsonify({"error": "Invalid signal (use TERM or KILL)"}), 400
+    if signal_name not in ALLOWED_SIGNALS:
+        return jsonify({"error": f"Invalid signal (allowed: {', '.join(ALLOWED_SIGNALS.keys())})"}), 400
 
-    sig = "-SIGTERM" if signal_name == "TERM" else "-SIGKILL"
+    sig = ALLOWED_SIGNALS[signal_name]
 
     try:
         result = subprocess.run(
@@ -914,11 +1037,85 @@ def kill_process():
             timeout=5,
         )
         if result.returncode == 0:
-            return jsonify({"success": True, "message": f"Sent {signal_name} to PID {pid}"})
+            return jsonify({"success": True, "message": f"Sent SIG{signal_name} to PID {pid}"})
         else:
-            error = result.stderr.strip() or f"Failed to kill process {pid}"
+            error = result.stderr.strip() or f"Failed to signal process {pid}"
             return jsonify({"error": error}), 400
     except subprocess.TimeoutExpired:
         return jsonify({"error": "Kill command timed out"}), 500
     except OSError as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _get_process_network_details(pid: int) -> dict:
+    """Get listening ports and active connections for a process."""
+    result = {"ports": [], "connections": []}
+
+    try:
+        # Use ss to get socket info for this PID
+        # -t: TCP, -l: listening, -n: numeric, -p: show process
+        ss_result = subprocess.run(
+            ["ss", "-tlnp"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if ss_result.returncode == 0:
+            pid_str = f"pid={pid},"
+            for line in ss_result.stdout.strip().split("\n")[1:]:  # Skip header
+                if pid_str in line:
+                    # Parse: State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        local = parts[3]
+                        if ":" in local:
+                            addr, port = local.rsplit(":", 1)
+                            result["ports"].append({
+                                "local_addr": addr.strip("[]"),
+                                "local_port": port,
+                                "proto": "tcp",
+                            })
+
+        # Also get established connections
+        ss_conn = subprocess.run(
+            ["ss", "-tnp"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if ss_conn.returncode == 0:
+            pid_str = f"pid={pid},"
+            for line in ss_conn.stdout.strip().split("\n")[1:]:
+                if pid_str in line and "ESTAB" in line:
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        remote = parts[4]
+                        if ":" in remote:
+                            addr, port = remote.rsplit(":", 1)
+                            result["connections"].append({
+                                "remote_addr": addr.strip("[]"),
+                                "remote_port": port,
+                            })
+
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # Try to get network I/O stats from /proc/{pid}/net/dev (per-process net stats)
+    # Note: This shows the network namespace stats, not per-process traffic
+    # For per-process traffic we'd need eBPF or nethogs, so we skip detailed rate
+
+    return result
+
+
+@terminal_bp.route("/terminal/process/<int:pid>/details")
+def get_process_details(pid: int):
+    """Get detailed info for a process including ports and connections."""
+    # Validate PID exists
+    try:
+        with open(f"/proc/{pid}/comm"):
+            pass
+    except (OSError, FileNotFoundError):
+        return jsonify({"error": "Process not found"}), 404
+
+    details = _get_process_network_details(pid)
+    return jsonify(details)
