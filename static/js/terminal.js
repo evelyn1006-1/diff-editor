@@ -710,7 +710,6 @@ let taskManagerExpandedCommands = new Set();  // PIDs with expanded command text
 let taskManagerExpandedDetails = new Set();   // PIDs with expanded details panel
 let taskManagerTreeMode = false;
 let taskManagerStatsExpanded = false;
-let taskManagerSignalSelections = new Map();  // PID -> selected signal
 let taskManagerProcessDetails = new Map();    // PID -> {ports, connections, loading}
 let taskManagerOpenMenuPid = null;            // PID with open signal dropdown
 
@@ -753,11 +752,6 @@ function openTaskManager() {
         renderTaskManagerTable();
     };
 
-    // Close on overlay click
-    overlay.onclick = (e) => {
-        if (e.target === overlay) closeTaskManager();
-    };
-
     // Close on Escape key
     document.addEventListener('keydown', handleTaskManagerKeydown);
 
@@ -795,7 +789,6 @@ function closeTaskManager() {
     document.removeEventListener('keydown', handleTaskManagerKeydown);
     taskManagerExpandedCommands.clear();
     taskManagerExpandedDetails.clear();
-    taskManagerSignalSelections.clear();
     taskManagerProcessDetails.clear();
     taskManagerOpenMenuPid = null;
     taskManagerTreeMode = false;
@@ -978,7 +971,6 @@ function renderTaskManagerTable() {
         const branch = taskManagerTreeMode && p.depth > 0 ? '<span class="tm-tree-branch">└─</span>' : '';
         const childClass = taskManagerTreeMode && p.depth > 0 ? ' tm-tree-child' : '';
         const matchClass = p.isMatch === false ? ' tm-tree-ancestor' : '';
-        const savedSignal = taskManagerSignalSelections.get(p.pid) || 'TERM';
         const details = taskManagerProcessDetails.get(p.pid);
         const detailsHtml = details ? formatProcessDetails(details) : '<div class="tm-details">Click ▶ to load details</div>';
         const cmdExpanded = taskManagerExpandedCommands.has(p.pid);
@@ -1003,15 +995,15 @@ function renderTaskManagerTable() {
             </td>
             <td class="tm-actions">
                 <div class="tm-split-btn" data-pid="${p.pid}">
-                    <button class="tm-split-main" title="Send ${savedSignal}">${savedSignal}</button>
+                    <button class="tm-split-main" title="Send TERM">TERM</button>
                     <button class="tm-split-arrow" title="Choose signal">&#9662;</button>
                     <div class="tm-split-menu hidden">
-                        <div class="tm-split-option${savedSignal === 'TERM' ? ' selected' : ''}" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful stop</span></div>
-                        <div class="tm-split-option${savedSignal === 'HUP' ? ' selected' : ''}" data-signal="HUP">HUP <span class="tm-sig-desc">Restart/reload</span></div>
-                        <div class="tm-split-option${savedSignal === 'INT' ? ' selected' : ''}" data-signal="INT">INT <span class="tm-sig-desc">Interrupt</span></div>
-                        <div class="tm-split-option${savedSignal === 'KILL' ? ' selected' : ''}" data-signal="KILL">KILL <span class="tm-sig-desc">Force kill</span></div>
-                        <div class="tm-split-option${savedSignal === 'STOP' ? ' selected' : ''}" data-signal="STOP">STOP <span class="tm-sig-desc">Pause</span></div>
-                        <div class="tm-split-option${savedSignal === 'CONT' ? ' selected' : ''}" data-signal="CONT">CONT <span class="tm-sig-desc">Resume</span></div>
+                        <div class="tm-split-option" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful</span></div>
+                        <div class="tm-split-option" data-signal="HUP">HUP <span class="tm-sig-desc">Reload</span></div>
+                        <div class="tm-split-option" data-signal="INT">INT <span class="tm-sig-desc">Interrupt</span></div>
+                        <div class="tm-split-option" data-signal="KILL">KILL <span class="tm-sig-desc">Force</span></div>
+                        <div class="tm-split-option" data-signal="STOP">STOP <span class="tm-sig-desc">Pause</span></div>
+                        <div class="tm-split-option" data-signal="CONT">CONT <span class="tm-sig-desc">Resume</span></div>
                     </div>
                 </div>
             </td>
@@ -1031,11 +1023,10 @@ function renderTaskManagerTable() {
             menu.classList.remove('hidden');
         }
 
-        // Main button sends the signal
+        // Main button always sends TERM
         mainBtn.onclick = (e) => {
             e.stopPropagation();
-            const signal = taskManagerSignalSelections.get(pid) || 'TERM';
-            killProcess(pid, signal);
+            killProcess(pid, 'TERM');
         };
 
         // Arrow button toggles menu
@@ -1054,14 +1045,8 @@ function renderTaskManagerTable() {
             opt.onclick = (e) => {
                 e.stopPropagation();
                 const signal = opt.dataset.signal;
-                taskManagerSignalSelections.set(pid, signal);
-                mainBtn.textContent = signal;
-                mainBtn.title = `Send ${signal}`;
-                menu.querySelectorAll('.tm-split-option').forEach(o => o.classList.remove('selected'));
-                opt.classList.add('selected');
                 menu.classList.add('hidden');
                 taskManagerOpenMenuPid = null;
-                // Send signal immediately
                 killProcess(pid, signal);
             };
         });
