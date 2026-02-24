@@ -706,7 +706,8 @@ let taskManagerProcesses = [];
 let taskManagerSortColumn = 'cpu';
 let taskManagerSortAsc = false;
 let taskManagerFilter = '';
-let taskManagerExpandedPids = new Set();
+let taskManagerExpandedCommands = new Set();  // PIDs with expanded command text
+let taskManagerExpandedDetails = new Set();   // PIDs with expanded details panel
 let taskManagerTreeMode = false;
 let taskManagerStatsExpanded = false;
 let taskManagerSignalSelections = new Map();  // PID -> selected signal
@@ -791,7 +792,8 @@ function closeTaskManager() {
         taskManagerRefreshInterval = null;
     }
     document.removeEventListener('keydown', handleTaskManagerKeydown);
-    taskManagerExpandedPids.clear();
+    taskManagerExpandedCommands.clear();
+    taskManagerExpandedDetails.clear();
     taskManagerSignalSelections.clear();
     taskManagerProcessDetails.clear();
     taskManagerTreeMode = false;
@@ -842,6 +844,11 @@ async function fetchTaskManagerData() {
         // Store processes and render
         taskManagerProcesses = data.processes || [];
         renderTaskManagerTable();
+
+        // Refresh details for expanded rows
+        taskManagerExpandedDetails.forEach(pid => {
+            fetchProcessDetails(pid, true);
+        });
     } catch (e) {
         console.error('Failed to fetch task manager data:', e);
     }
@@ -971,7 +978,9 @@ function renderTaskManagerTable() {
         const matchClass = p.isMatch === false ? ' tm-tree-ancestor' : '';
         const savedSignal = taskManagerSignalSelections.get(p.pid) || 'TERM';
         const details = taskManagerProcessDetails.get(p.pid);
-        const detailsHtml = details ? formatProcessDetails(details) : '';
+        const detailsHtml = details ? formatProcessDetails(details) : '<div class="tm-details">Click ▶ to load details</div>';
+        const cmdExpanded = taskManagerExpandedCommands.has(p.pid);
+        const detailsExpanded = taskManagerExpandedDetails.has(p.pid);
 
         return `
         <tr data-pid="${p.pid}" class="${childClass}${matchClass}">
@@ -979,12 +988,14 @@ function renderTaskManagerTable() {
             <td>${escapeHtml(p.user)}</td>
             <td>${p.cpu.toFixed(1)}</td>
             <td>${p.mem.toFixed(1)}</td>
-            <td class="tm-command">
+            <td class="tm-command${cmdExpanded ? ' cmd-expanded' : ''}${detailsExpanded ? ' details-expanded' : ''}">
                 <div class="tm-command-wrapper">
-                    <button class="tm-expand-btn" title="Expand/collapse (shows ports & network)">&#9654;</button>
+                    <button class="tm-expand-details-btn" title="Show process details (ports, I/O, memory)">&#9654;</button>
                     <div class="tm-command-content">
                         <span class="tm-command-text" title="${escapeHtml(p.command)}">${indent}${branch}${escapeHtml(p.command)}</span>
-                        ${detailsHtml}
+                        <div class="tm-details-section">
+                            ${detailsHtml}
+                        </div>
                     </div>
                 </div>
             </td>
@@ -1019,29 +1030,42 @@ function renderTaskManagerTable() {
         };
     });
 
-    // Attach expand button handlers and restore expanded state
-    tbody.querySelectorAll('.tm-expand-btn').forEach(btn => {
+    // Attach command text click handlers (click text to expand/collapse command)
+    tbody.querySelectorAll('.tm-command-text').forEach(span => {
+        const row = span.closest('tr');
+        const pid = parseInt(row.dataset.pid);
+        const cell = span.closest('.tm-command');
+
+        span.onclick = (e) => {
+            e.stopPropagation();
+            const wasExpanded = cell.classList.contains('cmd-expanded');
+            cell.classList.toggle('cmd-expanded');
+            if (!wasExpanded) {
+                taskManagerExpandedCommands.add(pid);
+            } else {
+                taskManagerExpandedCommands.delete(pid);
+            }
+        };
+    });
+
+    // Attach details expand button handlers (▶ button expands details)
+    tbody.querySelectorAll('.tm-expand-details-btn').forEach(btn => {
         const row = btn.closest('tr');
         const pid = parseInt(row.dataset.pid);
         const cell = btn.closest('.tm-command');
 
-        // Restore expanded state
-        if (taskManagerExpandedPids.has(pid)) {
-            cell.classList.add('expanded');
-        }
-
         btn.onclick = (e) => {
             e.stopPropagation();
-            const wasExpanded = cell.classList.contains('expanded');
-            cell.classList.toggle('expanded');
+            const wasExpanded = cell.classList.contains('details-expanded');
+            cell.classList.toggle('details-expanded');
             if (!wasExpanded) {
-                taskManagerExpandedPids.add(pid);
+                taskManagerExpandedDetails.add(pid);
                 // Fetch details if not already loaded
                 if (!taskManagerProcessDetails.has(pid)) {
                     fetchProcessDetails(pid);
                 }
             } else {
-                taskManagerExpandedPids.delete(pid);
+                taskManagerExpandedDetails.delete(pid);
             }
         };
     });
@@ -1145,32 +1169,49 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-async function fetchProcessDetails(pid) {
+async function fetchProcessDetails(pid, isRefresh = false) {
     const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
 
-    // Mark as loading
-    taskManagerProcessDetails.set(pid, { loading: true, ports: [], connections: [] });
-    renderTaskManagerTable();
+    // Mark as loading only on first fetch
+    if (!isRefresh) {
+        taskManagerProcessDetails.set(pid, { loading: true });
+        renderTaskManagerTable();
+    }
 
     try {
         const resp = await fetch(`${basePath}/terminal/process/${pid}/details`);
         if (!resp.ok) {
-            taskManagerProcessDetails.set(pid, { loading: false, error: 'Failed to fetch', ports: [], connections: [] });
+            taskManagerProcessDetails.set(pid, { loading: false, error: 'Failed to fetch' });
             renderTaskManagerTable();
             return;
         }
 
         const data = await resp.json();
+        const needsRateRefresh = data.io?.note === 'Rate available on next refresh';
+
         taskManagerProcessDetails.set(pid, {
             loading: false,
             ports: data.ports || [],
             connections: data.connections || [],
-            netRate: data.net_rate || null,
+            io: data.io || null,
+            fds: data.fds || null,
+            cwd: data.cwd || null,
+            threads: data.threads || null,
+            memory: data.memory || null,
         });
         renderTaskManagerTable();
+
+        // If we need a second fetch to get I/O rate, schedule it
+        if (needsRateRefresh && taskManagerExpandedDetails.has(pid)) {
+            setTimeout(() => {
+                if (taskManagerExpandedDetails.has(pid)) {
+                    fetchProcessDetails(pid, true);
+                }
+            }, 1000);
+        }
     } catch (e) {
         console.error('Failed to fetch process details:', e);
-        taskManagerProcessDetails.set(pid, { loading: false, error: e.message, ports: [], connections: [] });
+        taskManagerProcessDetails.set(pid, { loading: false, error: e.message });
         renderTaskManagerTable();
     }
 }
@@ -1184,6 +1225,16 @@ function formatProcessDetails(details) {
     }
 
     const parts = [];
+
+    // Working directory
+    if (details.cwd) {
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">CWD:</span> <span class="tm-cwd">${escapeHtml(details.cwd)}</span></div>`);
+    }
+
+    // Threads
+    if (details.threads && details.threads > 1) {
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Threads:</span> ${details.threads}</div>`);
+    }
 
     // Listening ports
     if (details.ports && details.ports.length > 0) {
@@ -1206,13 +1257,33 @@ function formatProcessDetails(details) {
         parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Connections:</span> ${escapeHtml(sample)}${more}</div>`);
     }
 
-    // Network rate if available
-    if (details.netRate) {
-        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Net I/O:</span> ↓${details.netRate.rx}/s ↑${details.netRate.tx}/s</div>`);
+    // I/O stats
+    if (details.io) {
+        const io = details.io;
+        if (io.read_rate && io.write_rate) {
+            parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">I/O Rate:</span> ↓${io.read_rate}/s ↑${io.write_rate}/s</div>`);
+            if (io.disk_read_rate !== '0.0B' || io.disk_write_rate !== '0.0B') {
+                parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Disk I/O:</span> ↓${io.disk_read_rate}/s ↑${io.disk_write_rate}/s</div>`);
+            }
+        } else {
+            parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">I/O Total:</span> ↓${io.total_read} ↑${io.total_write}</div>`);
+        }
+    }
+
+    // Memory breakdown
+    if (details.memory) {
+        const mem = details.memory;
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Memory:</span> RSS ${mem.rss} | Private ${mem.private} | Shared ${mem.shared}${mem.swap !== '0.0B' ? ` | Swap ${mem.swap}` : ''}</div>`);
+    }
+
+    // File descriptors
+    if (details.fds) {
+        const fdInfo = `${details.fds.count} open`;
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">FDs:</span> ${fdInfo}</div>`);
     }
 
     if (parts.length === 0) {
-        parts.push('<div class="tm-detail-row tm-detail-none">No network activity</div>');
+        parts.push('<div class="tm-detail-row tm-detail-none">No details available</div>');
     }
 
     return `<div class="tm-details">${parts.join('')}</div>`;

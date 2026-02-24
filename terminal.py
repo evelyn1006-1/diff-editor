@@ -1047,13 +1047,37 @@ def kill_process():
         return jsonify({"error": str(e)}), 500
 
 
-def _get_process_network_details(pid: int) -> dict:
-    """Get listening ports and active connections for a process."""
-    result = {"ports": [], "connections": []}
+# Store previous I/O stats for rate calculation
+_prev_io_stats: dict[int, dict] = {}
+_prev_io_time: dict[int, float] = {}
 
+
+def _format_bytes(b: float) -> str:
+    """Format bytes to human readable string."""
+    for unit in ["B", "KB", "MB", "GB"]:
+        if abs(b) < 1024:
+            return f"{b:.1f}{unit}"
+        b /= 1024
+    return f"{b:.1f}TB"
+
+
+def _get_process_details(pid: int) -> dict:
+    """Get detailed info for a process including ports, I/O, fds, etc."""
+    import time
+    global _prev_io_stats, _prev_io_time
+
+    result = {
+        "ports": [],
+        "connections": [],
+        "io": None,
+        "fds": None,
+        "cwd": None,
+        "threads": None,
+        "memory": None,
+    }
+
+    # ─── Network: Listening ports ───
     try:
-        # Use ss to get socket info for this PID
-        # -t: TCP, -l: listening, -n: numeric, -p: show process
         ss_result = subprocess.run(
             ["ss", "-tlnp"],
             capture_output=True,
@@ -1062,9 +1086,8 @@ def _get_process_network_details(pid: int) -> dict:
         )
         if ss_result.returncode == 0:
             pid_str = f"pid={pid},"
-            for line in ss_result.stdout.strip().split("\n")[1:]:  # Skip header
+            for line in ss_result.stdout.strip().split("\n")[1:]:
                 if pid_str in line:
-                    # Parse: State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
                     parts = line.split()
                     if len(parts) >= 5:
                         local = parts[3]
@@ -1075,8 +1098,11 @@ def _get_process_network_details(pid: int) -> dict:
                                 "local_port": port,
                                 "proto": "tcp",
                             })
+    except (subprocess.TimeoutExpired, OSError):
+        pass
 
-        # Also get established connections
+    # ─── Network: Established connections ───
+    try:
         ss_conn = subprocess.run(
             ["ss", "-tnp"],
             capture_output=True,
@@ -1096,20 +1122,123 @@ def _get_process_network_details(pid: int) -> dict:
                                 "remote_addr": addr.strip("[]"),
                                 "remote_port": port,
                             })
-
     except (subprocess.TimeoutExpired, OSError):
         pass
 
-    # Try to get network I/O stats from /proc/{pid}/net/dev (per-process net stats)
-    # Note: This shows the network namespace stats, not per-process traffic
-    # For per-process traffic we'd need eBPF or nethogs, so we skip detailed rate
+    # ─── I/O stats with rate calculation ───
+    try:
+        with open(f"/proc/{pid}/io") as f:
+            io_data = {}
+            for line in f:
+                key, val = line.strip().split(": ")
+                io_data[key] = int(val)
+
+        now = time.time()
+        prev = _prev_io_stats.get(pid)
+        prev_time = _prev_io_time.get(pid, now)
+        elapsed = now - prev_time
+
+        # Calculate rates if we have previous data
+        if prev and elapsed > 0.5:
+            read_rate = (io_data.get("rchar", 0) - prev.get("rchar", 0)) / elapsed
+            write_rate = (io_data.get("wchar", 0) - prev.get("wchar", 0)) / elapsed
+            disk_read_rate = (io_data.get("read_bytes", 0) - prev.get("read_bytes", 0)) / elapsed
+            disk_write_rate = (io_data.get("write_bytes", 0) - prev.get("write_bytes", 0)) / elapsed
+
+            result["io"] = {
+                "read_rate": _format_bytes(read_rate),
+                "write_rate": _format_bytes(write_rate),
+                "disk_read_rate": _format_bytes(disk_read_rate),
+                "disk_write_rate": _format_bytes(disk_write_rate),
+                "total_read": _format_bytes(io_data.get("rchar", 0)),
+                "total_write": _format_bytes(io_data.get("wchar", 0)),
+            }
+        else:
+            # First request - show totals only
+            result["io"] = {
+                "total_read": _format_bytes(io_data.get("rchar", 0)),
+                "total_write": _format_bytes(io_data.get("wchar", 0)),
+                "note": "Rate available on next refresh",
+            }
+
+        _prev_io_stats[pid] = io_data
+        _prev_io_time[pid] = now
+
+    except (OSError, ValueError, KeyError):
+        pass
+
+    # ─── File descriptors ───
+    try:
+        fd_path = f"/proc/{pid}/fd"
+        fds = os.listdir(fd_path)
+        fd_count = len(fds)
+
+        # Sample a few file descriptors to show what they point to
+        fd_samples = []
+        for fd in fds[:5]:
+            try:
+                target = os.readlink(f"{fd_path}/{fd}")
+                # Categorize the fd
+                if target.startswith("/"):
+                    fd_type = "file"
+                elif target.startswith("socket:"):
+                    fd_type = "socket"
+                elif target.startswith("pipe:"):
+                    fd_type = "pipe"
+                elif target.startswith("anon_inode:"):
+                    fd_type = target.split(":")[1].strip("[]")
+                else:
+                    fd_type = "other"
+                fd_samples.append({"fd": fd, "target": target, "type": fd_type})
+            except OSError:
+                pass
+
+        result["fds"] = {"count": fd_count, "samples": fd_samples}
+    except OSError:
+        pass
+
+    # ─── Working directory ───
+    try:
+        result["cwd"] = os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        pass
+
+    # ─── Thread count and memory from /proc/{pid}/status ───
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            mem_info = {}
+            for line in f:
+                if line.startswith("Threads:"):
+                    result["threads"] = int(line.split()[1])
+                elif line.startswith("VmRSS:"):
+                    mem_info["rss_kb"] = int(line.split()[1])
+                elif line.startswith("VmSize:"):
+                    mem_info["vsz_kb"] = int(line.split()[1])
+                elif line.startswith("RssAnon:"):
+                    mem_info["private_kb"] = int(line.split()[1])
+                elif line.startswith("RssShmem:") or line.startswith("RssFile:"):
+                    key = "shared_kb" if "Shmem" in line else "file_kb"
+                    mem_info[key] = int(line.split()[1])
+                elif line.startswith("VmSwap:"):
+                    mem_info["swap_kb"] = int(line.split()[1])
+
+            if mem_info:
+                result["memory"] = {
+                    "rss": _format_bytes(mem_info.get("rss_kb", 0) * 1024),
+                    "vsz": _format_bytes(mem_info.get("vsz_kb", 0) * 1024),
+                    "private": _format_bytes(mem_info.get("private_kb", 0) * 1024),
+                    "shared": _format_bytes(mem_info.get("shared_kb", 0) * 1024),
+                    "swap": _format_bytes(mem_info.get("swap_kb", 0) * 1024),
+                }
+    except (OSError, ValueError, IndexError):
+        pass
 
     return result
 
 
 @terminal_bp.route("/terminal/process/<int:pid>/details")
-def get_process_details(pid: int):
-    """Get detailed info for a process including ports and connections."""
+def get_process_details_endpoint(pid: int):
+    """Get detailed info for a process including ports, I/O, fds, etc."""
     # Validate PID exists
     try:
         with open(f"/proc/{pid}/comm"):
@@ -1117,5 +1246,5 @@ def get_process_details(pid: int):
     except (OSError, FileNotFoundError):
         return jsonify({"error": "Process not found"}), 404
 
-    details = _get_process_network_details(pid)
+    details = _get_process_details(pid)
     return jsonify(details)

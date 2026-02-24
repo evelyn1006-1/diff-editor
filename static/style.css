@@ -1138,9 +1138,15 @@ body.terminal-raised {
     text-overflow: ellipsis;
     white-space: nowrap;
     display: block;
+    cursor: pointer;
+    transition: color 0.15s ease;
 }
 
-.tm-command.expanded .tm-command-text {
+.tm-command-text:hover {
+    color: var(--accent);
+}
+
+.tm-command.cmd-expanded .tm-command-text {
     white-space: pre-wrap;
     word-break: break-all;
 }
@@ -1164,9 +1170,44 @@ body.terminal-raised {
     display: none;
 }
 
-.tm-command.expanded .tm-details {
+/* Details section with its own expand button */
+.tm-details-section {
+    margin-top: 0.25rem;
+}
+
+.tm-expand-details-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.25rem;
+    height: 1.25rem;
+    padding: 0;
+    margin-right: 0.25rem;
+    font-size: 0.65rem;
+    border-radius: 4px;
+    vertical-align: middle;
+    flex-shrink: 0;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.tm-expand-details-btn:hover {
+    background: rgba(214, 51, 132, 0.1);
+}
+
+.tm-command.details-expanded .tm-expand-details-btn {
+    transform: rotate(90deg);
+    background: var(--accent);
+    color: white;
+}
+
+.tm-command.details-expanded .tm-details {
     display: block;
 }
+
 
 .tm-details-loading {
     color: var(--accent);
@@ -1204,6 +1245,12 @@ body.terminal-raised {
     color: var(--accent);
 }
 
+.tm-cwd {
+    font-family: "SF Mono", Monaco, monospace;
+    color: var(--text-primary);
+    opacity: 0.85;
+}
+
 /* Ancestor rows (dimmed when filtering in tree mode) */
 .task-manager-table tr.tm-tree-ancestor {
     opacity: 0.55;
@@ -1213,24 +1260,6 @@ body.terminal-raised {
     color: var(--text-secondary);
 }
 
-.tm-expand-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 1.25rem;
-    height: 1.25rem;
-    padding: 0;
-    margin-right: 0.25rem;
-    font-size: 0.65rem;
-    border-radius: 4px;
-    vertical-align: middle;
-    flex-shrink: 0;
-    transition: transform 0.15s ease;
-}
-
-.tm-command.expanded .tm-expand-btn {
-    transform: rotate(90deg);
-}
 
 .tm-command-wrapper {
     display: flex;
@@ -1304,6 +1333,22 @@ body.terminal-raised {
     .task-manager-stats {
         flex-direction: column;
         gap: 0.5rem;
+    }
+
+    /* Stack CPU and Memory into separate rows on mobile */
+    .tm-stat-row {
+        flex-direction: column;
+        gap: 0.5rem;
+        align-items: stretch;
+    }
+
+    .tm-stat-main {
+        width: 100%;
+        min-width: unset;
+    }
+
+    .tm-expand-stats-btn {
+        align-self: center;
     }
 
     .task-manager-table th,
