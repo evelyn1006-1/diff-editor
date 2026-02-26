@@ -1011,10 +1011,10 @@ function renderTaskManagerTable() {
                     <button class="tm-split-main" title="Send TERM">TERM</button>
                     <button class="tm-split-arrow" title="Choose signal">&#9662;</button>
                     <div class="tm-split-menu hidden">
-                        <div class="tm-split-option" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful</span></div>
-                        <div class="tm-split-option" data-signal="HUP">HUP <span class="tm-sig-desc">Reload</span></div>
+                        <div class="tm-split-option" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful exit</span></div>
+                        <div class="tm-split-option" data-signal="HUP">HUP <span class="tm-sig-desc">Reload/restart</span></div>
                         <div class="tm-split-option" data-signal="INT">INT <span class="tm-sig-desc">Interrupt</span></div>
-                        <div class="tm-split-option" data-signal="KILL">KILL <span class="tm-sig-desc">Force</span></div>
+                        <div class="tm-split-option" data-signal="KILL">KILL <span class="tm-sig-desc">Force kill</span></div>
                         <div class="tm-split-option" data-signal="STOP">STOP <span class="tm-sig-desc">Pause</span></div>
                         <div class="tm-split-option" data-signal="CONT">CONT <span class="tm-sig-desc">Resume</span></div>
                     </div>
