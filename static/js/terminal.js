@@ -54,6 +54,19 @@ function connect() {
             currentCwd = data.cwd;
         }
         appendOutput(`Connected to terminal at ${currentCwd}\n`, 'info');
+
+        // Auto-execute command if provided via URL param
+        if (window.AUTO_CMD) {
+            const cmd = window.AUTO_CMD;
+            window.AUTO_CMD = '';  // Clear to prevent re-execution on reconnect
+            // Small delay to let shell initialize
+            setTimeout(() => {
+                if (commandHistory.length === 0 || commandHistory[commandHistory.length - 1] !== cmd) {
+                    commandHistory.push(cmd);
+                }
+                sendInput(cmd + '\n');
+            }, 100);
+        }
     });
 
     socket.on('output', (data) => {

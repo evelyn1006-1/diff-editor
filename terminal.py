@@ -237,7 +237,9 @@ def check_task_manager_command(command: str) -> bool:
 @terminal_bp.route("/terminal")
 def terminal_view():
     """Render the terminal page."""
-    return render_template("terminal.html")
+    # Optional command to auto-execute on connect
+    auto_cmd = request.args.get("cmd", "")
+    return render_template("terminal.html", auto_cmd=auto_cmd)
 
 
 @terminal_bp.route("/terminal/complete")

@@ -398,9 +398,9 @@ main {
     position: fixed;
     top: 60px;
     right: 1rem;
-    bottom: 1rem;
     width: 400px;
     max-width: calc(100vw - 2rem);
+    max-height: calc(100vh - 60px - 2rem);
     background: var(--panel-bg);
     border: 2px solid var(--border);
     border-radius: 16px;
@@ -442,7 +442,7 @@ main {
 }
 
 .ai-review-content {
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;

@@ -143,6 +143,14 @@ async function initDiffEditor() {
             document.getElementById('ai-review-panel').classList.add('hidden');
         });
 
+        // Run button - show for runnable file types
+        const runBtn = document.getElementById('btn-run');
+        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java'];
+        if (runnableLanguages.includes(fileLanguage)) {
+            runBtn.classList.remove('hidden');
+            runBtn.addEventListener('click', runFile);
+        }
+
     } catch (err) {
         statusEl.textContent = `Error: ${err.message}`;
         statusEl.className = 'status error';
@@ -350,4 +358,95 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+async function runFile() {
+    const statusEl = document.getElementById('status');
+    const runBtn = document.getElementById('btn-run');
+
+    if (!diffEditor) return;
+
+    // Build the run command based on file language
+    const basename = FILE_PATH.split('/').pop().replace(/\.[^.]+$/, '');
+    const outPath = `/tmp/run_${basename}`;
+
+    let runCommand;
+    switch (fileLanguage) {
+        case 'python':
+            runCommand = `python3 ${FILE_PATH}`;
+            break;
+        case 'javascript':
+            runCommand = `node ${FILE_PATH}`;
+            break;
+        case 'shell':
+            runCommand = `bash ${FILE_PATH}`;
+            break;
+        case 'go':
+            runCommand = `go run ${FILE_PATH}`;
+            break;
+        case 'c':
+            runCommand = `gcc ${FILE_PATH} -o ${outPath} && ${outPath}`;
+            break;
+        case 'cpp':
+            runCommand = `g++ ${FILE_PATH} -o ${outPath} && ${outPath}`;
+            break;
+        case 'java':
+            // Java 11+ single-file source execution
+            runCommand = `java ${FILE_PATH}`;
+            break;
+        default:
+            return;
+    }
+
+    runBtn.disabled = true;
+
+    // Save file first if there are unsaved changes
+    const modifiedModel = diffEditor.getModifiedEditor().getModel();
+    const newContent = modifiedModel.getValue();
+    const hasUnsavedChanges = newContent !== currentContent;
+
+    if (hasUnsavedChanges) {
+        statusEl.textContent = 'Saving before run...';
+        statusEl.className = 'status';
+
+        try {
+            const response = await fetch('api/file', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': CSRF_TOKEN,
+                },
+                body: JSON.stringify({
+                    path: FILE_PATH,
+                    content: newContent,
+                }),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                statusEl.textContent = data.error || 'Save failed';
+                statusEl.className = 'status error';
+                runBtn.disabled = false;
+                return;
+            }
+
+            // Update state
+            currentContent = newContent;
+            isModified = false;
+        } catch (err) {
+            statusEl.textContent = `Error: ${err.message}`;
+            statusEl.className = 'status error';
+            runBtn.disabled = false;
+            return;
+        }
+    }
+
+    // Open terminal with the run command
+    const terminalUrl = `/terminal?cmd=${encodeURIComponent(runCommand)}`;
+    window.open(terminalUrl, '_blank');
+
+    runBtn.disabled = false;
+    statusEl.textContent = 'Opened in terminal';
+    statusEl.className = 'status';
 }
