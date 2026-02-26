@@ -4,9 +4,11 @@ Terminal routes and SocketIO handlers.
 
 import glob
 import json
+import logging
 import os
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,6 +16,18 @@ from flask import Blueprint, jsonify, render_template, request
 from flask_socketio import emit, join_room, leave_room
 
 from utils.pty_manager import PTYManager
+
+# Set up WebSocket access logging (same file as HTTP, rotation handled by rotatelog)
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+ws_logger = logging.getLogger("diff_editor.ws")
+ws_logger.setLevel(logging.INFO)
+ws_logger.propagate = False
+
+_ws_handler = logging.FileHandler(LOG_DIR / "access.log")
+_ws_handler.setFormatter(logging.Formatter('%(message)s'))
+ws_logger.addHandler(_ws_handler)
 
 terminal_bp = Blueprint("terminal", __name__)
 pty_manager = PTYManager()
@@ -35,6 +49,7 @@ def init_terminal_socketio(socketio):
     def handle_connect():
         session_id = request.sid
         cwd = os.path.expanduser("~")
+        remote_addr = request.remote_addr or "-"
 
         # Spawn terminal as root directly via sudo -s
         if pty_manager.create_session(session_id, cwd=cwd, shell="/bin/bash"):
@@ -42,14 +57,27 @@ def init_terminal_socketio(socketio):
             emit("connected", {"status": "ok", "cwd": cwd})
             # Start reading output
             socketio.start_background_task(read_pty_output, socketio, session_id)
+            ws_logger.info(
+                '%s - - [%s] "WS CONNECT /terminal" - - "-" "-"',
+                remote_addr, time.strftime("%d/%b/%Y:%H:%M:%S %z")
+            )
         else:
             emit("error", {"message": "Failed to create terminal session"})
+            ws_logger.info(
+                '%s - - [%s] "WS CONNECT /terminal" FAILED - "-" "-"',
+                remote_addr, time.strftime("%d/%b/%Y:%H:%M:%S %z")
+            )
 
     @socketio.on("disconnect", namespace="/terminal")
     def handle_disconnect():
         session_id = request.sid
+        remote_addr = request.remote_addr or "-"
         pty_manager.remove_session(session_id)
         leave_room(session_id)
+        ws_logger.info(
+            '%s - - [%s] "WS DISCONNECT /terminal" - - "-" "-"',
+            remote_addr, time.strftime("%d/%b/%Y:%H:%M:%S %z")
+        )
 
     @socketio.on("input", namespace="/terminal")
     def handle_input(data):

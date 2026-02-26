@@ -5,6 +5,7 @@ Diff Editor - A web-based side-by-side file diff and editing tool.
 import difflib
 import fcntl
 import hashlib
+import logging
 import math
 import mimetypes
 import os
@@ -18,6 +19,20 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from openai import OpenAI
 
 load_dotenv()
+
+# Set up access logging (rotation handled externally by rotatelog)
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+access_logger = logging.getLogger("diff_editor.access")
+access_logger.setLevel(logging.INFO)
+access_logger.propagate = False
+
+_access_handler = logging.FileHandler(LOG_DIR / "access.log")
+_access_handler.setFormatter(logging.Formatter(
+    '%(message)s'  # We'll format the message ourselves for gunicorn-style output
+))
+access_logger.addHandler(_access_handler)
 
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -217,6 +232,24 @@ def create_app() -> Flask:
             "frame-ancestors 'none'"
         )
         response.headers["Content-Security-Policy"] = csp
+        return response
+
+    @app.after_request
+    def log_request(response):
+        # Log in gunicorn-style format
+        size = response.content_length or "-"
+        access_logger.info(
+            '%s - - [%s] "%s %s %s" %s %s "%s" "%s"',
+            request.remote_addr or "-",
+            time.strftime("%d/%b/%Y:%H:%M:%S %z"),
+            request.method,
+            request.path,
+            request.environ.get("SERVER_PROTOCOL", "HTTP/1.1"),
+            response.status_code,
+            size,
+            request.referrer or "-",
+            request.user_agent.string or "-",
+        )
         return response
 
     def generate_csrf_token():
