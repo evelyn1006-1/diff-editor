@@ -10,6 +10,7 @@ import math
 import mimetypes
 import os
 import secrets
+import subprocess
 import time
 from pathlib import Path
 
@@ -33,9 +34,6 @@ _access_handler.setFormatter(logging.Formatter(
     '%(message)s'  # We'll format the message ourselves for gunicorn-style output
 ))
 access_logger.addHandler(_access_handler)
-
-# Initialize OpenAI client
-openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user
 from utils.git_ops import find_git_root, get_head_content_bytes, is_tracked_by_git, get_directory_git_status, get_tracked_files
@@ -167,6 +165,33 @@ def parse_hex_view(content: str) -> tuple[bool, bytes | str]:
     return True, bytes(parsed)
 
 
+
+
+def choose_ai_review_cwd(file_path: str) -> Path:
+    """Choose a codex working directory by preferring the nearest git repo root."""
+    resolved_file_path, _ = resolve_request_path(file_path, "file_path")
+    start_dir = (
+        resolved_file_path.parent
+        if resolved_file_path is not None and resolved_file_path.parent.exists()
+        else Path.cwd()
+    )
+
+    home = Path.home().resolve()
+    current = start_dir.resolve()
+
+    while True:
+        if (current / ".git").exists():
+            return current
+
+        if current == home:
+            # If we reached home without finding a git repo, use the file parent.
+            return start_dir
+
+        if current.parent == current:
+            return start_dir
+
+        current = current.parent
+
 def create_app() -> Flask:
     app = Flask(__name__)
 
@@ -186,6 +211,7 @@ def create_app() -> Flask:
     AI_REVIEW_COOLDOWN_FILE = Path(
         os.environ.get("AI_REVIEW_COOLDOWN_FILE", "/tmp/diff-editor-ai-review-cooldown.txt")
     )
+    AI_REVIEW_PROVIDER = os.environ.get("AI_REVIEW_PROVIDER", "codex_cli").strip().lower()
 
     def consume_ai_review_cooldown() -> float:
         """
@@ -599,13 +625,10 @@ def create_app() -> Flask:
 
     @app.post("/api/ai-review")
     def ai_review():
-        """Get AI review of code changes using GPT-5.2-Codex."""
+        """Get AI review of code changes using Codex CLI or OpenAI SDK."""
         csrf = request.headers.get("X-CSRF-Token", "")
         if not validate_csrf_token(csrf):
             return jsonify({"error": "Invalid CSRF token"}), 403
-
-        if not os.environ.get("OPENAI_API_KEY"):
-            return jsonify({"error": "OpenAI API key not configured"}), 500
 
         data = request.get_json()
         if not data:
@@ -619,7 +642,10 @@ def create_app() -> Flask:
         if original == modified:
             return jsonify({"error": "No changes to review"}), 400
 
-        # Generate unified diff with large context (200 lines each side)
+        review_cwd = choose_ai_review_cwd(file_path)
+
+        # Generate unified diff; keep codex context short and let it read files directly.
+        context_lines = 5 if AI_REVIEW_PROVIDER != "openai_sdk" else 200
         original_lines = original.splitlines(keepends=True)
         modified_lines = modified.splitlines(keepends=True)
         diff = difflib.unified_diff(
@@ -627,7 +653,7 @@ def create_app() -> Flask:
             modified_lines,
             fromfile=f"a/{Path(file_path).name}",
             tofile=f"b/{Path(file_path).name}",
-            n=200,  # 200 lines of context on each side of changes
+            n=context_lines,
         )
         unified_diff = "".join(diff)
 
@@ -645,36 +671,93 @@ def create_app() -> Flask:
             response.headers["Retry-After"] = str(retry_after)
             return response
 
-        user_input = f"""Review this diff for `{file_path}` ({language}):
-
-```diff
-{unified_diff}
-```"""
-
-        def generate():
-            try:
-                stream = openai_client.responses.create(
-                    model="gpt-5.2-codex",
-                    reasoning={"effort": "medium"},
-                    instructions="""You are a senior code reviewer. Analyze the unified diff and provide a concise review:
+        review_prompt = f"""You are a senior code reviewer. Analyze the change and provide a concise review:
 
 1. **Summary**: What changed (1-2 sentences)
 2. **Issues**: Any bugs, errors, or mistakes introduced
 3. **Concerns**: Security issues, performance problems, or possible regressions
 4. **Suggestions**: Quick improvements (if any)
 
-Be direct and specific. If everything looks good, say so briefly. Skip sections that don't apply.""",
-                    input=user_input,
-                    stream=True,
-                )
-                for event in stream:
-                    if event.type == "response.output_text.delta":
-                        yield event.delta
-            except Exception as e:
-                yield f"\n\n**Error:** {str(e)}"
+Be direct and specific. If everything looks good, say so briefly. Skip sections that don't apply.
+
+Primary file to review: `{file_path}` ({language}).
+Your working directory is set to the project context for this file.
+Read the file directly (and surrounding files only if needed) before finalizing your review.
+
+Here is a short unified diff to focus your attention:
+
+```diff
+{unified_diff}
+```"""
+
+        if AI_REVIEW_PROVIDER == "openai_sdk":
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                return jsonify({"error": "OpenAI API key not configured"}), 500
+
+            def generate_openai():
+                try:
+                    client = OpenAI(api_key=api_key)
+                    stream = client.responses.create(
+                        model="gpt-5.2-codex",
+                        reasoning={"effort": "medium"},
+                        input=review_prompt,
+                        stream=True,
+                    )
+                    for event in stream:
+                        if event.type == "response.output_text.delta":
+                            yield event.delta
+                except Exception as e:
+                    yield f"\n\n**Error:** {str(e)}"
+
+            return Response(
+                generate_openai(),
+                mimetype="text/plain",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",  # Disable nginx buffering
+                },
+            )
+
+        cmd = [
+            "codex",
+            "exec",
+            "-m",
+            "gpt-5.3-codex",
+            "-s",
+            "read-only",
+            "-a",
+            "never",
+            "-C",
+            str(review_cwd),
+            review_prompt,
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except FileNotFoundError:
+            return jsonify({"error": "codex command not found on server"}), 500
+        except Exception as e:
+            return jsonify({"error": f"Failed to run codex exec: {str(e)}"}), 500
+
+        output = result.stdout or ""
+        error_output = result.stderr or ""
+        if result.returncode != 0:
+            combined = (output + "\n" + error_output).strip()
+            if not combined:
+                combined = f"codex exec failed with exit code {result.returncode}"
+            return jsonify({"error": combined}), 500
+
+        if not output.strip():
+            return jsonify({"error": "codex exec returned no review output"}), 502
 
         return Response(
-            generate(),
+            output,
             mimetype="text/plain",
             headers={
                 "Cache-Control": "no-cache",
