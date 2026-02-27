@@ -139,7 +139,9 @@ async function initDiffEditor() {
 
         // Close AI review panel
         const closeReviewBtn = document.getElementById('btn-close-review');
-        closeReviewBtn.addEventListener('click', () => {
+        closeReviewBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
             document.getElementById('ai-review-panel').classList.add('hidden');
         });
 
@@ -264,19 +266,261 @@ function toggleWordWrap() {
     wrapBtn.textContent = wordWrapEnabled ? 'Wrap: On' : 'Wrap: Off';
 }
 
-async function requestAiReview() {
+let currentReviewController = null;
+const REVIEW_ID_STORAGE_KEY = `diff-editor-review-id:${FILE_PATH}`;
+const REVIEW_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+let currentReviewId = loadStoredReviewId();
+
+function loadStoredReviewId() {
+    try {
+        const saved = localStorage.getItem(REVIEW_ID_STORAGE_KEY);
+        return (saved && REVIEW_ID_PATTERN.test(saved)) ? saved : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function setCurrentReviewId(reviewId) {
+    const normalized = (reviewId && REVIEW_ID_PATTERN.test(reviewId)) ? reviewId : null;
+    currentReviewId = normalized;
+    try {
+        if (normalized) {
+            localStorage.setItem(REVIEW_ID_STORAGE_KEY, normalized);
+        } else {
+            localStorage.removeItem(REVIEW_ID_STORAGE_KEY);
+        }
+    } catch (e) {
+        // Ignore storage failures
+    }
+}
+
+function generateReviewId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID().replace(/-/g, '');
+    }
+    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
+}
+
+async function sendAiReviewCancel(reviewId) {
+    if (!reviewId) return;
+    try {
+        await fetch('api/ai-review/cancel', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({ review_id: reviewId }),
+        });
+    } catch (e) {
+        // Ignore cancel errors
+    }
+}
+
+async function fetchAiReviewStatus(reviewId) {
+    if (!reviewId) return null;
+    try {
+        const response = await fetch(`api/ai-review/status?review_id=${encodeURIComponent(reviewId)}`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        return data.status || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function fetchLatestAiReviewId(filePath) {
+    if (!filePath) return null;
+    try {
+        const response = await fetch(`api/ai-review/latest?file_path=${encodeURIComponent(filePath)}`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        const reviewId = data.review_id || null;
+        return (reviewId && REVIEW_ID_PATTERN.test(reviewId)) ? reviewId : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function renderReviewContent(content, markdown, showCancelButton) {
+    let html = renderMarkdown(markdown);
+    if (showCancelButton) {
+        html += '<button class="btn-cancel-inline" onclick="cancelAiReview()">Cancel</button>';
+    }
+    content.innerHTML = html;
+}
+
+function addNewReviewButton(content) {
+    if (!content || content.querySelector('.btn-new-review-inline')) return;
+    const btn = document.createElement('button');
+    btn.className = 'btn-new-review-inline';
+    btn.textContent = 'New Review';
+    btn.addEventListener('click', requestNewAiReview);
+    content.appendChild(btn);
+}
+
+function requestNewAiReview() {
+    requestAiReview({ forceNew: true });
+}
+
+function showReviewCancelledIndicator() {
+    const content = document.getElementById('ai-review-content');
+    if (!content) return;
+
+    const cancelBtn = content.querySelector('.btn-cancel-inline');
+    if (cancelBtn) cancelBtn.remove();
+
+    if (!content.querySelector('.cancelled-indicator')) {
+        const indicator = document.createElement('div');
+        indicator.className = 'cancelled-indicator';
+        indicator.textContent = 'Review canceled';
+        content.appendChild(indicator);
+    }
+    addNewReviewButton(content);
+    content.scrollTop = content.scrollHeight;
+}
+
+function showReviewExpiredIndicator(content) {
+    content.innerHTML = '<div class="error">Saved review was not found (it may have expired).</div>';
+    addNewReviewButton(content);
+}
+
+async function streamExistingReview(reviewId) {
+    const panel = document.getElementById('ai-review-panel');
+    const content = document.getElementById('ai-review-content');
+    panel.classList.remove('hidden');
+    content.innerHTML = '<div class="loading">Loading saved review...</div>';
+
+    const reviewController = new AbortController();
+    currentReviewController = reviewController;
+
+    try {
+        const response = await fetch(`api/ai-review?review_id=${encodeURIComponent(reviewId)}`, {
+            signal: reviewController.signal,
+        });
+
+        if (!response.ok) {
+            if (currentReviewController !== reviewController) return;
+            if (response.status === 404) {
+                setCurrentReviewId(null);
+                showReviewExpiredIndicator(content);
+                return 'missing';
+            }
+            let message = 'Failed to load saved review';
+            try {
+                const errorData = await response.json();
+                message = errorData.error || message;
+            } catch (e) {
+                // Ignore JSON decode errors.
+            }
+            content.innerHTML = `<div class="error">${message}</div>`;
+            addNewReviewButton(content);
+            return 'error';
+        }
+
+        const headerStatus = (response.headers.get('X-AI-Review-Status') || '').toLowerCase();
+        const isRunning = headerStatus === 'running';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let markdown = '';
+        if (isRunning) {
+            content.innerHTML = '<div class="loading">Reconnecting to running review...</div><button class="btn-cancel-inline" onclick="cancelAiReview()">Cancel</button>';
+        } else {
+            content.innerHTML = '';
+        }
+
+        while (true) {
+            if (currentReviewController !== reviewController) break;
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            markdown += decoder.decode(value, { stream: true });
+            renderReviewContent(content, markdown, isRunning);
+            content.scrollTop = content.scrollHeight;
+        }
+
+        if (currentReviewController !== reviewController) return;
+        renderReviewContent(content, markdown, false);
+
+        let finalStatus = headerStatus;
+        if (headerStatus === 'running') {
+            const latestStatus = await fetchAiReviewStatus(reviewId);
+            if (latestStatus) finalStatus = latestStatus;
+        }
+
+        if (finalStatus === 'cancelled') {
+            showReviewCancelledIndicator();
+        } else if (finalStatus === 'running') {
+            renderReviewContent(content, markdown, true);
+        } else {
+            addNewReviewButton(content);
+        }
+        return 'ok';
+    } catch (err) {
+        if (err.name === 'AbortError') return 'aborted';
+        if (currentReviewController !== reviewController) return 'aborted';
+        content.innerHTML = `<div class="error">Error: ${err.message}</div>`;
+        addNewReviewButton(content);
+        return 'error';
+    } finally {
+        if (currentReviewController === reviewController) {
+            currentReviewController = null;
+        }
+    }
+}
+
+async function requestAiReview(options = {}) {
     if (!diffEditor) return;
+    const forceNew = Boolean(options.forceNew);
 
     const panel = document.getElementById('ai-review-panel');
     const content = document.getElementById('ai-review-content');
-    const btn = document.getElementById('btn-ai-review');
-
     const modifiedContent = diffEditor.getModifiedEditor().getModel().getValue();
 
-    // Show panel with loading state
+    if (!forceNew) {
+        if (currentReviewController) {
+            panel.classList.remove('hidden');
+            return;
+        }
+        if (currentReviewId) {
+            const existingResult = await streamExistingReview(currentReviewId);
+            if (existingResult !== 'missing') {
+                return;
+            }
+        }
+        const latestReviewId = await fetchLatestAiReviewId(FILE_PATH);
+        if (latestReviewId) {
+            setCurrentReviewId(latestReviewId);
+            const latestResult = await streamExistingReview(latestReviewId);
+            if (latestResult !== 'missing') {
+                return;
+            }
+        }
+    }
+
+    const previousReviewId = currentReviewId;
+    const previousReviewController = currentReviewController;
+
+    if (previousReviewController) {
+        previousReviewController.abort();
+        currentReviewController = null;
+    }
+    if (forceNew && previousReviewId) {
+        await sendAiReviewCancel(previousReviewId);
+    }
+
+    const nextReviewId = generateReviewId();
+    setCurrentReviewId(nextReviewId);
+
     panel.classList.remove('hidden');
-    content.innerHTML = '<div class="loading">Analyzing changes...</div>';
-    btn.disabled = true;
+    content.innerHTML = '<div class="loading">Analyzing changes...</div><button class="btn-cancel-inline" onclick="cancelAiReview()">Cancel</button>';
+
+    const reviewController = new AbortController();
+    currentReviewController = reviewController;
+
+    const restorePreviousReviewId = () => {
+        setCurrentReviewId(previousReviewId || null);
+    };
 
     try {
         const response = await fetch('api/ai-review', {
@@ -290,36 +534,75 @@ async function requestAiReview() {
                 modified: modifiedContent,
                 file_path: FILE_PATH,
                 language: fileLanguage,
+                review_id: nextReviewId,
             }),
+            signal: reviewController.signal,
         });
 
         if (!response.ok) {
-            const errorData = await response.json();
-            content.innerHTML = `<div class="error">${errorData.error || 'Review failed'}</div>`;
+            if (currentReviewController !== reviewController) return;
+            if (response.status === 409) {
+                await streamExistingReview(nextReviewId);
+                return;
+            }
+            let message = 'Review failed';
+            try {
+                const errorData = await response.json();
+                message = errorData.error || message;
+            } catch (e) {
+                // Ignore JSON decode errors.
+            }
+            restorePreviousReviewId();
+            content.innerHTML = `<div class="error">${message}</div>`;
+            addNewReviewButton(content);
             return;
         }
 
-        // Stream the response
+        const serverReviewId = response.headers.get('X-AI-Review-Id');
+        if (serverReviewId) {
+            setCurrentReviewId(serverReviewId);
+        } else {
+            setCurrentReviewId(null);
+        }
+
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let markdown = '';
-
         content.innerHTML = '';
 
         while (true) {
+            if (currentReviewController !== reviewController) break;
             const { done, value } = await reader.read();
             if (done) break;
 
             markdown += decoder.decode(value, { stream: true });
-            content.innerHTML = renderMarkdown(markdown);
+            renderReviewContent(content, markdown, true);
             content.scrollTop = content.scrollHeight;
         }
 
+        if (currentReviewController !== reviewController) return;
+        renderReviewContent(content, markdown, false);
+        addNewReviewButton(content);
     } catch (err) {
+        if (err.name === 'AbortError') return;
+        if (currentReviewController !== reviewController) return;
+        restorePreviousReviewId();
         content.innerHTML = `<div class="error">Error: ${err.message}</div>`;
+        addNewReviewButton(content);
     } finally {
-        btn.disabled = false;
+        if (currentReviewController === reviewController) {
+            currentReviewController = null;
+        }
     }
+}
+
+async function cancelAiReview() {
+    if (currentReviewController) {
+        currentReviewController.abort();
+        currentReviewController = null;
+    }
+    showReviewCancelledIndicator();
+    await sendAiReviewCancel(currentReviewId);
 }
 
 function renderMarkdown(text) {
@@ -332,8 +615,10 @@ function renderMarkdown(text) {
         .replace(/```(\w+)?\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
         // Inline code
         .replace(/`([^`]+)`/g, '<code>$1</code>')
-        // Bold
+        // Bold (must come before italic)
         .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        // Italic (single asterisk, but not inside words)
+        .replace(/(?<![*\w])\*([^*]+)\*(?![*\w])/g, '<em>$1</em>')
         // Headers
         .replace(/^### (.+)$/gm, '<h4>$1</h4>')
         .replace(/^## (.+)$/gm, '<h3>$1</h3>')

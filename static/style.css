@@ -401,13 +401,13 @@ main {
     width: 400px;
     max-width: calc(100vw - 2rem);
     max-height: calc(100vh - 60px - 2rem);
+    max-height: calc(100dvh - 60px - 2rem);
     background: var(--panel-bg);
     border: 2px solid var(--border);
     border-radius: 16px;
     box-shadow: 0 8px 32px rgba(214, 51, 132, 0.2);
     display: flex;
     flex-direction: column;
-    overflow: hidden;
     z-index: 1000;
     backdrop-filter: blur(12px);
 }
@@ -442,7 +442,7 @@ main {
 }
 
 .ai-review-content {
-    flex: 0 1 auto;
+    flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -506,6 +506,54 @@ main {
 
 .ai-review-content .loading {
     padding: 1rem;
+}
+
+.ai-review-content .cancelled-indicator {
+    margin-top: 0.75rem;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.ai-review-content em {
+    font-style: italic;
+    color: var(--text-secondary);
+}
+
+.btn-cancel-inline {
+    display: block;
+    margin: 1rem auto 0;
+    background: var(--error-bg);
+    border: 2px solid var(--error);
+    color: var(--error);
+    padding: 0.4rem 1rem;
+    border-radius: 16px;
+    cursor: pointer;
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+}
+
+.btn-cancel-inline:hover {
+    background: var(--error);
+    color: white;
+}
+
+.btn-new-review-inline {
+    display: block;
+    margin: 0.75rem auto 0;
+    background: var(--accent);
+    border: 2px solid var(--accent);
+    color: white;
+    padding: 0.4rem 1rem;
+    border-radius: 16px;
+    cursor: pointer;
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+}
+
+.btn-new-review-inline:hover {
+    background: transparent;
+    color: var(--accent);
 }
 
 /* Terminal */

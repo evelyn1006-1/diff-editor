@@ -10,6 +10,7 @@ import logging
 import math
 import mimetypes
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -214,6 +215,415 @@ def create_app() -> Flask:
         os.environ.get("AI_REVIEW_COOLDOWN_FILE", "/tmp/diff-editor-ai-review-cooldown.txt")
     )
     AI_REVIEW_PROVIDER = os.environ.get("AI_REVIEW_PROVIDER", "codex_cli").strip().lower()
+    AI_REVIEW_CACHE_DIR = Path(
+        os.environ.get("AI_REVIEW_CACHE_DIR", "/tmp/diff-editor-ai-review-cache")
+    )
+    AI_REVIEW_CACHE_TTL_SECONDS = max(
+        60.0,
+        float(os.environ.get("AI_REVIEW_CACHE_TTL_SECONDS", str(24 * 60 * 60)))
+    )
+
+    def new_review_cache_key() -> str:
+        """Generate a unique review id for a user-initiated review run."""
+        return secrets.token_hex(8)
+
+    REVIEW_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+    def normalize_review_id(raw_review_id: object) -> str | None:
+        review_id = str(raw_review_id or "").strip()
+        if not review_id:
+            return None
+        if not REVIEW_ID_PATTERN.fullmatch(review_id):
+            return None
+        return review_id
+
+    def get_review_session_namespace() -> str:
+        """Per-session namespace used to isolate review ids across users."""
+        namespace = session.get("ai_review_namespace")
+        if isinstance(namespace, str) and namespace:
+            return namespace
+        namespace = secrets.token_hex(12)
+        session["ai_review_namespace"] = namespace
+        return namespace
+
+    def to_scoped_cache_key(review_id: str) -> str:
+        """Map a client-facing review_id to a session-scoped cache key."""
+        namespace = get_review_session_namespace()
+        key_input = f"{namespace}:{review_id}"
+        return hashlib.sha256(key_input.encode("utf-8")).hexdigest()[:32]
+
+    def get_review_cache_paths(cache_key: str) -> tuple[Path, Path, Path, Path]:
+        """Return (output_file, status_file, lock_file, pid_file) paths for a cache key."""
+        AI_REVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        return (
+            AI_REVIEW_CACHE_DIR / f"{cache_key}.txt",
+            AI_REVIEW_CACHE_DIR / f"{cache_key}.status",
+            AI_REVIEW_CACHE_DIR / f"{cache_key}.lock",
+            AI_REVIEW_CACHE_DIR / f"{cache_key}.pid",
+        )
+
+    def get_latest_review_index_path(file_path: str) -> Path:
+        """Return path for latest-review index entry scoped by session + file path."""
+        AI_REVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        namespace = get_review_session_namespace()
+        key_input = f"{namespace}:{file_path}"
+        digest = hashlib.sha256(key_input.encode("utf-8")).hexdigest()[:32]
+        return AI_REVIEW_CACHE_DIR / f"latest-{digest}.txt"
+
+    def set_latest_review_for_file(file_path: str, review_id: str):
+        if not file_path or not review_id:
+            return
+        try:
+            get_latest_review_index_path(file_path).write_text(review_id, encoding="utf-8")
+        except Exception:
+            pass
+
+    def get_latest_review_for_file(file_path: str) -> str | None:
+        if not file_path:
+            return None
+        path = get_latest_review_index_path(file_path)
+        if not path.exists():
+            return None
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+        except Exception:
+            return None
+        return normalize_review_id(value)
+
+    def clear_latest_review_for_file(file_path: str):
+        if not file_path:
+            return
+        try:
+            get_latest_review_index_path(file_path).unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+    def purge_review_cache(cache_key: str, *, keep_lock: bool = False):
+        """Delete cache artifacts for a review id."""
+        output_file, status_file, lock_file, pid_file = get_review_cache_paths(cache_key)
+        paths = [output_file, status_file, pid_file]
+        if not keep_lock:
+            paths.append(lock_file)
+        for path in paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+    def review_cache_age_seconds(cache_key: str, now: float | None = None) -> float | None:
+        """Return cache age in seconds based on newest status/output mtime."""
+        output_file, status_file, _, _ = get_review_cache_paths(cache_key)
+        candidates: list[Path] = []
+        if status_file.exists():
+            candidates.append(status_file)
+        if output_file.exists():
+            candidates.append(output_file)
+        if not candidates:
+            return None
+        try:
+            newest_mtime = max(path.stat().st_mtime for path in candidates)
+        except Exception:
+            return None
+        now_ts = time.time() if now is None else now
+        return max(0.0, now_ts - newest_mtime)
+
+    def is_review_cache_expired(cache_key: str, now: float | None = None) -> bool:
+        age = review_cache_age_seconds(cache_key, now=now)
+        if age is None:
+            return False
+        return age > AI_REVIEW_CACHE_TTL_SECONDS
+
+    def cleanup_expired_review_cache():
+        """Delete all cache entries older than the TTL."""
+        try:
+            AI_REVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            now_ts = time.time()
+            review_ids: set[str] = set()
+            for path in AI_REVIEW_CACHE_DIR.iterdir():
+                if path.is_file():
+                    if path.name.startswith("latest-"):
+                        continue
+                    review_ids.add(path.stem)
+            for review_id in review_ids:
+                if is_review_cache_expired(review_id, now=now_ts):
+                    purge_review_cache(review_id)
+        except Exception:
+            # Best-effort cleanup only.
+            pass
+
+    def get_review_status(cache_key: str) -> str | None:
+        """Get review status: 'running', 'completed', 'error', or None if not found."""
+        _, status_file, _, _ = get_review_cache_paths(cache_key)
+        if is_review_cache_expired(cache_key):
+            purge_review_cache(cache_key)
+            return None
+        if status_file.exists():
+            return status_file.read_text().strip()
+        return None
+
+    def set_review_status(cache_key: str, status: str):
+        """Set review status."""
+        _, status_file, _, _ = get_review_cache_paths(cache_key)
+        status_file.write_text(status)
+
+    def try_start_review(cache_key: str) -> tuple[bool, str | None]:
+        """
+        Atomically check if review exists and mark as starting if not.
+        Returns (should_start, existing_status).
+        Uses file locking to prevent race conditions across workers.
+
+        Only "running" or "completed" status blocks new reviews.
+        "cancelled" or "error" status allows regeneration.
+        """
+        output_file, status_file, lock_file, pid_file = get_review_cache_paths(cache_key)
+
+        try:
+            with lock_file.open("w") as lock_f:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+
+                # Check status while holding lock
+                if status_file.exists():
+                    if is_review_cache_expired(cache_key):
+                        purge_review_cache(cache_key, keep_lock=True)
+                    elif status_file.exists():
+                        existing = status_file.read_text().strip()
+                        # Only block if running or completed - allow retry on error/cancelled
+                        if existing in ("running", "completed"):
+                            return False, existing
+                        # Clear old failed/cancelled state files before restart
+                        if output_file.exists():
+                            output_file.unlink()
+                        if pid_file.exists():
+                            pid_file.unlink()
+
+                # Mark as running while holding lock
+                status_file.write_text("running")
+                return True, None  # We should start the review
+        except Exception:
+            # On error, check status without lock
+            if status_file.exists():
+                existing = status_file.read_text().strip()
+                if existing in ("running", "completed"):
+                    return False, existing
+            return True, None  # Assume we should start
+
+    def run_review_in_background(
+        cache_key: str,
+        cmd: list[str],
+        review_prompt: str,
+        review_cwd: Path,
+        review_case: str,
+        debug_file_path: str,
+        timeout: int,
+    ):
+        """Run codex review in background, writing output to cache file."""
+        import datetime
+
+        output_file, _, _, pid_file = get_review_cache_paths(cache_key)
+        # Note: status already set to "running" by try_start_review()
+
+        def set_status_if_not_cancelled(status: str):
+            if get_review_status(cache_key) != "cancelled":
+                set_review_status(cache_key, status)
+
+        # Open files for writing
+        debug_file = None
+        try:
+            debug_file = open(debug_file_path, "a")
+            debug_file.write(f"\n{'=' * 60}\n")
+            debug_file.write(f"=== AI Review Debug Log ===\n")
+            debug_file.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
+            debug_file.write(f"Cache key: {cache_key}\n")
+            debug_file.write(f"Review case: {review_case}\n")
+            debug_file.write(f"Working dir: {review_cwd}\n")
+            debug_file.write(f"Command: {' '.join(cmd)}\n")
+            debug_file.write(f"\n=== Input Prompt ===\n{review_prompt}\n")
+            debug_file.write(f"\n=== Codex Events ===\n")
+            debug_file.flush()
+        except Exception:
+            debug_file = None
+
+        try:
+            cache_file = open(output_file, "w")
+        except Exception as e:
+            set_status_if_not_cancelled("error")
+            if debug_file:
+                debug_file.write(f"ERROR: Failed to open cache output file: {str(e)}\n")
+                debug_file.close()
+            return
+
+        def write_output(text: str):
+            cache_file.write(text)
+            cache_file.flush()
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(review_cwd),
+            )
+            # Save PID for cancellation support
+            pid_file.write_text(str(process.pid))
+            process.stdin.write(review_prompt)
+            process.stdin.close()
+        except FileNotFoundError:
+            write_output("**Error:** codex command not found on server")
+            set_status_if_not_cancelled("error")
+            cache_file.close()
+            if debug_file:
+                debug_file.write("ERROR: codex command not found\n")
+                debug_file.close()
+            return
+        except Exception as e:
+            write_output(f"**Error:** Failed to start codex: {str(e)}")
+            set_status_if_not_cancelled("error")
+            cache_file.close()
+            if debug_file:
+                debug_file.write(f"ERROR: {str(e)}\n")
+                debug_file.close()
+            return
+
+        # Watchdog for timeout
+        timed_out = threading.Event()
+
+        def watchdog():
+            time.sleep(timeout)
+            if process.poll() is None:
+                timed_out.set()
+                process.kill()
+
+        watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+        watchdog_thread.start()
+
+        output_received = False
+        last_reasoning = None
+
+        try:
+            for line in process.stdout:
+                if timed_out.is_set():
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+
+                if debug_file:
+                    debug_file.write(f"{line}\n")
+                    debug_file.flush()
+
+                try:
+                    event = json.loads(line)
+                    event_type = event.get("type")
+
+                    if event_type == "item.completed":
+                        item = event.get("item", {})
+                        item_type = item.get("type")
+
+                        if item_type == "reasoning":
+                            text = item.get("text", "").strip()
+                            if text and text != last_reasoning:
+                                last_reasoning = text
+                                write_output(f"{text}\n\n")
+
+                        elif item_type == "command_execution":
+                            write_output("*Done*\n\n")
+
+                        elif item_type == "agent_message":
+                            text = item.get("text", "")
+                            if text:
+                                output_received = True
+                                write_output(f"\n---\n\n{text}")
+
+                    elif event_type == "item.started":
+                        item = event.get("item", {})
+                        if item.get("type") == "command_execution":
+                            cmd_text = item.get("command", "")
+                            if cmd_text:
+                                if "-lc " in cmd_text or "-c " in cmd_text:
+                                    for flag in ["-lc ", "-c "]:
+                                        if flag in cmd_text:
+                                            after_flag = cmd_text.split(flag, 1)[1]
+                                            if after_flag and after_flag[0] in "\"'":
+                                                delim = after_flag[0]
+                                                inner = after_flag[1:].split(delim)[0]
+                                                cmd_text = inner
+                                            break
+                                if len(cmd_text) > 60:
+                                    cmd_text = cmd_text[:57] + "..."
+                                write_output(f"`{cmd_text}`... ")
+
+                except json.JSONDecodeError:
+                    continue
+
+            process.wait(timeout=5)
+
+            if timed_out.is_set():
+                write_output("\n\n**Error:** Review timed out")
+                set_status_if_not_cancelled("error")
+                if debug_file:
+                    debug_file.write("\n=== Result: TIMEOUT ===\n")
+            elif process.returncode != 0:
+                stderr = process.stderr.read() if process.stderr else ""
+                write_output(f"\n\n**Error:** codex exited with code {process.returncode}: {stderr}")
+                set_status_if_not_cancelled("error")
+                if debug_file:
+                    debug_file.write(f"\n=== Result: ERROR (exit {process.returncode}) ===\n{stderr}\n")
+            elif not output_received:
+                write_output("**Error:** codex returned no review output")
+                set_status_if_not_cancelled("error")
+                if debug_file:
+                    debug_file.write("\n=== Result: NO OUTPUT ===\n")
+            else:
+                set_status_if_not_cancelled("completed")
+                if debug_file:
+                    debug_file.write("\n=== Result: SUCCESS ===\n")
+
+        except Exception as e:
+            process.kill()
+            write_output(f"\n\n**Error:** {str(e)}")
+            set_status_if_not_cancelled("error")
+            if debug_file:
+                debug_file.write(f"\n=== Result: EXCEPTION ===\n{str(e)}\n")
+        finally:
+            cache_file.close()
+            if debug_file:
+                debug_file.close()
+            try:
+                pid_file.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+    def stream_from_cache(cache_key: str):
+        """Stream review output from cache file, following new content while running."""
+        output_file, _, _, _ = get_review_cache_paths(cache_key)
+        position = 0
+
+        while True:
+            status = get_review_status(cache_key)
+
+            if output_file.exists():
+                with open(output_file, "r") as f:
+                    f.seek(position)
+                    new_content = f.read()
+                    if new_content:
+                        position = f.tell()
+                        yield new_content
+
+            if status in ("completed", "error", "cancelled"):
+                break
+            elif status == "running":
+                time.sleep(0.1)  # Poll interval
+            else:
+                # No status means no active review state to follow.
+                break
 
     def consume_ai_review_cooldown() -> float:
         """
@@ -625,6 +1035,68 @@ def create_app() -> Flask:
         else:
             return jsonify({"error": message}), 500
 
+    @app.get("/api/ai-review")
+    def ai_review_stream_existing():
+        """Stream an existing AI review by review_id without starting a new run."""
+        cleanup_expired_review_cache()
+
+        review_id = normalize_review_id(request.args.get("review_id"))
+        if not review_id:
+            return jsonify({"error": "No review_id provided"}), 400
+
+        cache_key = to_scoped_cache_key(review_id)
+        status = get_review_status(cache_key)
+        if status is None:
+            return jsonify({"error": "Review not found or expired"}), 404
+
+        return Response(
+            stream_from_cache(cache_key),
+            mimetype="text/plain",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-AI-Review-Id": review_id,
+                "X-AI-Review-Status": status,
+            },
+        )
+
+    @app.get("/api/ai-review/status")
+    def ai_review_status():
+        """Return status for an existing AI review id."""
+        cleanup_expired_review_cache()
+
+        review_id = normalize_review_id(request.args.get("review_id"))
+        if not review_id:
+            return jsonify({"error": "No review_id provided"}), 400
+
+        cache_key = to_scoped_cache_key(review_id)
+        status = get_review_status(cache_key)
+        if status is None:
+            return jsonify({"error": "Review not found or expired"}), 404
+
+        return jsonify({"review_id": review_id, "status": status})
+
+    @app.get("/api/ai-review/latest")
+    def ai_review_latest():
+        """Return latest known review id for a file in the current session scope."""
+        cleanup_expired_review_cache()
+
+        file_path = str(request.args.get("file_path", "")).strip()
+        if not file_path:
+            return jsonify({"error": "No file_path provided"}), 400
+
+        review_id = get_latest_review_for_file(file_path)
+        if not review_id:
+            return jsonify({"error": "No saved review found"}), 404
+
+        cache_key = to_scoped_cache_key(review_id)
+        status = get_review_status(cache_key)
+        if status is None:
+            clear_latest_review_for_file(file_path)
+            return jsonify({"error": "Review not found or expired"}), 404
+
+        return jsonify({"review_id": review_id, "status": status})
+
     @app.post("/api/ai-review")
     def ai_review():
         """Get AI review of code changes using Codex CLI or OpenAI SDK."""
@@ -640,9 +1112,27 @@ def create_app() -> Flask:
         modified = data.get("modified", "")
         file_path = data.get("file_path", "unknown")
         language = data.get("language", "plaintext")
+        requested_review_id = normalize_review_id(data.get("review_id"))
+
+        if data.get("review_id") and not requested_review_id:
+            return jsonify({"error": "Invalid review_id"}), 400
 
         if original == modified:
             return jsonify({"error": "No changes to review"}), 400
+
+        cleanup_expired_review_cache()
+
+        # This request would start a new review run, so apply cooldown.
+        cooldown_remaining = consume_ai_review_cooldown()
+        if cooldown_remaining > 0:
+            retry_after = max(1, math.ceil(cooldown_remaining))
+            response = jsonify({
+                "error": f"AI review is on cooldown. Try again in {retry_after}s.",
+                "retry_after_seconds": retry_after,
+            })
+            response.status_code = 429
+            response.headers["Retry-After"] = str(retry_after)
+            return response
 
         review_cwd = choose_ai_review_cwd(file_path)
 
@@ -662,18 +1152,51 @@ def create_app() -> Flask:
         if not unified_diff.strip():
             return jsonify({"error": "No changes to review"}), 400
 
-        cooldown_remaining = consume_ai_review_cooldown()
-        if cooldown_remaining > 0:
-            retry_after = max(1, math.ceil(cooldown_remaining))
-            response = jsonify({
-                "error": f"AI review is on cooldown. Try again in {retry_after}s.",
-                "retry_after_seconds": retry_after,
-            })
-            response.status_code = 429
-            response.headers["Retry-After"] = str(retry_after)
-            return response
+        # Determine review case based on git status and unsaved changes
+        # Case 2: No uncommitted changes, user edited → send diff, --skip-git-repo-check
+        # Case 3: Uncommitted changes, no further edits → use --uncommitted, no diff
+        # Case 4: Uncommitted + user edited → send diff, instruct to use git show HEAD
+        resolved_path, _ = resolve_request_path(file_path, "file_path")
+        git_root = find_git_root(resolved_path) if resolved_path else None
+        is_git_tracked = git_root and resolved_path and is_tracked_by_git(resolved_path, git_root)
 
-        review_prompt = f"""Review this diff for `{file_path}` ({language}):
+        review_case = "non_git"  # Default: not in git, send diff with --skip-git-repo-check
+        if is_git_tracked and resolved_path:
+            success, disk_content = read_file_bytes(resolved_path)
+            if success and isinstance(disk_content, bytes):
+                try:
+                    disk_text = disk_content.decode("utf-8")
+                except UnicodeDecodeError:
+                    disk_text = None
+
+                if disk_text is not None:
+                    if modified == disk_text:
+                        # Editor matches disk → Case 3: uncommitted changes only
+                        review_case = "uncommitted_only"
+                    elif original == disk_text:
+                        # Disk matches HEAD → Case 2: user edits only (no uncommitted)
+                        review_case = "user_edits_only"
+                    else:
+                        # Disk differs from both HEAD and editor → Case 4
+                        review_case = "uncommitted_plus_edits"
+
+        # Build prompt based on case
+        if review_case == "uncommitted_only":
+            # Case 3: No diff needed, tell codex to review uncommitted changes
+            review_prompt = f"Review uncommitted changes for `{file_path}` ({language}). Use `git diff` to see what changed."
+        elif review_case == "uncommitted_plus_edits":
+            # Case 4: Diff needed + instruction to check HEAD
+            review_prompt = f"""Review this diff for `{file_path}` ({language}).
+
+Note: The file on disk has uncommitted changes not reflected in this diff.
+This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the baseline.
+
+```diff
+{unified_diff}
+```"""
+        else:
+            # Cases 2 and non_git: Simple diff prompt
+            review_prompt = f"""Review this diff for `{file_path}` ({language}):
 
 ```diff
 {unified_diff}
@@ -708,174 +1231,137 @@ def create_app() -> Flask:
                 },
             )
 
-        CODEX_TIMEOUT = int(os.environ.get("AI_REVIEW_TIMEOUT", "120"))
-        CODEX_DEBUG_FILE = os.environ.get("AI_REVIEW_DEBUG_FILE", "/tmp/diff-editor-ai-review-debug.log")
+        # Each user request gets a unique review id. We only stream/reuse for this exact run.
+        cache_key = ""
+        review_id_for_response = requested_review_id or ""
+        if requested_review_id:
+            cache_key = to_scoped_cache_key(requested_review_id)
+            should_start, _ = try_start_review(cache_key)
+            if not should_start:
+                return jsonify({"error": "Review session already exists"}), 409
+        else:
+            for _ in range(10):
+                candidate = new_review_cache_key()
+                candidate_key = to_scoped_cache_key(candidate)
+                should_start, _ = try_start_review(candidate_key)
+                if should_start:
+                    cache_key = candidate_key
+                    review_id_for_response = candidate
+                    break
 
-        cmd = [
-            "codex",
-            "exec",
-            "review",
-            "-m",
-            "gpt-5.3-codex",
-            "--skip-git-repo-check",
-            "--json",
-            "-",  # Read prompt from stdin
-        ]
+        if not cache_key:
+            return jsonify({"error": "Failed to initialize review session"}), 500
 
-        def generate_codex():
-            # Open debug file for logging
-            import datetime
-            debug_file = None
-            try:
-                debug_file = open(CODEX_DEBUG_FILE, "w")
-                debug_file.write(f"=== AI Review Debug Log ===\n")
-                debug_file.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
-                debug_file.write(f"Working dir: {review_cwd}\n")
-                debug_file.write(f"Command: {' '.join(cmd)}\n")
-                debug_file.write(f"\n=== Input Prompt ===\n{review_prompt}\n")
-                debug_file.write(f"\n=== Codex Events ===\n")
-                debug_file.flush()
-            except Exception:
-                debug_file = None  # Continue without debug logging
+        canonical_file_path = str(resolved_path) if resolved_path else str(file_path)
+        set_latest_review_for_file(canonical_file_path, review_id_for_response)
 
-            try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    cwd=str(review_cwd),
-                )
-                process.stdin.write(review_prompt)
-                process.stdin.close()
-            except FileNotFoundError:
-                if debug_file:
-                    debug_file.write("ERROR: codex command not found\n")
-                    debug_file.close()
-                yield "**Error:** codex command not found on server"
-                return
-            except Exception as e:
-                if debug_file:
-                    debug_file.write(f"ERROR: {str(e)}\n")
-                    debug_file.close()
-                yield f"**Error:** Failed to start codex: {str(e)}"
-                return
+        CODEX_TIMEOUT = int(os.environ.get("AI_REVIEW_TIMEOUT", "900"))  # 15 minutes
+        CODEX_DEBUG_FILE = os.environ.get(
+            "AI_REVIEW_DEBUG_FILE",
+            str(Path(__file__).parent / "logs" / "ai-review-debug.log")
+        )
 
-            # Watchdog thread to enforce timeout
-            timed_out = threading.Event()
+        # Build command based on review case
+        cmd = ["codex", "exec", "review", "-m", "gpt-5.3-codex", "--json"]
 
-            def watchdog():
-                time.sleep(CODEX_TIMEOUT)
-                if process.poll() is None:  # Still running
-                    timed_out.set()
-                    process.kill()
+        if review_case in ("uncommitted_only", "uncommitted_plus_edits"):
+            # Cases 3 & 4: Let codex use git context, read prompt from stdin
+            cmd.append("-")
+        else:
+            # Cases 2 and non_git: Skip git repo check, read prompt from stdin
+            cmd.extend(["--skip-git-repo-check", "-"])
 
-            watchdog_thread = threading.Thread(target=watchdog, daemon=True)
-            watchdog_thread.start()
+        # Start review in background thread
+        review_thread = threading.Thread(
+            target=run_review_in_background,
+            args=(cache_key, cmd, review_prompt, review_cwd, review_case, CODEX_DEBUG_FILE, CODEX_TIMEOUT),
+            daemon=True,
+        )
+        review_thread.start()
 
-            output_received = False
-            last_reasoning = None
-            try:
-                for line in process.stdout:
-                    if timed_out.is_set():
-                        break
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    # Log raw event to debug file
-                    if debug_file:
-                        debug_file.write(f"{line}\n")
-                        debug_file.flush()
-
-                    try:
-                        event = json.loads(line)
-                        event_type = event.get("type")
-
-                        if event_type == "item.completed":
-                            item = event.get("item", {})
-                            item_type = item.get("type")
-
-                            if item_type == "reasoning":
-                                # Show reasoning (dedupe consecutive identical ones)
-                                text = item.get("text", "").strip()
-                                if text and text != last_reasoning:
-                                    last_reasoning = text
-                                    yield f"*{text}*\n\n"
-
-                            elif item_type == "command_execution":
-                                # Command finished
-                                yield "*done*\n\n"
-
-                            elif item_type == "agent_message":
-                                text = item.get("text", "")
-                                if text:
-                                    output_received = True
-                                    yield f"\n---\n\n{text}"
-
-                        elif event_type == "item.started":
-                            item = event.get("item", {})
-                            if item.get("type") == "command_execution":
-                                cmd_text = item.get("command", "")
-                                if cmd_text:
-                                    # Strip bash wrapper: /bin/bash -lc 'cmd' or "cmd"
-                                    if "-lc " in cmd_text or "-c " in cmd_text:
-                                        # Find position after -c/-lc and get the quoted content
-                                        for flag in ["-lc ", "-c "]:
-                                            if flag in cmd_text:
-                                                after_flag = cmd_text.split(flag, 1)[1]
-                                                # First char should be quote
-                                                if after_flag and after_flag[0] in "\"'":
-                                                    delim = after_flag[0]
-                                                    # Extract content between quotes
-                                                    inner = after_flag[1:].split(delim)[0]
-                                                    cmd_text = inner
-                                                break
-                                    # Truncate long commands
-                                    if len(cmd_text) > 60:
-                                        cmd_text = cmd_text[:57] + "..."
-                                    yield f"`{cmd_text}`... "
-
-                    except json.JSONDecodeError:
-                        continue
-
-                process.wait(timeout=5)
-
-                if timed_out.is_set():
-                    if debug_file:
-                        debug_file.write("\n=== Result: TIMEOUT ===\n")
-                    yield "\n\n**Error:** Review timed out"
-                elif process.returncode != 0:
-                    stderr = process.stderr.read() if process.stderr else ""
-                    if debug_file:
-                        debug_file.write(f"\n=== Result: ERROR (exit {process.returncode}) ===\n{stderr}\n")
-                    yield f"\n\n**Error:** codex exited with code {process.returncode}: {stderr}"
-                elif not output_received:
-                    if debug_file:
-                        debug_file.write("\n=== Result: NO OUTPUT ===\n")
-                    yield "**Error:** codex returned no review output"
-                else:
-                    if debug_file:
-                        debug_file.write("\n=== Result: SUCCESS ===\n")
-
-            except Exception as e:
-                process.kill()
-                if debug_file:
-                    debug_file.write(f"\n=== Result: EXCEPTION ===\n{str(e)}\n")
-                yield f"\n\n**Error:** {str(e)}"
-            finally:
-                if debug_file:
-                    debug_file.close()
-
-        return Response(
-            generate_codex(),
+        # Stream from cache file
+        response = Response(
+            stream_from_cache(cache_key),
             mimetype="text/plain",
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",  # Disable nginx buffering
+                "X-AI-Review-Id": review_id_for_response,
+                "X-AI-Review-Status": "running",
             },
         )
+        return response
+
+    @app.post("/api/ai-review/cancel")
+    def ai_review_cancel():
+        """Cancel a running AI review by sending SIGINT to the subprocess."""
+        import signal
+
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        cleanup_expired_review_cache()
+
+        raw_review_id = data.get("review_id")
+        review_id = normalize_review_id(raw_review_id)
+        if raw_review_id and not review_id:
+            return jsonify({"error": "Invalid review_id"}), 400
+        if not review_id:
+            return jsonify({"error": "No review_id provided"}), 400
+
+        cache_key = to_scoped_cache_key(review_id)
+        _, _, _, pid_file = get_review_cache_paths(cache_key)
+        status = get_review_status(cache_key)
+
+        if status != "running":
+            return jsonify({"error": "No running review found"}), 404
+
+        if not pid_file.exists():
+            set_review_status(cache_key, "error")
+            return jsonify({"error": "No running review found"}), 404
+
+        try:
+            pid = int(pid_file.read_text().strip())
+
+            # Verify this still looks like a codex review process before signaling.
+            proc_cmdline = Path(f"/proc/{pid}/cmdline")
+            if proc_cmdline.exists():
+                cmdline = proc_cmdline.read_bytes().decode("utf-8", errors="ignore")
+                if "codex" not in cmdline or "review" not in cmdline:
+                    set_review_status(cache_key, "error")
+                    try:
+                        pid_file.unlink()
+                    except FileNotFoundError:
+                        pass
+                    return jsonify({"error": "No running review found"}), 404
+
+            os.kill(pid, signal.SIGINT)
+            set_review_status(cache_key, "cancelled")
+            return jsonify({"success": True, "message": "Review cancelled"})
+        except ProcessLookupError:
+            # Process already finished
+            set_review_status(cache_key, "cancelled")
+            try:
+                pid_file.unlink()
+            except FileNotFoundError:
+                pass
+            return jsonify({"success": True, "message": "Process already finished"})
+        except ValueError:
+            set_review_status(cache_key, "error")
+            try:
+                pid_file.unlink()
+            except FileNotFoundError:
+                pass
+            return jsonify({"error": "Invalid PID in file"}), 500
+        except PermissionError:
+            return jsonify({"error": "Permission denied to kill process"}), 500
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
     @app.get("/healthz")
     def healthz():
