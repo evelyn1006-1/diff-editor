@@ -5,12 +5,14 @@ Diff Editor - A web-based side-by-side file diff and editing tool.
 import difflib
 import fcntl
 import hashlib
+import json
 import logging
 import math
 import mimetypes
 import os
 import secrets
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -671,20 +673,7 @@ def create_app() -> Flask:
             response.headers["Retry-After"] = str(retry_after)
             return response
 
-        review_prompt = f"""You are a senior code reviewer. Analyze the change and provide a concise review:
-
-1. **Summary**: What changed (1-2 sentences)
-2. **Issues**: Any bugs, errors, or mistakes introduced
-3. **Concerns**: Security issues, performance problems, or possible regressions
-4. **Suggestions**: Quick improvements (if any)
-
-Be direct and specific. If everything looks good, say so briefly. Skip sections that don't apply.
-
-Primary file to review: `{file_path}` ({language}).
-Your working directory is set to the project context for this file.
-Read the file directly (and surrounding files only if needed) before finalizing your review.
-
-Here is a short unified diff to focus your attention:
+        review_prompt = f"""Review this diff for `{file_path}` ({language}):
 
 ```diff
 {unified_diff}
@@ -719,45 +708,168 @@ Here is a short unified diff to focus your attention:
                 },
             )
 
+        CODEX_TIMEOUT = int(os.environ.get("AI_REVIEW_TIMEOUT", "120"))
+        CODEX_DEBUG_FILE = os.environ.get("AI_REVIEW_DEBUG_FILE", "/tmp/diff-editor-ai-review-debug.log")
+
         cmd = [
             "codex",
             "exec",
+            "review",
             "-m",
             "gpt-5.3-codex",
-            "-s",
-            "read-only",
-            "-a",
-            "never",
-            "-C",
-            str(review_cwd),
-            review_prompt,
+            "--skip-git-repo-check",
+            "--json",
+            "-",  # Read prompt from stdin
         ]
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except FileNotFoundError:
-            return jsonify({"error": "codex command not found on server"}), 500
-        except Exception as e:
-            return jsonify({"error": f"Failed to run codex exec: {str(e)}"}), 500
+        def generate_codex():
+            # Open debug file for logging
+            import datetime
+            debug_file = None
+            try:
+                debug_file = open(CODEX_DEBUG_FILE, "w")
+                debug_file.write(f"=== AI Review Debug Log ===\n")
+                debug_file.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
+                debug_file.write(f"Working dir: {review_cwd}\n")
+                debug_file.write(f"Command: {' '.join(cmd)}\n")
+                debug_file.write(f"\n=== Input Prompt ===\n{review_prompt}\n")
+                debug_file.write(f"\n=== Codex Events ===\n")
+                debug_file.flush()
+            except Exception:
+                debug_file = None  # Continue without debug logging
 
-        output = result.stdout or ""
-        error_output = result.stderr or ""
-        if result.returncode != 0:
-            combined = (output + "\n" + error_output).strip()
-            if not combined:
-                combined = f"codex exec failed with exit code {result.returncode}"
-            return jsonify({"error": combined}), 500
+            try:
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    cwd=str(review_cwd),
+                )
+                process.stdin.write(review_prompt)
+                process.stdin.close()
+            except FileNotFoundError:
+                if debug_file:
+                    debug_file.write("ERROR: codex command not found\n")
+                    debug_file.close()
+                yield "**Error:** codex command not found on server"
+                return
+            except Exception as e:
+                if debug_file:
+                    debug_file.write(f"ERROR: {str(e)}\n")
+                    debug_file.close()
+                yield f"**Error:** Failed to start codex: {str(e)}"
+                return
 
-        if not output.strip():
-            return jsonify({"error": "codex exec returned no review output"}), 502
+            # Watchdog thread to enforce timeout
+            timed_out = threading.Event()
+
+            def watchdog():
+                time.sleep(CODEX_TIMEOUT)
+                if process.poll() is None:  # Still running
+                    timed_out.set()
+                    process.kill()
+
+            watchdog_thread = threading.Thread(target=watchdog, daemon=True)
+            watchdog_thread.start()
+
+            output_received = False
+            last_reasoning = None
+            try:
+                for line in process.stdout:
+                    if timed_out.is_set():
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # Log raw event to debug file
+                    if debug_file:
+                        debug_file.write(f"{line}\n")
+                        debug_file.flush()
+
+                    try:
+                        event = json.loads(line)
+                        event_type = event.get("type")
+
+                        if event_type == "item.completed":
+                            item = event.get("item", {})
+                            item_type = item.get("type")
+
+                            if item_type == "reasoning":
+                                # Show reasoning (dedupe consecutive identical ones)
+                                text = item.get("text", "").strip()
+                                if text and text != last_reasoning:
+                                    last_reasoning = text
+                                    yield f"*{text}*\n\n"
+
+                            elif item_type == "command_execution":
+                                # Command finished
+                                yield "*done*\n\n"
+
+                            elif item_type == "agent_message":
+                                text = item.get("text", "")
+                                if text:
+                                    output_received = True
+                                    yield f"\n---\n\n{text}"
+
+                        elif event_type == "item.started":
+                            item = event.get("item", {})
+                            if item.get("type") == "command_execution":
+                                cmd_text = item.get("command", "")
+                                if cmd_text:
+                                    # Strip bash wrapper: /bin/bash -lc 'cmd' or "cmd"
+                                    if "-lc " in cmd_text or "-c " in cmd_text:
+                                        # Find position after -c/-lc and get the quoted content
+                                        for flag in ["-lc ", "-c "]:
+                                            if flag in cmd_text:
+                                                after_flag = cmd_text.split(flag, 1)[1]
+                                                # First char should be quote
+                                                if after_flag and after_flag[0] in "\"'":
+                                                    delim = after_flag[0]
+                                                    # Extract content between quotes
+                                                    inner = after_flag[1:].split(delim)[0]
+                                                    cmd_text = inner
+                                                break
+                                    # Truncate long commands
+                                    if len(cmd_text) > 60:
+                                        cmd_text = cmd_text[:57] + "..."
+                                    yield f"`{cmd_text}`... "
+
+                    except json.JSONDecodeError:
+                        continue
+
+                process.wait(timeout=5)
+
+                if timed_out.is_set():
+                    if debug_file:
+                        debug_file.write("\n=== Result: TIMEOUT ===\n")
+                    yield "\n\n**Error:** Review timed out"
+                elif process.returncode != 0:
+                    stderr = process.stderr.read() if process.stderr else ""
+                    if debug_file:
+                        debug_file.write(f"\n=== Result: ERROR (exit {process.returncode}) ===\n{stderr}\n")
+                    yield f"\n\n**Error:** codex exited with code {process.returncode}: {stderr}"
+                elif not output_received:
+                    if debug_file:
+                        debug_file.write("\n=== Result: NO OUTPUT ===\n")
+                    yield "**Error:** codex returned no review output"
+                else:
+                    if debug_file:
+                        debug_file.write("\n=== Result: SUCCESS ===\n")
+
+            except Exception as e:
+                process.kill()
+                if debug_file:
+                    debug_file.write(f"\n=== Result: EXCEPTION ===\n{str(e)}\n")
+                yield f"\n\n**Error:** {str(e)}"
+            finally:
+                if debug_file:
+                    debug_file.close()
 
         return Response(
-            output,
+            generate_codex(),
             mimetype="text/plain",
             headers={
                 "Cache-Control": "no-cache",
