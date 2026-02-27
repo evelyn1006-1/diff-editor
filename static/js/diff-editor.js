@@ -136,6 +136,7 @@ async function initDiffEditor() {
         // AI Review button
         const aiReviewBtn = document.getElementById('btn-ai-review');
         aiReviewBtn.addEventListener('click', requestAiReview);
+        initEffortSelector();
 
         // Close AI review panel
         const closeReviewBtn = document.getElementById('btn-close-review');
@@ -270,6 +271,46 @@ let currentReviewController = null;
 const REVIEW_ID_STORAGE_KEY = `diff-editor-review-id:${FILE_PATH}`;
 const REVIEW_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 let currentReviewId = loadStoredReviewId();
+
+// Reasoning effort level
+const EFFORT_STORAGE_KEY = 'diff-editor-reasoning-effort';
+const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
+
+function loadStoredEffort() {
+    try {
+        const saved = localStorage.getItem(EFFORT_STORAGE_KEY);
+        return (saved && VALID_EFFORTS.includes(saved)) ? saved : 'medium';
+    } catch (e) {
+        return 'medium';
+    }
+}
+
+function saveEffort(effort) {
+    try {
+        if (VALID_EFFORTS.includes(effort)) {
+            localStorage.setItem(EFFORT_STORAGE_KEY, effort);
+        }
+    } catch (e) {
+        // Ignore storage failures
+    }
+}
+
+function getSelectedEffort() {
+    const select = document.getElementById('reasoning-effort');
+    return select ? select.value : 'medium';
+}
+
+function initEffortSelector() {
+    const select = document.getElementById('reasoning-effort');
+    if (!select) return;
+
+    const saved = loadStoredEffort();
+    select.value = saved;
+
+    select.addEventListener('change', () => {
+        saveEffort(select.value);
+    });
+}
 
 function loadStoredReviewId() {
     try {
@@ -535,6 +576,7 @@ async function requestAiReview(options = {}) {
                 file_path: FILE_PATH,
                 language: fileLanguage,
                 review_id: nextReviewId,
+                reasoning_effort: getSelectedEffort(),
             }),
             signal: reviewController.signal,
         });

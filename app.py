@@ -1114,6 +1114,12 @@ def create_app() -> Flask:
         language = data.get("language", "plaintext")
         requested_review_id = normalize_review_id(data.get("review_id"))
 
+        # Validate reasoning effort (default to medium for balanced speed/quality)
+        VALID_EFFORTS = ("low", "medium", "high", "xhigh")
+        reasoning_effort = str(data.get("reasoning_effort", "medium")).strip().lower()
+        if reasoning_effort not in VALID_EFFORTS:
+            reasoning_effort = "medium"
+
         if data.get("review_id") and not requested_review_id:
             return jsonify({"error": "Invalid review_id"}), 400
 
@@ -1212,7 +1218,7 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
                     client = OpenAI(api_key=api_key)
                     stream = client.responses.create(
                         model="gpt-5.2-codex",
-                        reasoning={"effort": "medium"},
+                        reasoning={"effort": reasoning_effort},
                         input=review_prompt,
                         stream=True,
                     )
@@ -1262,7 +1268,12 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
         )
 
         # Build command based on review case
-        cmd = ["codex", "exec", "review", "-m", "gpt-5.3-codex", "--json"]
+        cmd = [
+            "codex", "exec", "review",
+            "-m", "gpt-5.3-codex",
+            "-c", f'model_reasoning_effort="{reasoning_effort}"',
+            "--json",
+        ]
 
         if review_case in ("uncommitted_only", "uncommitted_plus_edits"):
             # Cases 3 & 4: Let codex use git context, read prompt from stdin
