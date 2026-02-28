@@ -383,6 +383,17 @@ async function fetchLatestAiReviewId(filePath) {
     }
 }
 
+function uniqueReviewIds(...reviewIds) {
+    const seen = new Set();
+    const result = [];
+    for (const reviewId of reviewIds) {
+        if (!reviewId || seen.has(reviewId)) continue;
+        seen.add(reviewId);
+        result.push(reviewId);
+    }
+    return result;
+}
+
 function renderReviewContent(content, markdown, showCancelButton) {
     let html = renderMarkdown(markdown);
     if (showCancelButton) {
@@ -523,17 +534,13 @@ async function requestAiReview(options = {}) {
             panel.classList.remove('hidden');
             return;
         }
-        if (currentReviewId) {
-            const existingResult = await streamExistingReview(currentReviewId);
-            if (existingResult !== 'missing') {
-                return;
-            }
-        }
         const latestReviewId = await fetchLatestAiReviewId(FILE_PATH);
-        if (latestReviewId) {
-            setCurrentReviewId(latestReviewId);
-            const latestResult = await streamExistingReview(latestReviewId);
-            if (latestResult !== 'missing') {
+        for (const reviewId of uniqueReviewIds(latestReviewId, currentReviewId)) {
+            if (reviewId !== currentReviewId) {
+                setCurrentReviewId(reviewId);
+            }
+            const existingResult = await streamExistingReview(reviewId);
+            if (existingResult !== 'missing') {
                 return;
             }
         }
