@@ -1217,7 +1217,7 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
                 try:
                     client = OpenAI(api_key=api_key)
                     stream = client.responses.create(
-                        model="gpt-5.2-codex",
+                        model="gpt-5.3-codex",
                         reasoning={"effort": reasoning_effort},
                         input=review_prompt,
                         stream=True,
