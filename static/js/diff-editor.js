@@ -737,6 +737,17 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+async function fetchRunToolingStatus(language) {
+    const response = await fetch(`api/run-tooling?language=${encodeURIComponent(language)}`);
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(data.error || 'Failed to check run tooling');
+    }
+
+    return data;
+}
+
 async function runFile() {
     const statusEl = document.getElementById('status');
     const runBtn = document.getElementById('btn-run');
@@ -745,7 +756,28 @@ async function runFile() {
 
     // Build the run command based on file language
     const basename = FILE_PATH.split('/').pop().replace(/\.[^.]+$/, '');
-    const outPath = `/tmp/run_${basename}`;
+    const filePathId = Array.from(FILE_PATH).reduce(
+        (hash, char) => ((hash * 31) + char.charCodeAt(0)) >>> 0,
+        0
+    ).toString(16);
+    const outPath = `/tmp/run_${basename}_${filePathId}`;
+    const csharpProjectDir = `${outPath}_csproj`;
+
+    let toolingStatus;
+    try {
+        toolingStatus = await fetchRunToolingStatus(fileLanguage);
+    } catch (err) {
+        statusEl.textContent = `Error: ${err.message}`;
+        statusEl.className = 'status error';
+        return;
+    }
+
+    if (!toolingStatus.available) {
+        const installSuffix = toolingStatus.install_command ? ` Install with: ${toolingStatus.install_command}` : '';
+        statusEl.textContent = `${toolingStatus.error || 'Required runtime not available'}${installSuffix}`;
+        statusEl.className = 'status error';
+        return;
+    }
 
     let runCommand;
     switch (fileLanguage) {
@@ -778,10 +810,20 @@ async function runFile() {
             runCommand = `perl ${FILE_PATH}`;
             break;
         case 'rust':
-            runCommand = `if command -v rustc >/dev/null 2>&1; then rustc ${FILE_PATH} -o ${outPath} && ${outPath}; else echo 'Rust requires rustc and cargo. Install with: sudo apt update && sudo apt install rustc cargo'; exit 1; fi`;
+            runCommand = `rustc ${FILE_PATH} -o ${outPath} && ${outPath}`;
             break;
         case 'csharp':
-            runCommand = `if command -v mcs >/dev/null 2>&1 && command -v mono >/dev/null 2>&1; then mcs ${FILE_PATH} -out:${outPath}.exe && mono ${outPath}.exe; elif command -v csc >/dev/null 2>&1 && command -v mono >/dev/null 2>&1; then csc -nologo -out:${outPath}.exe ${FILE_PATH} && mono ${outPath}.exe; else echo 'C# requires Mono. Install with: sudo apt update && sudo apt install mono-devel'; exit 1; fi`;
+            if (toolingStatus.runner === 'dotnet') {
+                runCommand = `if [ ! -f ${csharpProjectDir}/Runner.csproj ]; then dotnet new console -n Runner -o ${csharpProjectDir} >/dev/null; fi && cp ${FILE_PATH} ${csharpProjectDir}/Program.cs && dotnet run --project ${csharpProjectDir}/Runner.csproj --no-restore`;
+            } else if (toolingStatus.runner === 'csc') {
+                runCommand = `${toolingStatus.compiler} -nologo -out:${outPath}.exe ${FILE_PATH} && mono ${outPath}.exe`;
+            } else if (toolingStatus.runner === 'mcs') {
+                runCommand = `mcs ${FILE_PATH} -out:${outPath}.exe && mono ${outPath}.exe`;
+            } else {
+                statusEl.textContent = 'No C# runner available';
+                statusEl.className = 'status error';
+                return;
+            }
             break;
         case 'brainfuck':
             runCommand = `bf ${FILE_PATH}`;

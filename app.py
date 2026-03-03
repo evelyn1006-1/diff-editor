@@ -12,6 +12,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import threading
 import time
@@ -168,8 +169,6 @@ def parse_hex_view(content: str) -> tuple[bool, bytes | str]:
     return True, bytes(parsed)
 
 
-
-
 def choose_ai_review_cwd(file_path: str) -> Path:
     """Choose a codex working directory by preferring the nearest git repo root."""
     resolved_file_path, _ = resolve_request_path(file_path, "file_path")
@@ -194,6 +193,168 @@ def choose_ai_review_cwd(file_path: str) -> Path:
             return start_dir
 
         current = current.parent
+
+
+def command_exists(command: str) -> bool:
+    """Return whether a command is currently available on PATH."""
+    return shutil.which(command) is not None
+
+
+def find_first_command(*commands: str) -> str | None:
+    """Return the first command found on PATH from the provided candidates."""
+    for command in commands:
+        if command_exists(command):
+            return command
+    return None
+
+
+def has_dotnet_sdk() -> bool:
+    """Check for a usable dotnet SDK, not just the runtime host."""
+    if not command_exists("dotnet"):
+        return False
+
+    try:
+        result = subprocess.run(
+            ["dotnet", "--list-sdks"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    return bool(result.stdout.strip())
+
+
+RUN_TOOLING_CACHE: dict[str, dict[str, object]] = {}
+RUN_TOOLING_CACHE_LOCK = threading.Lock()
+
+
+def compute_run_tooling_status(language: str) -> tuple[dict[str, object], int]:
+    """Return run-tooling availability for a supported editor language."""
+    normalized = (language or "").strip().lower()
+    if not normalized:
+        return {"error": "No language specified"}, 400
+
+    # These are expected on Debian/Ubuntu base systems or are implicit in running the app.
+    if normalized in {"python", "shell", "perl"}:
+        return {"available": True}, 200
+
+    if normalized == "javascript":
+        if command_exists("node"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "JavaScript execution requires Node.js.",
+            "install_command": "sudo apt update && sudo apt install nodejs",
+        }, 200
+
+    if normalized == "go":
+        if command_exists("go"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "Go execution requires the Go toolchain.",
+            "install_command": "sudo apt update && sudo apt install golang-go",
+        }, 200
+
+    if normalized == "c":
+        if command_exists("gcc"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "C compilation requires gcc.",
+            "install_command": "sudo apt update && sudo apt install gcc",
+        }, 200
+
+    if normalized == "cpp":
+        if command_exists("g++"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "C++ compilation requires g++.",
+            "install_command": "sudo apt update && sudo apt install g++",
+        }, 200
+
+    if normalized == "java":
+        if command_exists("java"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "Java execution requires a JDK.",
+            "install_command": "sudo apt update && sudo apt install default-jdk",
+        }, 200
+
+    if normalized == "ruby":
+        if command_exists("ruby"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "Ruby execution requires ruby.",
+            "install_command": "sudo apt update && sudo apt install ruby",
+        }, 200
+
+    if normalized == "rust":
+        if command_exists("rustc"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "Rust execution requires rustc.",
+            "install_command": "sudo apt update && sudo apt install rustc cargo",
+        }, 200
+
+    if normalized == "csharp":
+        if has_dotnet_sdk():
+            return {"available": True, "runner": "dotnet"}, 200
+
+        csharp_compiler = find_first_command("csc", "mono-csc", "cli-csc")
+        if csharp_compiler and command_exists("mono"):
+            return {"available": True, "runner": "csc", "compiler": csharp_compiler}, 200
+
+        if command_exists("mcs") and command_exists("mono"):
+            return {"available": True, "runner": "mcs", "compiler": "mcs"}, 200
+
+        return {
+            "available": False,
+            "error": "C# execution requires dotnet SDK or Mono.",
+            "install_command": "sudo apt update && sudo apt install dotnet-sdk-8.0",
+        }, 200
+
+    if normalized == "brainfuck":
+        if command_exists("bf"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "Brainfuck execution requires a `bf` interpreter in PATH.",
+        }, 200
+
+    return {"error": "Unsupported language"}, 400
+
+
+def get_run_tooling_status(language: str) -> tuple[dict[str, object], int]:
+    """
+    Return run-tooling availability for a supported editor language.
+
+    Successful detections are cached in-process until app restart. Missing-tool
+    results are recomputed so newly installed runtimes become visible without a
+    worker restart. With multiple workers, each worker maintains its own cache.
+    """
+    normalized = (language or "").strip().lower()
+    if not normalized:
+        return {"error": "No language specified"}, 400
+
+    with RUN_TOOLING_CACHE_LOCK:
+        cached = RUN_TOOLING_CACHE.get(normalized)
+    if cached is not None:
+        return dict(cached), 200
+
+    status, http_status = compute_run_tooling_status(normalized)
+    if http_status == 200 and status.get("available") is True:
+        with RUN_TOOLING_CACHE_LOCK:
+            RUN_TOOLING_CACHE[normalized] = dict(status)
+    return status, http_status
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -911,6 +1072,11 @@ def create_app() -> Flask:
             "is_git": is_git_tracked,
             "writable": is_writable_by_user(path),
         })
+
+    @app.get("/api/run-tooling")
+    def get_run_tooling():
+        status, http_status = get_run_tooling_status(request.args.get("language", ""))
+        return jsonify(status), http_status
 
     @app.get("/api/file/image")
     def file_image():
