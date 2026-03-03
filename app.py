@@ -871,6 +871,8 @@ def create_app() -> Flask:
             ".sh": "shell", ".bash": "shell", ".zsh": "shell",
             ".rs": "rust", ".go": "go", ".java": "java", ".c": "c",
             ".cpp": "cpp", ".h": "c", ".hpp": "cpp", ".rb": "ruby",
+            ".pl": "perl", ".pm": "perl", ".t": "perl",
+            ".cs": "csharp", ".csx": "csharp",
             ".php": "php", ".swift": "swift", ".kt": "kotlin",
             ".nginx": "nginx", ".conf": "ini", ".ini": "ini",
             ".toml": "toml", ".env": "dotenv", ".txt": "plaintext",
@@ -886,7 +888,7 @@ def create_app() -> Flask:
                     "python": "python", "python3": "python", "python2": "python",
                     "bash": "shell", "sh": "shell", "zsh": "shell", "fish": "shell",
                     "node": "javascript", "nodejs": "javascript",
-                    "ruby": "ruby", "perl": "perl", "php": "php",
+                    "ruby": "ruby", "perl": "perl", "perl5": "perl", "php": "php",
                     "lua": "lua", "awk": "shell", "sed": "shell",
                     "bf": "brainfuck",
                 }

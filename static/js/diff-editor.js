@@ -157,7 +157,7 @@ async function initDiffEditor() {
 
         // Run button - show for runnable file types
         const runBtn = document.getElementById('btn-run');
-        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java', 'brainfuck'];
+        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java', 'ruby', 'perl', 'rust', 'csharp', 'brainfuck'];
         if (runnableLanguages.includes(fileLanguage)) {
             runBtn.classList.remove('hidden');
             runBtn.addEventListener('click', runFile);
@@ -770,6 +770,18 @@ async function runFile() {
         case 'java':
             // Java 11+ single-file source execution
             runCommand = `java ${FILE_PATH}`;
+            break;
+        case 'ruby':
+            runCommand = `ruby ${FILE_PATH}`;
+            break;
+        case 'perl':
+            runCommand = `perl ${FILE_PATH}`;
+            break;
+        case 'rust':
+            runCommand = `if command -v rustc >/dev/null 2>&1; then rustc ${FILE_PATH} -o ${outPath} && ${outPath}; else echo 'Rust requires rustc and cargo. Install with: sudo apt update && sudo apt install rustc cargo'; exit 1; fi`;
+            break;
+        case 'csharp':
+            runCommand = `if command -v mcs >/dev/null 2>&1 && command -v mono >/dev/null 2>&1; then mcs ${FILE_PATH} -out:${outPath}.exe && mono ${outPath}.exe; elif command -v csc >/dev/null 2>&1 && command -v mono >/dev/null 2>&1; then csc -nologo -out:${outPath}.exe ${FILE_PATH} && mono ${outPath}.exe; else echo 'C# requires Mono. Install with: sudo apt update && sudo apt install mono-devel'; exit 1; fi`;
             break;
         case 'brainfuck':
             runCommand = `bf ${FILE_PATH}`;
