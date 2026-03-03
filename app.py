@@ -874,6 +874,7 @@ def create_app() -> Flask:
             ".php": "php", ".swift": "swift", ".kt": "kotlin",
             ".nginx": "nginx", ".conf": "ini", ".ini": "ini",
             ".toml": "toml", ".env": "dotenv", ".txt": "plaintext",
+            ".bf": "brainfuck",
         }
         language = language_map.get(suffix)
 
@@ -887,6 +888,7 @@ def create_app() -> Flask:
                     "node": "javascript", "nodejs": "javascript",
                     "ruby": "ruby", "perl": "perl", "php": "php",
                     "lua": "lua", "awk": "shell", "sed": "shell",
+                    "bf": "brainfuck",
                 }
                 # Extract interpreter: handle both /usr/bin/env X and /usr/bin/X
                 parts = first_line[2:].strip().split()

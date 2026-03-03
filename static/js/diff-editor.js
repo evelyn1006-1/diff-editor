@@ -9,6 +9,8 @@ let isModified = false;
 let wordWrapEnabled = false;
 let fileLanguage = 'plaintext';
 let isImageFile = false;
+let isTextboxMode = false;
+let savedScrollInfo = null;
 
 // Configure Monaco loader
 require.config({
@@ -65,12 +67,15 @@ async function initDiffEditor() {
 
             const wrapBtn = document.getElementById('btn-wrap');
             const aiReviewBtn = document.getElementById('btn-ai-review');
+            const textboxBtn = document.getElementById('btn-textbox');
             saveBtn.disabled = true;
             saveBtn.title = 'Image files are preview-only';
             wrapBtn.disabled = true;
             wrapBtn.title = 'Wrap is unavailable for image preview';
             aiReviewBtn.disabled = true;
             aiReviewBtn.title = 'AI review is unavailable for image preview';
+            textboxBtn.disabled = true;
+            textboxBtn.title = 'Textbox mode is unavailable for image preview';
             return;
         }
 
@@ -125,6 +130,10 @@ async function initDiffEditor() {
         const wrapBtn = document.getElementById('btn-wrap');
         wrapBtn.addEventListener('click', toggleWordWrap);
 
+        // Textbox mode toggle button
+        const textboxBtn = document.getElementById('btn-textbox');
+        textboxBtn.addEventListener('click', toggleTextboxMode);
+
         // Keyboard shortcut: Ctrl/Cmd + S to save
         document.addEventListener('keydown', (e) => {
             if ((e.ctrlKey || e.metaKey) && e.key === 's') {
@@ -148,7 +157,7 @@ async function initDiffEditor() {
 
         // Run button - show for runnable file types
         const runBtn = document.getElementById('btn-run');
-        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java'];
+        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java', 'brainfuck'];
         if (runnableLanguages.includes(fileLanguage)) {
             runBtn.classList.remove('hidden');
             runBtn.addEventListener('click', runFile);
@@ -262,9 +271,33 @@ function toggleWordWrap() {
     diffEditor.getOriginalEditor().updateOptions({ wordWrap: wrapValue });
     diffEditor.getModifiedEditor().updateOptions({ wordWrap: wrapValue });
 
+    // Update textbox mode elements if active
+    if (isTextboxMode) {
+        const textarea = document.getElementById('textbox-editor');
+        const mirror = document.getElementById('textbox-mirror');
+        if (textarea) {
+            textarea.style.whiteSpace = wordWrapEnabled ? 'pre-wrap' : 'pre';
+            textarea.style.overflowX = wordWrapEnabled ? 'hidden' : 'auto';
+        }
+        if (mirror) {
+            mirror.style.whiteSpace = wordWrapEnabled ? 'pre-wrap' : 'pre';
+        }
+        // Recalculate line numbers for new wrap state
+        if (textboxUpdateLineNumbers) {
+            textboxUpdateLineNumbers();
+        }
+        if (unifiedDiffEditor) {
+            unifiedDiffEditor.getOriginalEditor().updateOptions({ wordWrap: wrapValue });
+            unifiedDiffEditor.getModifiedEditor().updateOptions({ wordWrap: wrapValue });
+        }
+    }
+
     // Update button appearance
     const wrapBtn = document.getElementById('btn-wrap');
-    wrapBtn.textContent = wordWrapEnabled ? 'Wrap: On' : 'Wrap: Off';
+    const wrapBtnText = wrapBtn.querySelector('.btn-text');
+    if (wrapBtnText) {
+        wrapBtnText.textContent = wordWrapEnabled ? 'Wrap: On' : 'Wrap: Off';
+    }
 }
 
 let currentReviewController = null;
@@ -527,7 +560,11 @@ async function requestAiReview(options = {}) {
 
     const panel = document.getElementById('ai-review-panel');
     const content = document.getElementById('ai-review-content');
-    const modifiedContent = diffEditor.getModifiedEditor().getModel().getValue();
+    // Get content from textarea if in textbox mode, otherwise from Monaco
+    const textboxEditor = document.getElementById('textbox-editor');
+    const modifiedContent = (isTextboxMode && textboxEditor)
+        ? textboxEditor.value
+        : diffEditor.getModifiedEditor().getModel().getValue();
 
     if (!forceNew) {
         if (currentReviewController) {
@@ -728,6 +765,9 @@ async function runFile() {
             // Java 11+ single-file source execution
             runCommand = `java ${FILE_PATH}`;
             break;
+        case 'brainfuck':
+            runCommand = `bf ${FILE_PATH}`;
+            break;
         default:
             return;
     }
@@ -783,4 +823,358 @@ async function runFile() {
     runBtn.disabled = false;
     statusEl.textContent = 'Opened in terminal';
     statusEl.className = 'status';
+}
+
+function toggleTextboxMode() {
+    if (isImageFile || !diffEditor) return;
+
+    if (isTextboxMode) {
+        exitTextboxMode();
+    } else {
+        enterTextboxMode();
+    }
+
+    // Update button state
+    const textboxBtn = document.getElementById('btn-textbox');
+    const textboxBtnText = textboxBtn.querySelector('.btn-text');
+    if (textboxBtnText) {
+        textboxBtnText.textContent = isTextboxMode ? 'Diff View' : 'Textbox';
+    }
+    textboxBtn.classList.toggle('active', isTextboxMode);
+}
+
+let unifiedDiffEditor = null;
+let unifiedDiffOriginalModel = null;
+let unifiedDiffModifiedModel = null;
+let textboxUpdateLineNumbers = null; // Function to recalculate line numbers
+let textboxLineHeights = []; // Cumulative heights for each line (for scroll sync with wrapping)
+let textboxResizeObserver = null;
+
+function syncTextboxContentToModifiedModel(content) {
+    const modifiedModel = diffEditor.getModifiedEditor().getModel();
+    if (modifiedModel && modifiedModel.getValue() !== content) {
+        modifiedModel.setValue(content);
+    }
+}
+
+function setUnifiedDiffModifiedContent(content) {
+    if (!unifiedDiffEditor || !unifiedDiffOriginalModel) return;
+
+    const previousModifiedModel = unifiedDiffModifiedModel;
+    unifiedDiffModifiedModel = monaco.editor.createModel(content, fileLanguage);
+    unifiedDiffEditor.setModel({
+        original: unifiedDiffOriginalModel,
+        modified: unifiedDiffModifiedModel,
+    });
+
+    if (previousModifiedModel) {
+        previousModifiedModel.dispose();
+    }
+}
+
+function disposeUnifiedDiffResources() {
+    if (unifiedDiffEditor) {
+        unifiedDiffEditor.dispose();
+        unifiedDiffEditor = null;
+    }
+
+    if (unifiedDiffOriginalModel) {
+        unifiedDiffOriginalModel.dispose();
+        unifiedDiffOriginalModel = null;
+    }
+
+    if (unifiedDiffModifiedModel) {
+        unifiedDiffModifiedModel.dispose();
+        unifiedDiffModifiedModel = null;
+    }
+}
+
+function enterTextboxMode() {
+    const container = document.getElementById('editor-container');
+    const modifiedEditor = diffEditor.getModifiedEditor();
+
+    // Get current content from Monaco
+    const modifiedContent = modifiedEditor.getModel().getValue();
+
+    // Save scroll info before hiding the editor
+    const visibleRanges = modifiedEditor.getVisibleRanges();
+    const topLine = visibleRanges.length > 0 ? visibleRanges[0].startLineNumber : 1;
+    savedScrollInfo = { lineNumber: topLine };
+
+    // Hide Monaco diff editor
+    container.style.display = 'none';
+
+    // Check if wide screen (show split view) or narrow (just textbox)
+    const isWideScreen = window.innerWidth > 768;
+
+    // Create textbox mode container (hidden initially to prevent flash)
+    const textboxContainer = document.createElement('div');
+    textboxContainer.id = 'textbox-mode-container';
+    textboxContainer.className = 'textbox-mode-container';
+    textboxContainer.style.opacity = '0';
+
+    if (isWideScreen) {
+        // Left panel: Monaco unified diff (read-only)
+        const leftPanel = document.createElement('div');
+        leftPanel.className = 'textbox-panel';
+        leftPanel.innerHTML = `
+            <div class="textbox-content-wrapper">
+                <div id="unified-diff-monaco" style="flex: 1; min-height: 0; background: transparent;"></div>
+            </div>
+        `;
+        textboxContainer.appendChild(leftPanel);
+    }
+
+    // Right panel (or only panel on mobile): Editable textarea
+    const rightPanel = document.createElement('div');
+    rightPanel.className = 'textbox-panel';
+
+    rightPanel.innerHTML = `
+        <div class="textbox-content-wrapper">
+            <div class="textbox-line-numbers" id="textbox-line-nums"></div>
+            <textarea class="textbox-textarea" id="textbox-editor" spellcheck="false"></textarea>
+            <pre class="textbox-mirror" id="textbox-mirror" aria-hidden="true"></pre>
+        </div>
+    `;
+    textboxContainer.appendChild(rightPanel);
+
+    container.parentNode.insertBefore(textboxContainer, container);
+
+    // Set textarea value directly (not via innerHTML - that doesn't work reliably for textareas)
+    const textarea = document.getElementById('textbox-editor');
+    const lineNumsEl = document.getElementById('textbox-line-nums');
+    const mirror = document.getElementById('textbox-mirror');
+    textarea.value = modifiedContent;
+
+    // Apply current wrap setting to textarea
+    if (wordWrapEnabled) {
+        textarea.style.whiteSpace = 'pre-wrap';
+        textarea.style.overflowX = 'hidden';
+    }
+
+    // Set up line number measurement
+    const baseLineHeight = 14 * 1.5; // font-size * line-height
+
+    function updateLineNumbers() {
+        const lines = textarea.value.split('\n');
+
+        // Set mirror width to match textarea (for accurate wrap measurement)
+        mirror.style.width = textarea.clientWidth + 'px';
+        mirror.style.whiteSpace = wordWrapEnabled ? 'pre-wrap' : 'pre';
+
+        let html = '';
+        textboxLineHeights = [0]; // Reset cumulative heights, starting at 0
+        let cumulativeHeight = 0;
+
+        for (let i = 0; i < lines.length; i++) {
+            // Measure this line's height by putting it in the mirror
+            // Use non-breaking space for empty lines to get correct height
+            mirror.textContent = lines[i] || '\u00A0';
+            const lineHeight = mirror.offsetHeight;
+            const numWrappedLines = Math.max(1, Math.round(lineHeight / baseLineHeight));
+            const actualHeight = numWrappedLines * baseLineHeight;
+
+            cumulativeHeight += actualHeight;
+            textboxLineHeights.push(cumulativeHeight);
+
+            // Create line number with appropriate height
+            html += `<div style="height: ${actualHeight}px">${i + 1}</div>`;
+        }
+
+        lineNumsEl.innerHTML = html;
+    }
+
+    // Helper: find logical line number at a given scroll position
+    function getLineAtScrollTop(scrollTop) {
+        for (let i = 1; i < textboxLineHeights.length; i++) {
+            if (scrollTop < textboxLineHeights[i]) {
+                return i; // 1-based line number
+            }
+        }
+        return Math.max(1, textboxLineHeights.length - 1);
+    }
+
+    // Helper: get scroll position for a logical line number
+    function getScrollTopForLine(lineNumber) {
+        if (lineNumber <= 1) return 0;
+        if (lineNumber > textboxLineHeights.length - 1) {
+            return textboxLineHeights[textboxLineHeights.length - 1] || 0;
+        }
+        return textboxLineHeights[lineNumber - 1] || 0;
+    }
+
+    // Store function globally for wrap toggle to use
+    textboxUpdateLineNumbers = updateLineNumbers;
+
+    // Initial line number generation (deferred to ensure DOM layout is complete)
+    function initTextbox() {
+        updateLineNumbers();
+
+        // Restore scroll position (using cumulative heights for wrapped lines)
+        if (savedScrollInfo && savedScrollInfo.lineNumber) {
+            textarea.scrollTop = getScrollTopForLine(savedScrollInfo.lineNumber);
+            lineNumsEl.scrollTop = textarea.scrollTop;
+            if (unifiedDiffEditor) {
+                const monacoEditor = unifiedDiffEditor.getModifiedEditor();
+                const monacoLineHeight = monacoEditor.getOption(monaco.editor.EditorOption.lineHeight);
+                monacoEditor.setScrollTop((savedScrollInfo.lineNumber - 1) * monacoLineHeight);
+            }
+        }
+
+        // Reveal container now that layout and scroll are ready
+        textboxContainer.style.opacity = '1';
+    }
+
+    // Double RAF needed on mobile for layout to settle; single RAF sufficient on wider screens
+    if (isWideScreen) {
+        requestAnimationFrame(initTextbox);
+    } else {
+        requestAnimationFrame(() => requestAnimationFrame(initTextbox));
+    }
+
+    // Update on resize (affects wrapping)
+    textboxResizeObserver = new ResizeObserver(() => {
+        if (wordWrapEnabled) updateLineNumbers();
+    });
+    textboxResizeObserver.observe(textarea);
+
+    // Create Monaco unified diff viewer on wide screens
+    if (isWideScreen) {
+        const unifiedContainer = document.getElementById('unified-diff-monaco');
+        unifiedDiffEditor = monaco.editor.createDiffEditor(unifiedContainer, {
+            theme: 'cute-transparent',
+            automaticLayout: true,
+            renderSideBySide: false, // Unified/inline diff view
+            originalEditable: false,
+            readOnly: true,
+            minimap: { enabled: false },
+            scrollBeyondLastLine: false,
+            fontSize: 14,
+            lineNumbers: 'on',
+            renderWhitespace: 'selection',
+            wordWrap: wordWrapEnabled ? 'on' : 'off',
+            scrollbar: { vertical: 'hidden', horizontal: 'hidden', verticalScrollbarSize: 0, horizontalScrollbarSize: 0 },
+        });
+
+        unifiedDiffOriginalModel = monaco.editor.createModel(originalContent, fileLanguage);
+        unifiedDiffModifiedModel = monaco.editor.createModel(modifiedContent, fileLanguage);
+        unifiedDiffEditor.setModel({
+            original: unifiedDiffOriginalModel,
+            modified: unifiedDiffModifiedModel,
+        });
+    }
+
+    // Sync line numbers with textarea scroll
+    let scrollSource = null; // Track which element initiated scroll
+
+    textarea.addEventListener('scroll', () => {
+        lineNumsEl.scrollTop = textarea.scrollTop;
+
+        // Sync Monaco unified diff to same line
+        if (unifiedDiffEditor && scrollSource !== 'monaco') {
+            scrollSource = 'textarea';
+            const monacoEditor = unifiedDiffEditor.getModifiedEditor();
+            const topLine = getLineAtScrollTop(textarea.scrollTop);
+            if (wordWrapEnabled) {
+                // In wrap mode, use revealLineNearTop to handle Monaco's own wrapping
+                // Add 7-line offset to compensate for revealLineNearTop's built-in padding
+                monacoEditor.revealLineNearTop(topLine + 7);
+            } else {
+                // Without wrapping, pixel-based sync works fine
+                const monacoLineHeight = monacoEditor.getOption(monaco.editor.EditorOption.lineHeight);
+                monacoEditor.setScrollTop((topLine - 1) * monacoLineHeight);
+            }
+            requestAnimationFrame(() => { scrollSource = null; });
+        }
+    });
+
+    // Sync textarea when scrolling Monaco unified diff
+    if (unifiedDiffEditor) {
+        unifiedDiffEditor.getModifiedEditor().onDidScrollChange((e) => {
+            if (scrollSource !== 'textarea' && e.scrollTopChanged) {
+                scrollSource = 'monaco';
+                const monacoEditor = unifiedDiffEditor.getModifiedEditor();
+                let topLine;
+                if (wordWrapEnabled) {
+                    // In wrap mode, use getVisibleRanges to get accurate top line
+                    const visibleRanges = monacoEditor.getVisibleRanges();
+                    topLine = visibleRanges.length > 0 ? visibleRanges[0].startLineNumber : 1;
+                } else {
+                    // Without wrapping, pixel-based calculation works fine
+                    const monacoLineHeight = monacoEditor.getOption(monaco.editor.EditorOption.lineHeight);
+                    topLine = Math.floor(e.scrollTop / monacoLineHeight) + 1;
+                }
+                textarea.scrollTop = getScrollTopForLine(topLine);
+                lineNumsEl.scrollTop = textarea.scrollTop;
+                requestAnimationFrame(() => { scrollSource = null; });
+            }
+        });
+    }
+
+    // Update line numbers on content change
+    textarea.addEventListener('input', () => {
+        // Recalculate line numbers (handles wrapping)
+        updateLineNumbers();
+
+        syncTextboxContentToModifiedModel(textarea.value);
+
+        // Track modifications
+        isModified = textarea.value !== currentContent;
+        updateStatus();
+
+        // Update unified diff Monaco editor if present
+        if (unifiedDiffEditor) {
+            setUnifiedDiffModifiedContent(textarea.value);
+        }
+    });
+
+    isTextboxMode = true;
+}
+
+function exitTextboxMode() {
+    const container = document.getElementById('editor-container');
+    const textboxContainer = document.getElementById('textbox-mode-container');
+    const textarea = document.getElementById('textbox-editor');
+
+    if (!textboxContainer || !textarea) return;
+
+    // Get content and scroll position from textarea (using cumulative heights)
+    const newContent = textarea.value;
+    // Find logical line number at current scroll position
+    let lineNumber = 1;
+    for (let i = 1; i < textboxLineHeights.length; i++) {
+        if (textarea.scrollTop < textboxLineHeights[i]) {
+            lineNumber = i;
+            break;
+        }
+        lineNumber = i;
+    }
+    savedScrollInfo = { lineNumber };
+
+    if (textboxResizeObserver) {
+        textboxResizeObserver.disconnect();
+        textboxResizeObserver = null;
+    }
+
+    disposeUnifiedDiffResources();
+
+    // Clear line number update function and heights array
+    textboxUpdateLineNumbers = null;
+    textboxLineHeights = [];
+
+    // Remove textbox container
+    textboxContainer.remove();
+
+    // Show Monaco editor
+    container.style.display = '';
+
+    // Update Monaco model with new content
+    syncTextboxContentToModifiedModel(newContent);
+
+    // Restore scroll position in Monaco
+    if (savedScrollInfo && savedScrollInfo.lineNumber) {
+        diffEditor.getModifiedEditor().revealLineNearTop(savedScrollInfo.lineNumber);
+    }
+
+    isTextboxMode = false;
 }

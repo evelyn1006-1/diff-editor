@@ -9,8 +9,9 @@
 {% block nav %}
 <span class="file-path" title="{{ file_path }}">{{ file_path }}</span>
 <span id="status" class="status"></span>
-<button id="btn-ai-review" title="Get AI review of changes">AI Review</button>
-<button id="btn-wrap" title="Toggle line wrapping">Wrap</button>
+<button id="btn-ai-review" title="Get AI review of changes"><span class="btn-icon">✨</span><span class="btn-text">AI Review</span></button>
+<button id="btn-wrap" title="Toggle line wrapping"><span class="btn-icon">↩️</span><span class="btn-text">Wrap</span></button>
+<button id="btn-textbox" title="Switch to simple textbox (mobile-friendly)"><span class="btn-icon">📝</span><span class="btn-text">Textbox</span></button>
 <button id="btn-run" class="btn-primary hidden" title="Save and run this file">Run</button>
 <button id="btn-save" class="btn-primary" disabled>Save</button>
 {% endblock %}

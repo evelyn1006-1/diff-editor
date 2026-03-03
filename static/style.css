@@ -697,6 +697,11 @@ body.terminal-raised {
     min-width: 6.5rem;
 }
 
+/* Button icon/text toggle - icons hidden by default on desktop */
+.btn-icon {
+    display: none;
+}
+
 /* Mobile optimizations */
 @media (max-width: 600px) {
     .file-path {
@@ -705,6 +710,28 @@ body.terminal-raised {
 
     .desktop-only {
         display: none !important;
+    }
+
+    /* Show icons, hide text for safe toggle buttons */
+    .btn-icon {
+        display: inline;
+        font-size: 1.1rem;
+    }
+
+    .btn-text {
+        display: none;
+    }
+
+    /* Normalize AI Review button to match other icon buttons on mobile */
+    #btn-ai-review {
+        background: var(--bg-secondary);
+        border-color: var(--border);
+        color: var(--text-primary);
+    }
+
+    #btn-ai-review:hover:not(:disabled) {
+        background: var(--bg-tertiary);
+        border-color: var(--accent);
     }
 
     nav {
@@ -1491,4 +1518,120 @@ body.terminal-raised {
 
 .hidden {
     display: none !important;
+}
+
+/* Textbox Mode Styles */
+.textbox-mode-container {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    gap: 0;
+    background: transparent;
+}
+
+.textbox-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+    background: transparent;
+}
+
+/* Border between panels on wide screens */
+.textbox-panel:first-child:not(:last-child) {
+    border-right: 1px solid var(--border);
+}
+
+.textbox-content-wrapper {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    overflow: hidden;
+    background: transparent;
+}
+
+.textbox-line-numbers {
+    font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 0.5rem 0.5rem 0.5rem 0.75rem;
+    background-color: rgba(255, 230, 240, 0.5);
+    color: var(--text-secondary);
+    text-align: right;
+    user-select: none;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+    min-width: 3rem;
+}
+
+.textbox-line-numbers div {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+}
+
+.textbox-textarea {
+    flex: 1;
+    font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 0.5rem 0.75rem;
+    background-color: rgba(255, 230, 240, 0.5);
+    -webkit-appearance: none;
+    appearance: none;
+    color: var(--text-primary);
+    border: none;
+    outline: none;
+    resize: none;
+    white-space: pre;
+    overflow: auto;
+    min-width: 0;
+}
+
+.textbox-textarea:focus {
+    background-color: rgba(255, 214, 233, 0.5);
+}
+
+/* Hidden mirror element for measuring wrapped line heights */
+.textbox-mirror {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
+    /* Match textarea font styling exactly, but NO padding (we measure content only) */
+    font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    padding: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: break-word;
+    margin: 0;
+    border: none;
+}
+
+/* Active state for textbox toggle button */
+#btn-textbox.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+
+/* Mobile: Single column layout */
+@media (max-width: 768px) {
+    .textbox-mode-container {
+        flex-direction: column;
+    }
+
+    /* Only limit height when there are two panels */
+    .textbox-panel:first-child:not(:last-child) {
+        flex: none;
+        max-height: 50%;
+    }
+
+    /* Last panel (or only panel) fills remaining space */
+    .textbox-panel:last-child {
+        flex: 1;
+        max-height: none;
+    }
 }
