@@ -210,8 +210,7 @@ async function saveFile() {
 
     if (!diffEditor) return;
 
-    const modifiedModel = diffEditor.getModifiedEditor().getModel();
-    const newContent = modifiedModel.getValue();
+    const newContent = getCurrentModifiedContent();
 
     statusEl.textContent = 'Saving...';
     statusEl.className = 'status';
@@ -775,8 +774,7 @@ async function runFile() {
     runBtn.disabled = true;
 
     // Save file first if there are unsaved changes
-    const modifiedModel = diffEditor.getModifiedEditor().getModel();
-    const newContent = modifiedModel.getValue();
+    const newContent = getCurrentModifiedContent();
     const hasUnsavedChanges = newContent !== currentContent;
 
     if (hasUnsavedChanges) {
@@ -849,6 +847,16 @@ let unifiedDiffModifiedModel = null;
 let textboxUpdateLineNumbers = null; // Function to recalculate line numbers
 let textboxLineHeights = []; // Cumulative heights for each line (for scroll sync with wrapping)
 let textboxResizeObserver = null;
+let unifiedDiffUpdateTimeout = null;
+let pendingUnifiedDiffContent = null;
+const UNIFIED_DIFF_UPDATE_DELAY_MS = 600;
+
+function getTextareaContentWidth(textarea) {
+    const computedStyle = window.getComputedStyle(textarea);
+    const paddingLeft = parseFloat(computedStyle.paddingLeft) || 0;
+    const paddingRight = parseFloat(computedStyle.paddingRight) || 0;
+    return Math.max(0, textarea.clientWidth - paddingLeft - paddingRight);
+}
 
 function syncTextboxContentToModifiedModel(content) {
     const modifiedModel = diffEditor.getModifiedEditor().getModel();
@@ -857,22 +865,57 @@ function syncTextboxContentToModifiedModel(content) {
     }
 }
 
+function getCurrentModifiedContent() {
+    const textboxEditor = document.getElementById('textbox-editor');
+    if (isTextboxMode && textboxEditor) {
+        return textboxEditor.value;
+    }
+
+    const modifiedModel = diffEditor.getModifiedEditor().getModel();
+    return modifiedModel ? modifiedModel.getValue() : '';
+}
+
 function setUnifiedDiffModifiedContent(content) {
-    if (!unifiedDiffEditor || !unifiedDiffOriginalModel) return;
-
-    const previousModifiedModel = unifiedDiffModifiedModel;
-    unifiedDiffModifiedModel = monaco.editor.createModel(content, fileLanguage);
-    unifiedDiffEditor.setModel({
-        original: unifiedDiffOriginalModel,
-        modified: unifiedDiffModifiedModel,
-    });
-
-    if (previousModifiedModel) {
-        previousModifiedModel.dispose();
+    if (!unifiedDiffEditor || !unifiedDiffOriginalModel || !unifiedDiffModifiedModel) return;
+    if (unifiedDiffModifiedModel.getValue() !== content) {
+        unifiedDiffModifiedModel.setValue(content);
     }
 }
 
+function cancelPendingUnifiedDiffUpdate() {
+    if (unifiedDiffUpdateTimeout !== null) {
+        window.clearTimeout(unifiedDiffUpdateTimeout);
+        unifiedDiffUpdateTimeout = null;
+    }
+    pendingUnifiedDiffContent = null;
+}
+
+function flushPendingUnifiedDiffUpdate() {
+    if (pendingUnifiedDiffContent === null) return;
+    const content = pendingUnifiedDiffContent;
+    pendingUnifiedDiffContent = null;
+    if (unifiedDiffUpdateTimeout !== null) {
+        window.clearTimeout(unifiedDiffUpdateTimeout);
+        unifiedDiffUpdateTimeout = null;
+    }
+    setUnifiedDiffModifiedContent(content);
+}
+
+function scheduleUnifiedDiffUpdate(content) {
+    if (!unifiedDiffEditor) return;
+    pendingUnifiedDiffContent = content;
+    if (unifiedDiffUpdateTimeout !== null) {
+        window.clearTimeout(unifiedDiffUpdateTimeout);
+    }
+    unifiedDiffUpdateTimeout = window.setTimeout(() => {
+        unifiedDiffUpdateTimeout = null;
+        flushPendingUnifiedDiffUpdate();
+    }, UNIFIED_DIFF_UPDATE_DELAY_MS);
+}
+
 function disposeUnifiedDiffResources() {
+    cancelPendingUnifiedDiffUpdate();
+
     if (unifiedDiffEditor) {
         unifiedDiffEditor.dispose();
         unifiedDiffEditor = null;
@@ -954,12 +997,33 @@ function enterTextboxMode() {
 
     // Set up line number measurement
     const baseLineHeight = 14 * 1.5; // font-size * line-height
+    let lastUnwrappedLineCount = null;
 
-    function updateLineNumbers() {
+    function updateLineNumbers(force = false) {
         const lines = textarea.value.split('\n');
 
-        // Set mirror width to match textarea (for accurate wrap measurement)
-        mirror.style.width = textarea.clientWidth + 'px';
+        if (!wordWrapEnabled) {
+            if (!force && lastUnwrappedLineCount === lines.length) {
+                return;
+            }
+
+            lastUnwrappedLineCount = lines.length;
+            let html = '';
+            textboxLineHeights = [0];
+
+            for (let i = 0; i < lines.length; i++) {
+                textboxLineHeights.push((i + 1) * baseLineHeight);
+                html += `<div style="height: ${baseLineHeight}px">${i + 1}</div>`;
+            }
+
+            lineNumsEl.innerHTML = html;
+            return;
+        }
+
+        lastUnwrappedLineCount = null;
+
+        // Match the textarea content box so wrap measurement accounts for padding.
+        mirror.style.width = getTextareaContentWidth(textarea) + 'px';
         mirror.style.whiteSpace = wordWrapEnabled ? 'pre-wrap' : 'pre';
 
         let html = '';
@@ -1008,7 +1072,7 @@ function enterTextboxMode() {
 
     // Initial line number generation (deferred to ensure DOM layout is complete)
     function initTextbox() {
-        updateLineNumbers();
+        updateLineNumbers(true);
 
         // Restore scroll position (using cumulative heights for wrapped lines)
         if (savedScrollInfo && savedScrollInfo.lineNumber) {
@@ -1116,15 +1180,13 @@ function enterTextboxMode() {
         // Recalculate line numbers (handles wrapping)
         updateLineNumbers();
 
-        syncTextboxContentToModifiedModel(textarea.value);
-
         // Track modifications
         isModified = textarea.value !== currentContent;
         updateStatus();
 
         // Update unified diff Monaco editor if present
         if (unifiedDiffEditor) {
-            setUnifiedDiffModifiedContent(textarea.value);
+            scheduleUnifiedDiffUpdate(textarea.value);
         }
     });
 
