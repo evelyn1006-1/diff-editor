@@ -273,10 +273,17 @@ function toggleWordWrap() {
     // Update textbox mode elements if active
     if (isTextboxMode) {
         const textarea = document.getElementById('textbox-editor');
+        const highlightEl = document.getElementById('textbox-highlight');
         const mirror = document.getElementById('textbox-mirror');
         if (textarea) {
             textarea.style.whiteSpace = wordWrapEnabled ? 'pre-wrap' : 'pre';
             textarea.style.overflowX = wordWrapEnabled ? 'hidden' : 'auto';
+        }
+        if (highlightEl) {
+            const highlightContentEl = highlightEl.querySelector('.textbox-highlight-content');
+            if (highlightContentEl) {
+                highlightContentEl.style.whiteSpace = wordWrapEnabled ? 'pre-wrap' : 'pre';
+            }
         }
         if (mirror) {
             mirror.style.whiteSpace = wordWrapEnabled ? 'pre-wrap' : 'pre';
@@ -849,7 +856,12 @@ let textboxLineHeights = []; // Cumulative heights for each line (for scroll syn
 let textboxResizeObserver = null;
 let unifiedDiffUpdateTimeout = null;
 let pendingUnifiedDiffContent = null;
+let textboxHighlightUpdateTimeout = null;
+let pendingTextboxHighlightContent = null;
+let textboxHighlightScrollTimeout = null;
 const UNIFIED_DIFF_UPDATE_DELAY_MS = 600;
+const TEXTBOX_HIGHLIGHT_UPDATE_DELAY_MS = 120;
+const TEXTBOX_HIGHLIGHT_SCROLL_IDLE_DELAY_MS = 90;
 
 function getTextareaContentWidth(textarea) {
     const computedStyle = window.getComputedStyle(textarea);
@@ -880,6 +892,131 @@ function setUnifiedDiffModifiedContent(content) {
     if (unifiedDiffModifiedModel.getValue() !== content) {
         unifiedDiffModifiedModel.setValue(content);
     }
+}
+
+function updateTextboxHighlightVisibility(highlightEl) {
+    if (!highlightEl) return;
+    const hasPendingUpdate = highlightEl.dataset.pendingHighlight === 'true';
+    const isScrolling = highlightEl.dataset.scrolling === 'true';
+    highlightEl.style.opacity = (hasPendingUpdate || isScrolling) ? '0' : '1';
+}
+
+function setTextboxHighlightPending(highlightEl, isPending) {
+    if (!highlightEl) return;
+    highlightEl.dataset.pendingHighlight = isPending ? 'true' : 'false';
+    updateTextboxHighlightVisibility(highlightEl);
+}
+
+function setTextboxHighlightScrolling(highlightEl, isScrolling) {
+    if (!highlightEl) return;
+    highlightEl.dataset.scrolling = isScrolling ? 'true' : 'false';
+    updateTextboxHighlightVisibility(highlightEl);
+}
+
+function isKeywordToken(tokenType) {
+    return typeof tokenType === 'string' && tokenType.split('.').includes('keyword');
+}
+
+function renderHighlightedTextboxContent(highlightEl, content) {
+    if (!highlightEl) return;
+    const highlightContentEl = highlightEl.querySelector('.textbox-highlight-content');
+    if (!highlightContentEl) return;
+
+    let html;
+    try {
+        const tokenLines = monaco.editor.tokenize(content, fileLanguage);
+        const lines = content.split('\n');
+
+        html = lines.map((line, lineIndex) => {
+            const tokens = tokenLines[lineIndex] || [];
+            if (tokens.length === 0) {
+                return escapeHtml(line);
+            }
+
+            let lineHtml = '';
+            for (let i = 0; i < tokens.length; i++) {
+                const start = tokens[i].offset;
+                const end = i + 1 < tokens.length ? tokens[i + 1].offset : line.length;
+                const segment = line.slice(start, end);
+                if (!segment) continue;
+
+                const escapedSegment = escapeHtml(segment);
+                lineHtml += isKeywordToken(tokens[i].type)
+                    ? `<span class="textbox-token-keyword">${escapedSegment}</span>`
+                    : escapedSegment;
+            }
+
+            return lineHtml;
+        }).join('\n');
+    } catch (err) {
+        html = escapeHtml(content);
+    }
+
+    if (content.endsWith('\n')) {
+        html += '<span aria-hidden="true">\u200b</span>';
+    }
+
+    highlightContentEl.innerHTML = html;
+    setTextboxHighlightPending(highlightEl, false);
+}
+
+function cancelPendingTextboxHighlightUpdate() {
+    if (textboxHighlightUpdateTimeout !== null) {
+        window.clearTimeout(textboxHighlightUpdateTimeout);
+        textboxHighlightUpdateTimeout = null;
+    }
+    pendingTextboxHighlightContent = null;
+}
+
+function cancelPendingTextboxHighlightScroll() {
+    if (textboxHighlightScrollTimeout !== null) {
+        window.clearTimeout(textboxHighlightScrollTimeout);
+        textboxHighlightScrollTimeout = null;
+    }
+}
+
+function flushPendingTextboxHighlightUpdate(highlightEl) {
+    if (!highlightEl || pendingTextboxHighlightContent === null) return;
+    const content = pendingTextboxHighlightContent;
+    pendingTextboxHighlightContent = null;
+    if (textboxHighlightUpdateTimeout !== null) {
+        window.clearTimeout(textboxHighlightUpdateTimeout);
+        textboxHighlightUpdateTimeout = null;
+    }
+    renderHighlightedTextboxContent(highlightEl, content);
+}
+
+function scheduleTextboxHighlightUpdate(highlightEl, content) {
+    if (!highlightEl) return;
+    pendingTextboxHighlightContent = content;
+    setTextboxHighlightPending(highlightEl, true);
+    if (textboxHighlightUpdateTimeout !== null) {
+        window.clearTimeout(textboxHighlightUpdateTimeout);
+    }
+    textboxHighlightUpdateTimeout = window.setTimeout(() => {
+        textboxHighlightUpdateTimeout = null;
+        flushPendingTextboxHighlightUpdate(highlightEl);
+    }, TEXTBOX_HIGHLIGHT_UPDATE_DELAY_MS);
+}
+
+function syncTextboxHighlightScroll(textarea, highlightEl) {
+    if (!textarea || !highlightEl) return;
+    const highlightContentEl = highlightEl.querySelector('.textbox-highlight-content');
+    if (!highlightContentEl) return;
+
+    highlightContentEl.style.transform = `translate(${-textarea.scrollLeft}px, ${-textarea.scrollTop}px)`;
+}
+
+function scheduleTextboxHighlightScrollSync(textarea, highlightEl) {
+    if (!textarea || !highlightEl) return;
+
+    setTextboxHighlightScrolling(highlightEl, true);
+    cancelPendingTextboxHighlightScroll();
+    textboxHighlightScrollTimeout = window.setTimeout(() => {
+        textboxHighlightScrollTimeout = null;
+        syncTextboxHighlightScroll(textarea, highlightEl);
+        setTextboxHighlightScrolling(highlightEl, false);
+    }, TEXTBOX_HIGHLIGHT_SCROLL_IDLE_DELAY_MS);
 }
 
 function cancelPendingUnifiedDiffUpdate() {
@@ -915,6 +1052,8 @@ function scheduleUnifiedDiffUpdate(content) {
 
 function disposeUnifiedDiffResources() {
     cancelPendingUnifiedDiffUpdate();
+    cancelPendingTextboxHighlightUpdate();
+    cancelPendingTextboxHighlightScroll();
 
     if (unifiedDiffEditor) {
         unifiedDiffEditor.dispose();
@@ -975,7 +1114,12 @@ function enterTextboxMode() {
     rightPanel.innerHTML = `
         <div class="textbox-content-wrapper">
             <div class="textbox-line-numbers" id="textbox-line-nums"></div>
-            <textarea class="textbox-textarea" id="textbox-editor" spellcheck="false"></textarea>
+            <div class="textbox-editor-stack">
+                <div class="textbox-highlight-layer" id="textbox-highlight" aria-hidden="true">
+                    <pre class="textbox-highlight-content"></pre>
+                </div>
+                <textarea class="textbox-textarea" id="textbox-editor" spellcheck="false"></textarea>
+            </div>
             <pre class="textbox-mirror" id="textbox-mirror" aria-hidden="true"></pre>
         </div>
     `;
@@ -985,14 +1129,24 @@ function enterTextboxMode() {
 
     // Set textarea value directly (not via innerHTML - that doesn't work reliably for textareas)
     const textarea = document.getElementById('textbox-editor');
+    const highlightEl = document.getElementById('textbox-highlight');
     const lineNumsEl = document.getElementById('textbox-line-nums');
     const mirror = document.getElementById('textbox-mirror');
     textarea.value = modifiedContent;
+    setTextboxHighlightPending(highlightEl, false);
+    setTextboxHighlightScrolling(highlightEl, false);
+    renderHighlightedTextboxContent(highlightEl, modifiedContent);
 
     // Apply current wrap setting to textarea
     if (wordWrapEnabled) {
         textarea.style.whiteSpace = 'pre-wrap';
         textarea.style.overflowX = 'hidden';
+        if (highlightEl) {
+            const highlightContentEl = highlightEl.querySelector('.textbox-highlight-content');
+            if (highlightContentEl) {
+                highlightContentEl.style.whiteSpace = 'pre-wrap';
+            }
+        }
     }
 
     // Set up line number measurement
@@ -1078,6 +1232,7 @@ function enterTextboxMode() {
         if (savedScrollInfo && savedScrollInfo.lineNumber) {
             textarea.scrollTop = getScrollTopForLine(savedScrollInfo.lineNumber);
             lineNumsEl.scrollTop = textarea.scrollTop;
+            syncTextboxHighlightScroll(textarea, highlightEl);
             if (unifiedDiffEditor) {
                 const monacoEditor = unifiedDiffEditor.getModifiedEditor();
                 const monacoLineHeight = monacoEditor.getOption(monaco.editor.EditorOption.lineHeight);
@@ -1133,6 +1288,7 @@ function enterTextboxMode() {
 
     textarea.addEventListener('scroll', () => {
         lineNumsEl.scrollTop = textarea.scrollTop;
+        scheduleTextboxHighlightScrollSync(textarea, highlightEl);
 
         // Sync Monaco unified diff to same line
         if (unifiedDiffEditor && scrollSource !== 'monaco') {
@@ -1170,6 +1326,7 @@ function enterTextboxMode() {
                 }
                 textarea.scrollTop = getScrollTopForLine(topLine);
                 lineNumsEl.scrollTop = textarea.scrollTop;
+                scheduleTextboxHighlightScrollSync(textarea, highlightEl);
                 requestAnimationFrame(() => { scrollSource = null; });
             }
         });
@@ -1183,6 +1340,8 @@ function enterTextboxMode() {
         // Track modifications
         isModified = textarea.value !== currentContent;
         updateStatus();
+
+        scheduleTextboxHighlightUpdate(highlightEl, textarea.value);
 
         // Update unified diff Monaco editor if present
         if (unifiedDiffEditor) {

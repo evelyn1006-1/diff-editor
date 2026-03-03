@@ -28,6 +28,7 @@
     --error: #ff4d6d;
     --error-bg: #ffe0e6;
     --border: #ffb3d9;
+    --syntax-keyword: #2f62ff;
     --navbar-bg: #ffc1e3;
     --panel-bg: rgba(254, 240, 252, 0.85);
     --terminal-panel-bg: rgba(254, 240, 252, 0.5);
@@ -1551,6 +1552,18 @@ body.terminal-raised {
     background: transparent;
 }
 
+.textbox-editor-stack {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    background-color: rgba(255, 230, 240, 0.5);
+}
+
+.textbox-editor-stack:focus-within {
+    background-color: rgba(255, 214, 233, 0.5);
+}
+
 .textbox-line-numbers {
     font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
     font-size: 14px;
@@ -1571,26 +1584,59 @@ body.terminal-raised {
     justify-content: flex-end;
 }
 
+.textbox-highlight-layer,
 .textbox-textarea {
-    flex: 1;
     font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
     font-size: 14px;
     line-height: 1.5;
     padding: 0.5rem 0.75rem;
-    background-color: rgba(255, 230, 240, 0.5);
+    tab-size: 4;
+    word-break: break-word;
+    overflow-wrap: break-word;
+}
+
+.textbox-highlight-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.textbox-highlight-content {
+    margin: 0;
+    min-height: 100%;
+    color: transparent;
+    white-space: pre;
+    will-change: transform;
+}
+
+.textbox-token-keyword {
+    color: var(--syntax-keyword);
+}
+
+.textbox-textarea {
+    position: relative;
+    z-index: 0;
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    background: transparent;
     -webkit-appearance: none;
     appearance: none;
     color: var(--text-primary);
+    caret-color: var(--text-primary);
     border: none;
     outline: none;
     resize: none;
     white-space: pre;
     overflow: auto;
     min-width: 0;
+    min-height: 0;
 }
 
 .textbox-textarea:focus {
-    background-color: rgba(255, 214, 233, 0.5);
+    background: transparent;
 }
 
 /* Hidden mirror element for measuring wrapped line heights */
