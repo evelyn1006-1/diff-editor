@@ -4,6 +4,7 @@ PTY session management for web terminal.
 
 import os
 import pty
+import secrets
 import select
 import signal
 import struct
@@ -24,6 +25,7 @@ class PTYSession:
         self.master_fd: Optional[int] = None
         self.pid: Optional[int] = None
         self.alive = False
+        self.token = secrets.token_hex(32)  # 256-bit secret for request validation
 
     def spawn(self) -> bool:
         """Spawn a new PTY process."""
@@ -175,6 +177,12 @@ class PTYManager:
         """Get an existing PTY session."""
         with self.lock:
             return self.sessions.get(session_id)
+
+    def validate_token(self, session_id: str, token: str) -> bool:
+        """Validate that a token matches the session's secret token and session is alive."""
+        with self.lock:
+            session = self.sessions.get(session_id)
+            return session is not None and session.token == token and session.alive
 
     def remove_session(self, session_id: str):
         """Remove and terminate a PTY session."""

@@ -26,3 +26,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local deploy symlinks
+deploy/editor.princessevelyn.com

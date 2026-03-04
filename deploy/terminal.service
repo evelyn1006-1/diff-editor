@@ -1,12 +1,12 @@
 [Unit]
-Description=Diff Editor for Princess Evelyn
+Description=Terminal for Princess Evelyn
 After=network.target
 
 [Service]
 User=evelyn
 Group=www-data
 WorkingDirectory=/home/evelyn/diff-editor-terminal
-ExecStart=/usr/local/bin/gunicorn --config /home/evelyn/diff-editor-terminal/gunicorn.conf.py wsgi:app
+ExecStart=/usr/local/bin/gunicorn --config /home/evelyn/diff-editor-terminal/gunicorn_terminal.conf.py wsgi_terminal:app
 Restart=always
 RestartSec=3
 

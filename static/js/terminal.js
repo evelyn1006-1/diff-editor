@@ -4,6 +4,7 @@
 
 let socket = null;
 let currentCwd = '~';
+let terminalToken = null;  // Secret token for authenticated terminal requests
 
 // Command history for textbox-based navigation
 const commandHistory = [];
@@ -53,6 +54,9 @@ function connect() {
         if (data.cwd) {
             currentCwd = data.cwd;
         }
+        if (data.token) {
+            terminalToken = data.token;
+        }
         appendOutput(`Connected to terminal at ${currentCwd}\n`, 'info');
 
         // Auto-execute command if provided via URL param
@@ -94,6 +98,8 @@ function connect() {
     socket.on('disconnect', () => {
         statusEl.textContent = 'Disconnected';
         statusEl.className = 'status error';
+        // Clear token to prevent stale token usage during reconnect window
+        terminalToken = null;
     });
 
     socket.on('connect_error', () => {
@@ -716,6 +722,7 @@ function setTerminalRaised(raised, buttonEl) {
 
 let taskManagerRefreshInterval = null;
 let taskManagerProcesses = [];
+let taskManagerCurrentUser = null;            // Current user running the server
 let taskManagerSortColumn = 'cpu';
 let taskManagerSortAsc = false;
 let taskManagerFilter = '';
@@ -725,6 +732,8 @@ let taskManagerTreeMode = false;
 let taskManagerStatsExpanded = false;
 let taskManagerProcessDetails = new Map();    // PID -> {ports, connections, loading}
 let taskManagerOpenMenuPid = null;            // PID with open signal dropdown
+let sudoConfirmCallback = null;               // Callback for sudo confirmation
+let forceKillCallback = null;                 // Callback for force kill confirmation
 
 function openTaskManager() {
     const overlay = document.getElementById('task-manager-overlay');
@@ -849,7 +858,8 @@ async function fetchTaskManagerData() {
             updateExpandedStats(data);
         }
 
-        // Store processes and render
+        // Store current user and processes, then render
+        taskManagerCurrentUser = data.current_user || null;
         taskManagerProcesses = data.processes || [];
         renderTaskManagerTable();
 
@@ -984,13 +994,14 @@ function renderTaskManagerTable() {
         const branch = taskManagerTreeMode && p.depth > 0 ? '<span class="tm-tree-branch">└─</span>' : '';
         const childClass = taskManagerTreeMode && p.depth > 0 ? ' tm-tree-child' : '';
         const matchClass = p.isMatch === false ? ' tm-tree-ancestor' : '';
+        const rootClass = p.user === 'root' ? ' tm-root-process' : '';
         const details = taskManagerProcessDetails.get(p.pid);
         const detailsHtml = details ? formatProcessDetails(details) : '<div class="tm-details">Click ▶ to load details</div>';
         const cmdExpanded = taskManagerExpandedCommands.has(p.pid);
         const detailsExpanded = taskManagerExpandedDetails.has(p.pid);
 
         return `
-        <tr data-pid="${p.pid}" class="${childClass}${matchClass}">
+        <tr data-pid="${p.pid}" class="${childClass}${matchClass}${rootClass}">
             <td>${p.pid}</td>
             <td>${escapeHtml(p.user)}</td>
             <td>${p.cpu.toFixed(1)}</td>
@@ -1027,6 +1038,8 @@ function renderTaskManagerTable() {
     // Attach split button handlers
     tbody.querySelectorAll('.tm-split-btn').forEach(container => {
         const pid = parseInt(container.dataset.pid);
+        const process = taskManagerProcesses.find(p => p.pid === pid);
+        const processOwner = process ? process.user : null;
         const mainBtn = container.querySelector('.tm-split-main');
         const arrowBtn = container.querySelector('.tm-split-arrow');
         const menu = container.querySelector('.tm-split-menu');
@@ -1039,7 +1052,7 @@ function renderTaskManagerTable() {
         // Main button always sends TERM
         mainBtn.onclick = (e) => {
             e.stopPropagation();
-            killProcess(pid, 'TERM');
+            requestKillProcess(pid, 'TERM', processOwner);
         };
 
         // Arrow button toggles menu
@@ -1060,7 +1073,7 @@ function renderTaskManagerTable() {
                 const signal = opt.dataset.signal;
                 menu.classList.add('hidden');
                 taskManagerOpenMenuPid = null;
-                killProcess(pid, signal);
+                requestKillProcess(pid, signal, processOwner);
             };
         });
     });
@@ -1330,14 +1343,24 @@ function formatProcessDetails(details) {
     return `<div class="tm-details">${parts.join('')}</div>`;
 }
 
-async function killProcess(pid, signal) {
+async function killProcess(pid, signal, useSudo = false) {
     const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    // Require active terminal session with valid token
+    if (!socket || !socket.id || !terminalToken) {
+        appendOutput('Error: No active terminal session\n', 'error');
+        return;
+    }
 
     try {
         const resp = await fetch(`${basePath}/terminal/process/kill`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pid, signal }),
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Terminal-Session': socket.id,
+                'X-Terminal-Token': terminalToken,
+            },
+            body: JSON.stringify({ pid, signal, use_sudo: useSudo }),
         });
 
         const data = await resp.json();
@@ -1355,6 +1378,66 @@ async function killProcess(pid, signal) {
     }
 }
 
+function showForceKillWarning(pid, signal, processOwner) {
+    const overlay = document.getElementById('forcekill-overlay');
+    document.getElementById('forcekill-pid').textContent = pid;
+
+    // After force kill confirmation, check if sudo is needed
+    // Root can kill any process without sudo
+    forceKillCallback = () => {
+        const needsSudo = taskManagerCurrentUser
+            && taskManagerCurrentUser !== 'root'
+            && processOwner !== taskManagerCurrentUser;
+        if (needsSudo) {
+            showSudoConfirm(pid, signal, processOwner);
+        } else {
+            killProcess(pid, signal, false);
+        }
+    };
+    overlay.classList.remove('hidden');
+}
+
+function hideForceKillWarning() {
+    const overlay = document.getElementById('forcekill-overlay');
+    overlay.classList.add('hidden');
+    forceKillCallback = null;
+}
+
+function showSudoConfirm(pid, signal, processOwner) {
+    const overlay = document.getElementById('sudo-confirm-overlay');
+    document.getElementById('sudo-confirm-pid').textContent = pid;
+    document.getElementById('sudo-confirm-owner').textContent = processOwner;
+    document.getElementById('sudo-confirm-signal').textContent = 'SIG' + signal;
+
+    sudoConfirmCallback = () => killProcess(pid, signal, true);
+    overlay.classList.remove('hidden');
+}
+
+function hideSudoConfirm() {
+    const overlay = document.getElementById('sudo-confirm-overlay');
+    overlay.classList.add('hidden');
+    sudoConfirmCallback = null;
+}
+
+function requestKillProcess(pid, signal, processOwner) {
+    // For SIGKILL, show force kill warning first
+    if (signal === 'KILL') {
+        showForceKillWarning(pid, signal, processOwner);
+        return;
+    }
+
+    // For other signals, check if sudo is needed
+    // Root can kill any process without sudo
+    const needsSudo = taskManagerCurrentUser
+        && taskManagerCurrentUser !== 'root'
+        && processOwner !== taskManagerCurrentUser;
+    if (needsSudo) {
+        showSudoConfirm(pid, signal, processOwner);
+    } else {
+        killProcess(pid, signal, false);
+    }
+}
+
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', () => {
     const inputEl = document.getElementById('terminal-input');
@@ -1364,6 +1447,37 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Connect to terminal
     connect();
+
+    // Set up force kill warning popup handlers
+    const forceKillCancelBtn = document.getElementById('forcekill-cancel');
+    const forceKillYesBtn = document.getElementById('forcekill-yes');
+    if (forceKillCancelBtn) {
+        forceKillCancelBtn.onclick = hideForceKillWarning;
+    }
+    if (forceKillYesBtn) {
+        forceKillYesBtn.onclick = () => {
+            const callback = forceKillCallback;
+            hideForceKillWarning();
+            if (callback) {
+                callback();
+            }
+        };
+    }
+
+    // Set up sudo confirmation popup handlers
+    const sudoCancelBtn = document.getElementById('sudo-confirm-cancel');
+    const sudoYesBtn = document.getElementById('sudo-confirm-yes');
+    if (sudoCancelBtn) {
+        sudoCancelBtn.onclick = hideSudoConfirm;
+    }
+    if (sudoYesBtn) {
+        sudoYesBtn.onclick = () => {
+            if (sudoConfirmCallback) {
+                sudoConfirmCallback();
+            }
+            hideSudoConfirm();
+        };
+    }
 
     // Restore panel position preference
     let isRaised = false;

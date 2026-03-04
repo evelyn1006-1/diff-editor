@@ -135,6 +135,38 @@
                 </div>
             </div>
         </div>
+        <!-- Force Kill Warning Popup -->
+        <div id="forcekill-overlay" class="sudo-confirm-overlay hidden">
+            <div class="sudo-confirm-popup forcekill-popup">
+                <div class="sudo-confirm-header forcekill-header">
+                    <h3>Force Kill Warning</h3>
+                </div>
+                <div class="sudo-confirm-body">
+                    <p>SIGKILL cannot be caught or ignored by the process.</p>
+                    <p>Force kill <strong id="forcekill-pid"></strong>? This may cause data loss.</p>
+                </div>
+                <div class="sudo-confirm-actions">
+                    <button id="forcekill-cancel" class="sudo-btn sudo-btn-cancel">Cancel</button>
+                    <button id="forcekill-yes" class="sudo-btn sudo-btn-danger">Force Kill</button>
+                </div>
+            </div>
+        </div>
+        <!-- Sudo Confirmation Popup -->
+        <div id="sudo-confirm-overlay" class="sudo-confirm-overlay hidden">
+            <div class="sudo-confirm-popup">
+                <div class="sudo-confirm-header">
+                    <h3>Elevated Privileges Required</h3>
+                </div>
+                <div class="sudo-confirm-body">
+                    <p>Process <strong id="sudo-confirm-pid"></strong> is owned by <strong id="sudo-confirm-owner"></strong>.</p>
+                    <p>Send <span id="sudo-confirm-signal" class="sudo-signal-name"></span> with sudo?</p>
+                </div>
+                <div class="sudo-confirm-actions">
+                    <button id="sudo-confirm-cancel" class="sudo-btn sudo-btn-cancel">Cancel</button>
+                    <button id="sudo-confirm-yes" class="sudo-btn sudo-btn-confirm">Use sudo</button>
+                </div>
+            </div>
+        </div>
     </main>
     <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.4/dist/socket.io.min.js"></script>
     <script>window.AUTO_CMD = {{ auto_cmd | default('') | tojson }};</script>

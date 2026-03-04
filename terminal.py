@@ -9,6 +9,7 @@ import os
 import shlex
 import subprocess
 import time
+import getpass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -54,7 +55,8 @@ def init_terminal_socketio(socketio):
         # Spawn terminal as root directly via sudo -s
         if pty_manager.create_session(session_id, cwd=cwd, shell="/bin/bash"):
             join_room(session_id)
-            emit("connected", {"status": "ok", "cwd": cwd})
+            pty_session = pty_manager.get_session(session_id)
+            emit("connected", {"status": "ok", "cwd": cwd, "token": pty_session.token})
             # Start reading output
             socketio.start_background_task(read_pty_output, socketio, session_id)
             ws_logger.info(
@@ -1030,6 +1032,7 @@ def get_processes():
         "uptime": _get_uptime(),
         "process_counts": _get_process_counts(),
         "processes": _get_processes(),
+        "current_user": getpass.getuser(),
     })
 
 
@@ -1048,12 +1051,19 @@ ALLOWED_SIGNALS = {
 @terminal_bp.route("/terminal/process/kill", methods=["POST"])
 def kill_process():
     """Send a signal to a process by PID."""
+    # Validate terminal token - proves request came from active terminal session
+    terminal_session_id = request.headers.get("X-Terminal-Session", "")
+    terminal_token = request.headers.get("X-Terminal-Token", "")
+    if not pty_manager.validate_token(terminal_session_id, terminal_token):
+        return jsonify({"error": "Invalid or missing terminal session"}), 403
+
     data = request.get_json()
     if not data:
         return jsonify({"error": "Missing request body"}), 400
 
     pid = data.get("pid")
     signal_name = data.get("signal", "TERM")
+    use_sudo = data.get("use_sudo", False)
 
     if not pid or not isinstance(pid, int):
         return jsonify({"error": "Invalid PID"}), 400
@@ -1062,10 +1072,11 @@ def kill_process():
         return jsonify({"error": f"Invalid signal (allowed: {', '.join(ALLOWED_SIGNALS.keys())})"}), 400
 
     sig = ALLOWED_SIGNALS[signal_name]
+    cmd = ["sudo", "kill", sig, str(pid)] if use_sudo else ["kill", sig, str(pid)]
 
     try:
         result = subprocess.run(
-            ["kill", sig, str(pid)],
+            cmd,
             capture_output=True,
             text=True,
             timeout=5,
