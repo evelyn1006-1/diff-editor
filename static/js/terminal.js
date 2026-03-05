@@ -919,6 +919,40 @@ function updateExpandedStats(data) {
     }
 }
 
+// Compare two processes by the current sort column and direction
+function compareProcessesBySort(a, b) {
+    let valA, valB;
+    switch (taskManagerSortColumn) {
+        case 'pid':
+            valA = a.pid;
+            valB = b.pid;
+            break;
+        case 'user':
+            valA = a.user.toLowerCase();
+            valB = b.user.toLowerCase();
+            break;
+        case 'cpu':
+            valA = a.cpu;
+            valB = b.cpu;
+            break;
+        case 'mem':
+            valA = a.mem;
+            valB = b.mem;
+            break;
+        case 'name':
+            valA = a.command.toLowerCase();
+            valB = b.command.toLowerCase();
+            break;
+        default:
+            valA = a.cpu;
+            valB = b.cpu;
+    }
+
+    if (valA < valB) return taskManagerSortAsc ? -1 : 1;
+    if (valA > valB) return taskManagerSortAsc ? 1 : -1;
+    return 0;
+}
+
 function renderTaskManagerTable() {
     const tbody = document.getElementById('tm-process-list');
     if (!tbody) return;
@@ -939,38 +973,7 @@ function renderTaskManagerTable() {
             );
         }
         // Sort processes for flat view
-        filtered.sort((a, b) => {
-            let valA, valB;
-            switch (taskManagerSortColumn) {
-                case 'pid':
-                    valA = a.pid;
-                    valB = b.pid;
-                    break;
-                case 'user':
-                    valA = a.user.toLowerCase();
-                    valB = b.user.toLowerCase();
-                    break;
-                case 'cpu':
-                    valA = a.cpu;
-                    valB = b.cpu;
-                    break;
-                case 'mem':
-                    valA = a.mem;
-                    valB = b.mem;
-                    break;
-                case 'name':
-                    valA = a.command.toLowerCase();
-                    valB = b.command.toLowerCase();
-                    break;
-                default:
-                    valA = a.cpu;
-                    valB = b.cpu;
-            }
-
-            if (valA < valB) return taskManagerSortAsc ? -1 : 1;
-            if (valA > valB) return taskManagerSortAsc ? 1 : -1;
-            return 0;
-        });
+        filtered.sort(compareProcessesBySort);
         displayList = filtered.map(p => ({ ...p, depth: 0 }));
     }
 
@@ -1187,14 +1190,14 @@ function buildProcessTree(processes, filter = '') {
         }
     });
 
-    // Sort roots by CPU (descending), but prioritize matches when filtering
+    // Sort roots by selected column, but prioritize matches when filtering
     roots.sort((a, b) => {
         if (filter) {
             // Matches first
             if (a.isMatch && !b.isMatch) return -1;
             if (!a.isMatch && b.isMatch) return 1;
         }
-        return b.cpu - a.cpu;
+        return compareProcessesBySort(a, b);
     });
 
     // Flatten tree to list with depth info
@@ -1202,13 +1205,13 @@ function buildProcessTree(processes, filter = '') {
     function flatten(node, depth) {
         node.depth = depth;
         result.push(node);
-        // Sort children by CPU, matches first when filtering
+        // Sort children by selected column, matches first when filtering
         node.children.sort((a, b) => {
             if (filter) {
                 if (a.isMatch && !b.isMatch) return -1;
                 if (!a.isMatch && b.isMatch) return 1;
             }
-            return b.cpu - a.cpu;
+            return compareProcessesBySort(a, b);
         });
         node.children.forEach(child => flatten(child, depth + 1));
     }
