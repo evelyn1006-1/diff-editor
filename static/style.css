@@ -1124,6 +1124,99 @@ body.terminal-raised {
     flex-wrap: wrap;
 }
 
+.tm-stopped-services {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(52, 152, 219, 0.08), rgba(52, 152, 219, 0.02));
+}
+
+.tm-stopped-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-bottom: 0.6rem;
+    font-family: 'Comic Neue', sans-serif;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.tm-stopped-caption {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.tm-stopped-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.tm-stopped-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+
+.tm-stopped-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    min-width: 0;
+}
+
+.tm-stopped-command {
+    font-family: "SF Mono", Monaco, monospace;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tm-stopped-service {
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
+.tm-stopped-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-shrink: 0;
+}
+
+.tm-stopped-btn {
+    padding: 0.35rem 0.7rem;
+    border-radius: 999px;
+    background: transparent;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.tm-stopped-start {
+    color: #3498db;
+    border: 1px solid #3498db;
+}
+
+.tm-stopped-start:hover {
+    background: rgba(52, 152, 219, 0.15);
+}
+
+.tm-stopped-remove {
+    color: #95a5a6;
+    border: 1px solid #95a5a6;
+}
+
+.tm-stopped-remove:hover {
+    background: rgba(149, 165, 166, 0.15);
+}
+
 .tm-filter {
     flex: 1;
     min-width: 150px;
@@ -1368,8 +1461,9 @@ body.terminal-raised {
 
 .tm-actions {
     display: flex;
+    flex-direction: column;
     gap: 0.25rem;
-    align-items: center;
+    align-items: flex-start;
 }
 
 /* Split button container */
@@ -1451,6 +1545,64 @@ body.terminal-raised {
     font-style: italic;
 }
 
+/* Systemd badges */
+.tm-badge {
+    font-size: 0.65rem;
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+    font-weight: 600;
+    margin-left: 0.5rem;
+}
+
+.tm-badge-enabled {
+    background: rgba(46, 204, 113, 0.2);
+    color: #2ecc71;
+}
+
+.tm-badge-disabled {
+    background: rgba(149, 165, 166, 0.2);
+    color: #95a5a6;
+}
+
+.tm-unit {
+    font-family: "SF Mono", Monaco, monospace;
+    color: var(--accent);
+}
+
+/* Service control button */
+.tm-service-btn .tm-svc-main {
+    color: #3498db;
+    border-color: #3498db;
+}
+
+.tm-service-btn .tm-svc-main:hover {
+    background: rgba(52, 152, 219, 0.15);
+}
+
+.tm-service-btn .tm-split-arrow {
+    color: #3498db;
+    border-color: #3498db;
+}
+
+.tm-service-btn .tm-split-arrow:hover {
+    background: rgba(52, 152, 219, 0.15);
+}
+
+.tm-menu-header {
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    padding: 0.35rem 0.5rem 0.2rem;
+    letter-spacing: 0.03em;
+}
+
+.tm-menu-header:not(:first-child) {
+    border-top: 1px solid var(--border);
+    margin-top: 0.25rem;
+    padding-top: 0.4rem;
+}
+
 /* Tree view */
 .tm-tree-indent {
     display: inline-block;
@@ -1514,6 +1666,16 @@ body.terminal-raised {
 
     .tm-refresh-btn {
         display: none;
+    }
+
+    .tm-stopped-header,
+    .tm-stopped-item {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .tm-stopped-actions {
+        width: 100%;
     }
 }
 

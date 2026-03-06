@@ -993,18 +993,22 @@ def _get_processes() -> list[dict]:
         )
         if result.returncode == 0:
             lines = result.stdout.strip().split("\n")
-            # Skip header line
-            for line in lines[1:150]:  # Increased limit for tree view
+            # First pass: collect processes and their units
+            pid_to_unit: dict[int, str | None] = {}
+            for line in lines[1:500]:  # Increased limit for tree view
                 parts = line.split(None, 11)
                 if len(parts) >= 12:
                     cmd = parts[11]
-                    # Skip the ps command itself
                     if cmd.startswith("ps axo") or cmd.startswith("ps ax"):
                         continue
+                    pid = int(parts[1])
+                    ppid = int(parts[2])
+                    unit = _get_systemd_unit(pid)
+                    pid_to_unit[pid] = unit
                     processes.append({
                         "user": parts[0],
-                        "pid": int(parts[1]),
-                        "ppid": int(parts[2]),
+                        "pid": pid,
+                        "ppid": ppid,
                         "cpu": float(parts[3]),
                         "mem": float(parts[4]),
                         "vsz": int(parts[5]),
@@ -1015,6 +1019,12 @@ def _get_processes() -> list[dict]:
                         "time": parts[10],
                         "command": cmd,
                     })
+            # Second pass: only show unit for root process of each service
+            for p in processes:
+                unit = pid_to_unit.get(p["pid"])
+                parent_unit = pid_to_unit.get(p["ppid"])
+                # Show unit only if parent has a different unit (or no unit)
+                p["systemd_unit"] = unit if unit and unit != parent_unit else None
     except (subprocess.TimeoutExpired, OSError, ValueError):
         pass
     return processes
@@ -1092,6 +1102,57 @@ def kill_process():
         return jsonify({"error": str(e)}), 500
 
 
+# Allowed systemd service actions
+ALLOWED_SERVICE_ACTIONS = {"restart", "start", "stop", "reload", "enable", "disable"}
+
+
+@terminal_bp.route("/terminal/service/control", methods=["POST"])
+def control_service():
+    """Control a systemd service (restart, start, stop, reload, enable, disable)."""
+    # Validate terminal token
+    terminal_session_id = request.headers.get("X-Terminal-Session", "")
+    terminal_token = request.headers.get("X-Terminal-Token", "")
+    if not pty_manager.validate_token(terminal_session_id, terminal_token):
+        return jsonify({"error": "Invalid or missing terminal session"}), 403
+
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Missing request body"}), 400
+
+    unit = data.get("unit")
+    action = data.get("action", "restart")
+
+    if not unit or not isinstance(unit, str):
+        return jsonify({"error": "Invalid unit name"}), 400
+
+    # Validate unit name format (basic sanitization)
+    if not unit.endswith(".service") or "/" in unit or ".." in unit:
+        return jsonify({"error": "Invalid unit name format"}), 400
+
+    if action not in ALLOWED_SERVICE_ACTIONS:
+        return jsonify({"error": f"Invalid action (allowed: {', '.join(ALLOWED_SERVICE_ACTIONS)})"}), 400
+
+    # All service control requires sudo
+    cmd = ["sudo", "systemctl", action, unit]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,  # Longer timeout for service operations
+        )
+        if result.returncode == 0:
+            return jsonify({"success": True, "message": f"Service {unit}: {action} successful"})
+        else:
+            error = result.stderr.strip() or f"Failed to {action} {unit}"
+            return jsonify({"error": error}), 400
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": f"Service {action} timed out"}), 500
+    except OSError as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # Store previous I/O stats for rate calculation
 _prev_io_stats: dict[int, dict] = {}
 _prev_io_time: dict[int, float] = {}
@@ -1104,6 +1165,41 @@ def _format_bytes(b: float) -> str:
             return f"{b:.1f}{unit}"
         b /= 1024
     return f"{b:.1f}TB"
+
+
+def _get_systemd_unit(pid: int) -> str | None:
+    """Quick lookup of systemd unit name from cgroup (no enabled check)."""
+    try:
+        with open(f"/proc/{pid}/cgroup") as f:
+            path = f.read().strip().split("::", 1)[-1]
+            for seg in path.split("/"):
+                if seg.endswith(".service"):
+                    return seg
+    except OSError:
+        pass
+    return None
+
+
+def _get_systemd_info(pid: int) -> dict | None:
+    """Get systemd unit info including enabled status (for details panel)."""
+    unit = _get_systemd_unit(pid)
+    if not unit:
+        return None
+
+    data = {"unit": unit, "enabled": False}
+    try:
+        systemd_result = subprocess.run(
+            ["systemctl", "is-enabled", unit],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if systemd_result.stdout.strip() == "enabled":
+            data["enabled"] = True
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    return data
 
 
 def _get_process_details(pid: int) -> dict:
@@ -1119,6 +1215,7 @@ def _get_process_details(pid: int) -> dict:
         "cwd": None,
         "threads": None,
         "memory": None,
+        "systemd": None,
     }
 
     # ─── Network: Listening ports ───
@@ -1277,6 +1374,9 @@ def _get_process_details(pid: int) -> dict:
                 }
     except (OSError, ValueError, IndexError):
         pass
+
+    # ─── Systemd unit info ───
+    result["systemd"] = _get_systemd_info(pid)
 
     return result
 

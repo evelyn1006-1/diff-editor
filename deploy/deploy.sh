@@ -85,11 +85,24 @@ validate_nginx_candidate() {
 
 cd "$APP_DIR"
 
-sudo -H "$PYTHON" -m pip install --upgrade pip wheel --quiet --root-user-action=ignore --break-system-packages
+# Only install dependencies if requirements have changed
+HASH_FILE="$DEPLOY_DIR/.requirements.hash"
 if [[ -f requirements.txt ]]; then
-    sudo -H "$PYTHON" -m pip install -r requirements.txt --quiet --root-user-action=ignore --break-system-packages
+    REQ_HASH=$(md5sum requirements.txt | cut -d' ' -f1)
+    if [[ ! -f "$HASH_FILE" ]] || [[ "$(cat "$HASH_FILE")" != "$REQ_HASH" ]]; then
+        echo "Requirements changed, installing dependencies..."
+        sudo -H "$PYTHON" -m pip install --upgrade pip wheel --quiet --root-user-action=ignore --break-system-packages
+        sudo -H "$PYTHON" -m pip install -r requirements.txt --quiet --root-user-action=ignore --break-system-packages
+        echo "$REQ_HASH" > "$HASH_FILE"
+    fi
 elif [[ -f pyproject.toml ]]; then
-    sudo -H "$PYTHON" -m pip install . --quiet --root-user-action=ignore --break-system-packages
+    REQ_HASH=$(md5sum pyproject.toml | cut -d' ' -f1)
+    if [[ ! -f "$HASH_FILE" ]] || [[ "$(cat "$HASH_FILE")" != "$REQ_HASH" ]]; then
+        echo "pyproject.toml changed, installing dependencies..."
+        sudo -H "$PYTHON" -m pip install --upgrade pip wheel --quiet --root-user-action=ignore --break-system-packages
+        sudo -H "$PYTHON" -m pip install . --quiet --root-user-action=ignore --break-system-packages
+        echo "$REQ_HASH" > "$HASH_FILE"
+    fi
 fi
 
 link_unit diff-editor

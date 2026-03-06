@@ -731,7 +731,9 @@ let taskManagerExpandedDetails = new Set();   // PIDs with expanded details pane
 let taskManagerTreeMode = false;
 let taskManagerStatsExpanded = false;
 let taskManagerProcessDetails = new Map();    // PID -> {ports, connections, loading}
+let taskManagerStoppedServices = new Map();   // unit -> {unit, command, label}
 let taskManagerOpenMenuPid = null;            // PID with open signal dropdown
+let taskManagerOpenServiceMenuPid = null;     // PID with open service dropdown
 let sudoConfirmCallback = null;               // Callback for sudo confirmation
 let forceKillCallback = null;                 // Callback for force kill confirmation
 
@@ -752,6 +754,7 @@ function openTaskManager() {
     closeBtn.onclick = closeTaskManager;
     filterInput.oninput = (e) => {
         taskManagerFilter = e.target.value.toLowerCase();
+        renderStoppedServices();
         renderTaskManagerTable();
     };
     sortSelect.onchange = (e) => {
@@ -793,6 +796,7 @@ function openTaskManager() {
     });
 
     // Fetch initial data and start auto-refresh
+    renderStoppedServices();
     fetchTaskManagerData();
     taskManagerRefreshInterval = setInterval(fetchTaskManagerData, 2000);
 }
@@ -813,6 +817,7 @@ function closeTaskManager() {
     taskManagerExpandedDetails.clear();
     taskManagerProcessDetails.clear();
     taskManagerOpenMenuPid = null;
+    taskManagerOpenServiceMenuPid = null;
     taskManagerTreeMode = false;
     taskManagerStatsExpanded = false;
 
@@ -861,6 +866,8 @@ async function fetchTaskManagerData() {
         // Store current user and processes, then render
         taskManagerCurrentUser = data.current_user || null;
         taskManagerProcesses = data.processes || [];
+        syncStoppedServicesWithProcesses();
+        renderStoppedServices();
         renderTaskManagerTable();
 
         // Refresh details for expanded rows
@@ -917,6 +924,133 @@ function updateExpandedStats(data) {
             </div>
         `).join('');
     }
+}
+
+function tokenizeCommand(command) {
+    return command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+}
+
+function reduceCommandToken(token) {
+    const unquoted = token.replace(/^['"]|['"]$/g, '');
+    const basename = unquoted.includes('/') ? unquoted.split('/').pop() : unquoted;
+    return basename || unquoted;
+}
+
+function formatCommandLead(command) {
+    if (!command) return 'unknown';
+
+    const tokens = tokenizeCommand(command);
+    if (tokens.length === 0) return 'unknown';
+
+    const executable = reduceCommandToken(tokens[0]);
+    const firstArg = tokens[1] ? reduceCommandToken(tokens[1]) : null;
+    return firstArg ? `${executable} ${firstArg}` : executable;
+}
+
+function formatCollapsedCommand(command) {
+    if (!command) return '';
+
+    const tokens = tokenizeCommand(command);
+    if (tokens.length === 0) return command;
+
+    const parts = [reduceCommandToken(tokens[0])];
+    if (tokens[1]) {
+        parts.push(reduceCommandToken(tokens[1]));
+    }
+    if (tokens.length > 2) {
+        parts.push(tokens.slice(2).join(' '));
+    }
+    return parts.join(' ');
+}
+
+function getStoppedServiceLabel(command) {
+    return formatCommandLead(command);
+}
+
+function syncStoppedServicesWithProcesses() {
+    const activeUnits = new Set(
+        taskManagerProcesses
+            .map(p => p.systemd_unit)
+            .filter(Boolean)
+    );
+
+    activeUnits.forEach(unit => {
+        taskManagerStoppedServices.delete(unit);
+    });
+}
+
+function rememberStoppedService(unit, command) {
+    const current = taskManagerStoppedServices.get(unit);
+    const process = taskManagerProcesses.find(p => p.systemd_unit === unit);
+    const nextCommand = command || process?.command || current?.command || unit;
+
+    taskManagerStoppedServices.set(unit, {
+        unit,
+        command: nextCommand,
+        label: getStoppedServiceLabel(nextCommand),
+    });
+    renderStoppedServices();
+}
+
+function removeStoppedService(unit) {
+    if (taskManagerStoppedServices.delete(unit)) {
+        renderStoppedServices();
+    }
+}
+
+function renderStoppedServices() {
+    const container = document.getElementById('tm-stopped-services');
+    if (!container) return;
+
+    const services = Array.from(taskManagerStoppedServices.values())
+        .filter(service => {
+            if (!taskManagerFilter) return true;
+            const haystack = `${service.label} ${service.command} ${service.unit}`.toLowerCase();
+            return haystack.includes(taskManagerFilter);
+        })
+        .sort((a, b) => a.label.localeCompare(b.label) || a.unit.localeCompare(b.unit));
+
+    if (services.length === 0) {
+        container.innerHTML = '';
+        container.classList.add('hidden');
+        return;
+    }
+
+    container.classList.remove('hidden');
+    container.innerHTML = `
+        <div class="tm-stopped-header">
+            <span>Stopped Services</span>
+            <span class="tm-stopped-caption">Saved from this task manager session</span>
+        </div>
+        <div class="tm-stopped-list">
+            ${services.map(service => `
+                <div class="tm-stopped-item">
+                    <div class="tm-stopped-copy">
+                        <div class="tm-stopped-command" title="${escapeHtml(service.command)}">${escapeHtml(service.label)}</div>
+                        <div class="tm-stopped-service">Service <span class="tm-unit">${escapeHtml(service.unit)}</span></div>
+                    </div>
+                    <div class="tm-stopped-actions">
+                        <button class="tm-stopped-btn tm-stopped-start" data-unit="${escapeHtml(service.unit)}" title="Start service">Start</button>
+                        <button class="tm-stopped-btn tm-stopped-remove" data-unit="${escapeHtml(service.unit)}" title="Remove entry">Remove</button>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+
+    container.querySelectorAll('.tm-stopped-start').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            controlService(btn.dataset.unit, 'start');
+        };
+    });
+
+    container.querySelectorAll('.tm-stopped-remove').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            removeStoppedService(btn.dataset.unit);
+        };
+    });
 }
 
 // Compare two processes by the current sort column and direction
@@ -1002,6 +1136,25 @@ function renderTaskManagerTable() {
         const detailsHtml = details ? formatProcessDetails(details) : '<div class="tm-details">Click ▶ to load details</div>';
         const cmdExpanded = taskManagerExpandedCommands.has(p.pid);
         const detailsExpanded = taskManagerExpandedDetails.has(p.pid);
+        const displayCommand = cmdExpanded ? p.command : formatCollapsedCommand(p.command);
+        const systemdUnit = p.systemd_unit || null;
+
+        // Service control button (shown only for systemd-managed processes)
+        const serviceBtn = systemdUnit ? `
+                <div class="tm-split-btn tm-service-btn" data-pid="${p.pid}" data-unit="${escapeHtml(systemdUnit)}">
+                    <button class="tm-split-main tm-svc-main" title="Restart service">Restart</button>
+                    <button class="tm-split-arrow" title="Service actions">&#9662;</button>
+                    <div class="tm-split-menu hidden">
+                        <div class="tm-menu-header">Service</div>
+                        <div class="tm-split-option" data-action="restart">Restart</div>
+                        <div class="tm-split-option" data-action="stop">Stop</div>
+                        <div class="tm-split-option" data-action="reload">Reload</div>
+                        <div class="tm-menu-header">Start at Boot</div>
+                        <div class="tm-split-option" data-action="enable">Enable</div>
+                        <div class="tm-split-option" data-action="disable">Disable</div>
+                    </div>
+                </div>
+        ` : '';
 
         return `
         <tr data-pid="${p.pid}" class="${childClass}${matchClass}${rootClass}">
@@ -1013,7 +1166,7 @@ function renderTaskManagerTable() {
                 <div class="tm-command-wrapper">
                     <button class="tm-expand-details-btn" title="Show process details (ports, I/O, memory)">&#9654;</button>
                     <div class="tm-command-content">
-                        <span class="tm-command-text" title="${escapeHtml(p.command)}">${indent}${branch}${escapeHtml(p.command)}</span>
+                        <span class="tm-command-text" title="${escapeHtml(p.command)}">${indent}${branch}${escapeHtml(displayCommand)}</span>
                         <div class="tm-details-section">
                             ${detailsHtml}
                         </div>
@@ -1025,6 +1178,7 @@ function renderTaskManagerTable() {
                     <button class="tm-split-main" title="Send TERM">TERM</button>
                     <button class="tm-split-arrow" title="Choose signal">&#9662;</button>
                     <div class="tm-split-menu hidden">
+                        <div class="tm-menu-header">Signal</div>
                         <div class="tm-split-option" data-signal="TERM">TERM <span class="tm-sig-desc">Graceful exit</span></div>
                         <div class="tm-split-option" data-signal="HUP">HUP <span class="tm-sig-desc">Reload/restart</span></div>
                         <div class="tm-split-option" data-signal="INT">INT <span class="tm-sig-desc">Interrupt</span></div>
@@ -1033,6 +1187,7 @@ function renderTaskManagerTable() {
                         <div class="tm-split-option" data-signal="CONT">CONT <span class="tm-sig-desc">Resume</span></div>
                     </div>
                 </div>
+                ${serviceBtn}
             </td>
         </tr>
     `;
@@ -1081,27 +1236,70 @@ function renderTaskManagerTable() {
         });
     });
 
+    // Attach service control button handlers
+    tbody.querySelectorAll('.tm-service-btn').forEach(container => {
+        const pid = parseInt(container.dataset.pid);
+        const unit = container.dataset.unit;
+        const process = taskManagerProcesses.find(p => p.pid === pid);
+        const mainBtn = container.querySelector('.tm-svc-main');
+        const arrowBtn = container.querySelector('.tm-split-arrow');
+        const menu = container.querySelector('.tm-split-menu');
+
+        // Restore open menu state after refresh
+        if (taskManagerOpenServiceMenuPid === pid) {
+            menu.classList.remove('hidden');
+        }
+
+        // Main button sends restart
+        mainBtn.onclick = (e) => {
+            e.stopPropagation();
+            controlService(unit, 'restart', { command: process?.command });
+        };
+
+        // Arrow button toggles menu
+        arrowBtn.onclick = (e) => {
+            e.stopPropagation();
+            document.querySelectorAll('.tm-split-menu').forEach(m => {
+                if (m !== menu) m.classList.add('hidden');
+            });
+            const nowHidden = menu.classList.toggle('hidden');
+            taskManagerOpenServiceMenuPid = nowHidden ? null : pid;
+            taskManagerOpenMenuPid = null;
+        };
+
+        // Menu option selection
+        menu.querySelectorAll('.tm-split-option').forEach(opt => {
+            opt.onclick = (e) => {
+                e.stopPropagation();
+                const action = opt.dataset.action;
+                menu.classList.add('hidden');
+                taskManagerOpenServiceMenuPid = null;
+                controlService(unit, action, { command: process?.command });
+            };
+        });
+    });
+
     // Close menus when clicking elsewhere
     document.addEventListener('click', () => {
         document.querySelectorAll('.tm-split-menu').forEach(m => m.classList.add('hidden'));
         taskManagerOpenMenuPid = null;
+        taskManagerOpenServiceMenuPid = null;
     }, { once: true });
 
     // Attach command text click handlers (click text to expand/collapse command)
     tbody.querySelectorAll('.tm-command-text').forEach(span => {
         const row = span.closest('tr');
         const pid = parseInt(row.dataset.pid);
-        const cell = span.closest('.tm-command');
 
         span.onclick = (e) => {
             e.stopPropagation();
-            const wasExpanded = cell.classList.contains('cmd-expanded');
-            cell.classList.toggle('cmd-expanded');
+            const wasExpanded = taskManagerExpandedCommands.has(pid);
             if (!wasExpanded) {
                 taskManagerExpandedCommands.add(pid);
             } else {
                 taskManagerExpandedCommands.delete(pid);
             }
+            renderTaskManagerTable();
         };
     });
 
@@ -1255,6 +1453,7 @@ async function fetchProcessDetails(pid, isRefresh = false) {
             cwd: data.cwd || null,
             threads: data.threads || null,
             memory: data.memory || null,
+            systemd: data.systemd || null,
         });
         renderTaskManagerTable();
 
@@ -1339,6 +1538,14 @@ function formatProcessDetails(details) {
         parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">FDs:</span> ${fdInfo}</div>`);
     }
 
+    // Systemd unit info
+    if (details.systemd && details.systemd.unit) {
+        const enabledBadge = details.systemd.enabled
+            ? '<span class="tm-badge tm-badge-enabled">enabled</span>'
+            : '<span class="tm-badge tm-badge-disabled">disabled</span>';
+        parts.push(`<div class="tm-detail-row"><span class="tm-detail-label">Systemd:</span> <span class="tm-unit">${escapeHtml(details.systemd.unit)}</span> ${enabledBadge}</div>`);
+    }
+
     if (parts.length === 0) {
         parts.push('<div class="tm-detail-row tm-detail-none">No details available</div>');
     }
@@ -1377,6 +1584,48 @@ async function killProcess(pid, signal, useSudo = false) {
         }
     } catch (e) {
         console.error('Failed to kill process:', e);
+        appendOutput(`Error: ${e.message}\n`, 'error');
+    }
+}
+
+async function controlService(unit, action, options = {}) {
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    // Require active terminal session with valid token
+    if (!socket || !socket.id || !terminalToken) {
+        appendOutput('Error: No active terminal session\n', 'error');
+        return;
+    }
+
+    appendOutput(`Service ${unit}: ${action}...\n`, 'info');
+
+    try {
+        const resp = await fetch(`${basePath}/terminal/service/control`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Terminal-Session': socket.id,
+                'X-Terminal-Token': terminalToken,
+            },
+            body: JSON.stringify({ unit, action }),
+        });
+
+        const data = await resp.json();
+
+        if (resp.ok && data.success) {
+            if (action === 'stop') {
+                rememberStoppedService(unit, options.command);
+            } else if (action === 'start' || action === 'restart') {
+                removeStoppedService(unit);
+            }
+            appendOutput(`${data.message}\n`, 'info');
+            // Refresh the process list after a short delay
+            setTimeout(fetchTaskManagerData, 1000);
+        } else {
+            appendOutput(`Error: ${data.error || 'Failed to control service'}\n`, 'error');
+        }
+    } catch (e) {
+        console.error('Failed to control service:', e);
         appendOutput(`Error: ${e.message}\n`, 'error');
     }
 }
