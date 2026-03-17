@@ -1467,7 +1467,8 @@ function renderTaskManagerTable() {
             filtered = filtered.filter(p =>
                 p.command.toLowerCase().includes(taskManagerFilter) ||
                 p.user.toLowerCase().includes(taskManagerFilter) ||
-                String(p.pid).includes(taskManagerFilter)
+                String(p.pid).includes(taskManagerFilter) ||
+                (p.systemd_unit && p.systemd_unit.toLowerCase().includes(taskManagerFilter))
             );
         }
         // Sort processes for flat view
@@ -1711,7 +1712,8 @@ function buildProcessTree(processes, filter = '') {
         byPid.forEach((p, pid) => {
             if (p.command.toLowerCase().includes(lowerFilter) ||
                 p.user.toLowerCase().includes(lowerFilter) ||
-                String(pid).includes(lowerFilter)) {
+                String(pid).includes(lowerFilter) ||
+                (p.systemd_unit && p.systemd_unit.toLowerCase().includes(lowerFilter))) {
                 matchingPids.add(pid);
                 p.isMatch = true;
             } else {
