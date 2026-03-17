@@ -118,6 +118,7 @@
                     <button id="tm-tree-toggle" class="tm-tree-btn" title="Toggle tree view">Tree</button>
                     <button id="tm-refresh" class="tm-refresh-btn" title="Refresh">Refresh</button>
                 </div>
+                <div id="tm-failed-services" class="tm-failed-services hidden"></div>
                 <div id="tm-stopped-services" class="tm-stopped-services hidden"></div>
                 <div class="task-manager-table-wrapper">
                     <table class="task-manager-table">
@@ -165,6 +166,32 @@
                 <div class="sudo-confirm-actions">
                     <button id="sudo-confirm-cancel" class="sudo-btn sudo-btn-cancel">Cancel</button>
                     <button id="sudo-confirm-yes" class="sudo-btn sudo-btn-confirm">Use sudo</button>
+                </div>
+            </div>
+        </div>
+        <!-- Service Failure Popup -->
+        <div id="service-failure-overlay" class="sudo-confirm-overlay hidden">
+            <div class="sudo-confirm-popup service-failure-popup">
+                <div class="sudo-confirm-header service-failure-header">
+                    <h3 id="service-failure-title">Service Needs Attention</h3>
+                </div>
+                <div class="sudo-confirm-body service-failure-body">
+                    <div id="service-failure-details" class="service-failure-details">
+                        <p>Service: <span id="service-failure-unit"></span></p>
+                        <p>State: <span id="service-failure-state"></span></p>
+                        <p>Result: <span id="service-failure-result"></span></p>
+                        <p id="service-failure-exit-row">Exit status: <span id="service-failure-exit"></span></p>
+                        <p id="service-failure-pid-row">Main PID: <span id="service-failure-pid"></span></p>
+                        <p id="service-failure-started-row">Started: <span id="service-failure-started"></span></p>
+                        <p id="service-failure-finished-row">Finished: <span id="service-failure-finished"></span></p>
+                        <p id="service-failure-restarts-row">Restart attempts: <span id="service-failure-restarts"></span></p>
+                    </div>
+                    <pre id="service-failure-log" class="service-failure-log hidden"></pre>
+                    <div id="service-failure-extra-logs" class="service-failure-extra-logs hidden"></div>
+                </div>
+                <div class="sudo-confirm-actions">
+                    <button id="service-failure-find-logs" class="sudo-btn">Find more logs</button>
+                    <button id="service-failure-close" class="sudo-btn sudo-btn-confirm">Close</button>
                 </div>
             </div>
         </div>

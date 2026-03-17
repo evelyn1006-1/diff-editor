@@ -6,6 +6,7 @@ import glob
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -52,7 +53,6 @@ def init_terminal_socketio(socketio):
         cwd = os.path.expanduser("~")
         remote_addr = request.remote_addr or "-"
 
-        # Spawn terminal as root directly via sudo -s
         if pty_manager.create_session(session_id, cwd=cwd, shell="/bin/bash"):
             join_room(session_id)
             pty_session = pty_manager.get_session(session_id)
@@ -1106,6 +1106,469 @@ def kill_process():
 ALLOWED_SERVICE_ACTIONS = {"restart", "start", "stop", "reload", "enable", "disable"}
 
 
+def _is_valid_service_unit(unit: str) -> bool:
+    """Validate a basic systemd service unit name."""
+    return bool(unit) and unit.endswith(".service") and "/" not in unit and ".." not in unit
+
+
+def _parse_systemctl_show(stdout: str) -> dict[str, str]:
+    """Parse `systemctl show` KEY=VALUE output."""
+    data: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value.strip()
+    return data
+
+
+def _get_service_properties(unit: str, *, use_sudo: bool = False) -> dict[str, str]:
+    """Fetch a small set of systemd properties for a unit."""
+    cmd = [
+        "systemctl",
+        "show",
+        unit,
+        "--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StatusText,Description,"
+        "MainPID,ExecMainStartTimestamp,ExecMainExitTimestamp,NRestarts",
+    ]
+    if use_sudo:
+        cmd.insert(0, "sudo")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return {}
+        return _parse_systemctl_show(result.stdout)
+    except (subprocess.TimeoutExpired, OSError):
+        return {}
+
+
+def _format_service_short_status(props: dict[str, str]) -> str:
+    """Build a compact status string for a service."""
+    active = props.get("ActiveState") or "unknown"
+    sub = props.get("SubState") or ""
+    result = props.get("Result") or ""
+    exec_status = props.get("ExecMainStatus") or ""
+
+    parts = [active]
+    if sub and sub != active:
+        parts.append(sub)
+    if result and result not in {"success", "none"}:
+        parts.append(result)
+    if exec_status and exec_status != "0":
+        parts.append(f"exit {exec_status}")
+    return " / ".join(parts)
+
+
+# systemd ExecMainCode values (from src/basic/exit-status.h)
+EXEC_MAIN_CODE_NAMES = {
+    "0": None,        # CLD_EXITED with status 0 (success)
+    "1": "exited",    # CLD_EXITED
+    "2": "killed",    # CLD_KILLED
+    "3": "dumped",    # CLD_DUMPED (core dump)
+    "4": "timeout",   # timeout
+    "5": "watchdog",  # watchdog
+    "6": "start-limit-hit",
+    "7": "condition-failed",
+    "8": "exec-error",
+}
+
+
+def _get_service_reason_preview(props: dict[str, str]) -> str | None:
+    """Extract a short human-readable reason for a unit state."""
+    status_text = (props.get("StatusText") or "").strip()
+    if status_text:
+        return status_text
+
+    exec_code = props.get("ExecMainCode") or ""
+    exec_status = props.get("ExecMainStatus") or ""
+    result = props.get("Result") or ""
+
+    if exec_status and exec_status != "0":
+        code_name = EXEC_MAIN_CODE_NAMES.get(exec_code, exec_code)
+        if code_name:
+            return f"{code_name} with status {exec_status}"
+        return f"exit {exec_status}"
+    if result and result not in {"success", "none"}:
+        return f"systemd result: {result}"
+    return None
+
+
+def _get_service_log_excerpt(unit: str, max_lines: int = 16) -> str | None:
+    """Return the tail of the service journal as a best-effort failure excerpt."""
+    try:
+        result = subprocess.run(
+            ["sudo", "journalctl", "-u", unit, "-n", "40", "--no-pager", "-o", "cat"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if result.returncode != 0:
+            return None
+        lines = [line.rstrip() for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            return None
+        return "\n".join(lines[-max_lines:])
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _get_service_working_directory(unit: str) -> str | None:
+    """Get the WorkingDirectory for a systemd service unit."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", unit, "--property=WorkingDirectory"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if line.startswith("WorkingDirectory="):
+                path = line.split("=", 1)[1].strip()
+                return path if path else None
+        return None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _find_service_log_files(unit: str, max_files: int = 10) -> list[dict]:
+    """Find log files in the service's working directory, sorted by modification time."""
+    work_dir = _get_service_working_directory(unit)
+    if not work_dir:
+        return []
+
+    try:
+        # Find log files, excluding:
+        # - Hidden directories (starting with .)
+        # - Directories containing 'cache' (case insensitive)
+        # - static, node_modules, venv directories
+        # Include text-based log formats, exclude binary (etl, journal, evtx)
+        # Output format: modification_time (epoch) followed by path
+        cmd = [
+            "sudo", "find", work_dir,
+            "-maxdepth", "4",
+            "(",
+                "-name", ".*", "-o",
+                "-iname", "*cache*", "-o",
+                "-iname", "*archive*", "-o",
+                "-name", "static", "-o",
+                "-name", "node_modules", "-o",
+                "-name", "venv",
+            ")", "-prune", "-o",
+            "-type", "f",
+            "(",
+                "-name", "*.log", "-o",
+                "-name", "*.jsonl", "-o",
+                "-name", "*.err", "-o",
+                "-name", "*.out", "-o",
+                "-name", "*.trace", "-o",
+                "-name", "*.logfile", "-o",
+                "-name", "*.access", "-o",
+                "-iname", "*log*.txt",
+            ")",
+            "-printf", "%T@ %p\\n",
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return []
+
+        log_files = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(" ", 1)
+            if len(parts) != 2:
+                continue
+            mtime_str, path = parts
+
+            # Skip rotated logs (e.g., app.log.1, app.log.gz, app.log.2024-01-01)
+            if re.search(r"\.(log|jsonl|err|out|trace|logfile|access|txt)\.(gz|[0-9])", path):
+                continue
+
+            # Skip compiler output (a.out)
+            if path.endswith("/a.out"):
+                continue
+
+            try:
+                mtime = float(mtime_str)
+                log_files.append({"path": path, "mtime": mtime})
+            except ValueError:
+                continue
+
+        # Sort by modification time (most recent first)
+        log_files.sort(key=lambda x: x["mtime"], reverse=True)
+        return log_files[:max_files]
+
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+
+def _read_log_file_tail(path: str, max_lines: int = 20) -> str | None:
+    """Read the tail of a log file."""
+    try:
+        result = subprocess.run(
+            ["sudo", "tail", "-n", str(max_lines), path],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() if result.stdout.strip() else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _get_service_failure_details(unit: str, *, include_logs: bool = False) -> dict | None:
+    """Get state and best-effort failure details for a service unit."""
+    props = _get_service_properties(unit)
+    if not props:
+        props = _get_service_properties(unit, use_sudo=True)
+    if not props:
+        return None
+
+    data = {
+        "unit": unit,
+        "description": props.get("Description") or unit,
+        "active_state": props.get("ActiveState") or "unknown",
+        "sub_state": props.get("SubState") or "",
+        "result": props.get("Result") or "",
+        "short_status": _format_service_short_status(props),
+        "reason_preview": _get_service_reason_preview(props),
+    }
+    if include_logs:
+        data["log_excerpt"] = _get_service_log_excerpt(unit)
+        # Include additional details for the debug modal
+        data["exit_status"] = props.get("ExecMainStatus") or ""
+        data["main_pid"] = props.get("MainPID") or ""
+        data["started"] = props.get("ExecMainStartTimestamp") or ""
+        data["finished"] = props.get("ExecMainExitTimestamp") or ""
+        data["restart_count"] = props.get("NRestarts") or "0"
+    return data
+
+
+def _count_recent_failures(unit: str, minutes: int = 5) -> int:
+    """Count how many times a service failed in the last N minutes via journal."""
+    try:
+        result = subprocess.run(
+            [
+                "sudo", "journalctl",
+                "-u", unit,
+                "--since", f"{minutes} minutes ago",
+                "--no-pager",
+                "-o", "cat",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return 0
+        return result.stdout.count("Failed with result")
+    except (subprocess.TimeoutExpired, OSError):
+        return 0
+
+
+def _get_restart_looping_services() -> list[dict]:
+    """Find services stuck in restart loops (auto-restart with repeated failures)."""
+    try:
+        # Query services currently in activating state
+        result = subprocess.run(
+            [
+                "systemctl",
+                "list-units",
+                "--type=service",
+                "--state=activating",
+                "--all",
+                "--plain",
+                "--full",
+                "--no-legend",
+                "--no-pager",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+
+        looping_services: list[dict] = []
+        for line in result.stdout.splitlines():
+            parts = line.split(None, 5)
+            if parts and parts[0] == "●":
+                parts = parts[1:]
+            if len(parts) < 4:
+                continue
+            unit = parts[0]
+            if not _is_valid_service_unit(unit):
+                continue
+
+            # Check if it's in auto-restart substate
+            props = _get_service_properties(unit)
+            if not props:
+                props = _get_service_properties(unit, use_sudo=True)
+            if props.get("SubState") != "auto-restart":
+                continue
+
+            # Count recent failures to distinguish from benign restarts
+            failure_count = _count_recent_failures(unit, minutes=5)
+            if failure_count < 3:
+                continue  # Not a problematic loop
+
+            # Build details with restart-loop specific status
+            n_restarts = props.get("NRestarts") or "0"
+            result_str = props.get("Result") or "unknown"
+            short_status = f"restart-loop / {result_str} / {failure_count} failures in 5 min"
+
+            details = {
+                "unit": unit,
+                "description": props.get("Description") or unit,
+                "active_state": "restart-loop",
+                "sub_state": props.get("SubState") or "",
+                "result": result_str,
+                "short_status": short_status,
+                "reason_preview": f"{n_restarts} total restarts, failing repeatedly",
+                "is_restart_loop": True,
+            }
+            looping_services.append(details)
+
+        return looping_services
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+
+def _get_failed_services() -> list[dict]:
+    """List currently failed systemd services with a compact status summary."""
+    try:
+        result = subprocess.run(
+            [
+                "systemctl",
+                "list-units",
+                "--type=service",
+                "--state=failed",
+                "--all",
+                "--plain",
+                "--full",
+                "--no-legend",
+                "--no-pager",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+
+        failed_services: list[dict] = []
+        for line in result.stdout.splitlines():
+            parts = line.split(None, 5)
+            if parts and parts[0] == "●":
+                parts = parts[1:]
+            if len(parts) < 4:
+                continue
+            unit = parts[0]
+            if not _is_valid_service_unit(unit):
+                continue
+
+            details = _get_service_failure_details(unit, include_logs=False) or {
+                "unit": unit,
+                "description": parts[4] if len(parts) > 4 else unit,
+                "active_state": parts[2],
+                "sub_state": parts[3],
+                "result": "",
+                "short_status": " / ".join(parts[2:4]),
+                "reason_preview": None,
+            }
+            if len(parts) > 4 and parts[4]:
+                details["description"] = parts[4]
+            failed_services.append(details)
+
+        # Also include services stuck in restart loops
+        looping_services = _get_restart_looping_services()
+        seen_units = {s["unit"] for s in failed_services}
+        for service in looping_services:
+            if service["unit"] not in seen_units:
+                failed_services.append(service)
+
+        failed_services.sort(key=lambda item: item["unit"])
+        return failed_services
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+
+
+@terminal_bp.route("/terminal/services/failed")
+def get_failed_services_endpoint():
+    """Return failed systemd services for the task manager."""
+    terminal_session_id = request.headers.get("X-Terminal-Session", "")
+    terminal_token = request.headers.get("X-Terminal-Token", "")
+    if not pty_manager.validate_token(terminal_session_id, terminal_token):
+        return jsonify({"error": "Invalid or missing terminal session"}), 403
+
+    return jsonify({"failed_services": _get_failed_services()})
+
+
+@terminal_bp.route("/terminal/service/failure")
+def get_service_failure_endpoint():
+    """Return detailed failure information for a systemd service."""
+    terminal_session_id = request.headers.get("X-Terminal-Session", "")
+    terminal_token = request.headers.get("X-Terminal-Token", "")
+    if not pty_manager.validate_token(terminal_session_id, terminal_token):
+        return jsonify({"error": "Invalid or missing terminal session"}), 403
+
+    unit = request.args.get("unit", "").strip()
+    if not _is_valid_service_unit(unit):
+        return jsonify({"error": "Invalid unit name format"}), 400
+
+    details = _get_service_failure_details(unit, include_logs=True)
+    if not details:
+        return jsonify({"error": "Service details unavailable"}), 404
+    return jsonify(details)
+
+
+@terminal_bp.route("/terminal/service/logs")
+def get_service_logs_endpoint():
+    """Find and return log files for a systemd service."""
+    terminal_session_id = request.headers.get("X-Terminal-Session", "")
+    terminal_token = request.headers.get("X-Terminal-Token", "")
+    if not pty_manager.validate_token(terminal_session_id, terminal_token):
+        return jsonify({"error": "Invalid or missing terminal session"}), 403
+
+    unit = request.args.get("unit", "").strip()
+    if not _is_valid_service_unit(unit):
+        return jsonify({"error": "Invalid unit name format"}), 400
+
+    # Find log files in the service's working directory
+    log_files = _find_service_log_files(unit)
+
+    # If a specific file is requested, return its contents
+    file_path = request.args.get("file", "").strip()
+    if file_path:
+        # Validate the path is one of the found log files (security check)
+        valid_paths = {f["path"] for f in log_files}
+        if file_path not in valid_paths:
+            return jsonify({"error": "Invalid log file path"}), 400
+        content = _read_log_file_tail(file_path, max_lines=30)
+        return jsonify({"path": file_path, "content": content})
+
+    # Return list of found log files
+    work_dir = _get_service_working_directory(unit)
+    return jsonify({
+        "working_directory": work_dir,
+        "log_files": log_files,
+        "message": "No log files found" if not log_files else None,
+    })
+
+
 @terminal_bp.route("/terminal/service/control", methods=["POST"])
 def control_service():
     """Control a systemd service (restart, start, stop, reload, enable, disable)."""
@@ -1126,7 +1589,7 @@ def control_service():
         return jsonify({"error": "Invalid unit name"}), 400
 
     # Validate unit name format (basic sanitization)
-    if not unit.endswith(".service") or "/" in unit or ".." in unit:
+    if not _is_valid_service_unit(unit):
         return jsonify({"error": "Invalid unit name format"}), 400
 
     if action not in ALLOWED_SERVICE_ACTIONS:
@@ -1146,7 +1609,10 @@ def control_service():
             return jsonify({"success": True, "message": f"Service {unit}: {action} successful"})
         else:
             error = result.stderr.strip() or f"Failed to {action} {unit}"
-            return jsonify({"error": error}), 400
+            return jsonify({
+                "error": error,
+                "service": _get_service_failure_details(unit, include_logs=True),
+            }), 400
     except subprocess.TimeoutExpired:
         return jsonify({"error": f"Service {action} timed out"}), 500
     except OSError as e:

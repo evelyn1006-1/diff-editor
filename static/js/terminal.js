@@ -731,6 +731,8 @@ let taskManagerExpandedDetails = new Set();   // PIDs with expanded details pane
 let taskManagerTreeMode = false;
 let taskManagerStatsExpanded = false;
 let taskManagerProcessDetails = new Map();    // PID -> {ports, connections, loading}
+let taskManagerFailedServices = [];           // [{unit, short_status, reason_preview, ...}]
+let taskManagerDismissedFailedServices = new Map(); // unit -> stateKey, hidden until state changes
 let taskManagerStoppedServices = new Map();   // unit -> {unit, command, label}
 let taskManagerOpenMenuPid = null;            // PID with open signal dropdown
 let taskManagerOpenServiceMenuPid = null;     // PID with open service dropdown
@@ -754,6 +756,7 @@ function openTaskManager() {
     closeBtn.onclick = closeTaskManager;
     filterInput.oninput = (e) => {
         taskManagerFilter = e.target.value.toLowerCase();
+        renderFailedServices();
         renderStoppedServices();
         renderTaskManagerTable();
     };
@@ -761,7 +764,7 @@ function openTaskManager() {
         taskManagerSortColumn = e.target.value;
         renderTaskManagerTable();
     };
-    refreshBtn.onclick = fetchTaskManagerData;
+    refreshBtn.onclick = () => refreshTaskManager({ includeFailed: true });
 
     // Expand/collapse stats
     expandStatsBtn.onclick = () => {
@@ -796,8 +799,9 @@ function openTaskManager() {
     });
 
     // Fetch initial data and start auto-refresh
+    renderFailedServices();
     renderStoppedServices();
-    fetchTaskManagerData();
+    refreshTaskManager({ includeFailed: true });
     taskManagerRefreshInterval = setInterval(fetchTaskManagerData, 2000);
 }
 
@@ -820,6 +824,7 @@ function closeTaskManager() {
     taskManagerOpenServiceMenuPid = null;
     taskManagerTreeMode = false;
     taskManagerStatsExpanded = false;
+    hideServiceFailurePopup();
 
     // Reset UI state
     document.getElementById('tm-stats-detail')?.classList.add('hidden');
@@ -834,6 +839,15 @@ function handleTaskManagerKeydown(e) {
     if (e.key === 'Escape') {
         e.preventDefault();
         closeTaskManager();
+    }
+}
+
+async function refreshTaskManager(options = {}) {
+    const { includeFailed = false } = options;
+    if (includeFailed) {
+        await Promise.all([fetchTaskManagerData(), fetchFailedServices()]);
+    } else {
+        await fetchTaskManagerData();
     }
 }
 
@@ -967,6 +981,281 @@ function getStoppedServiceLabel(command) {
     return formatCommandLead(command);
 }
 
+function _failedServiceStateKey(service) {
+    return `${service.active_state || ''}/${service.result || ''}/${service.short_status || ''}`;
+}
+
+function syncDismissedFailedServices() {
+    const currentByUnit = new Map(
+        taskManagerFailedServices.filter(s => s.unit).map(s => [s.unit, s])
+    );
+    taskManagerDismissedFailedServices.forEach((stateKey, unit) => {
+        const current = currentByUnit.get(unit);
+        if (!current) {
+            taskManagerDismissedFailedServices.delete(unit);
+        } else if (_failedServiceStateKey(current) !== stateKey) {
+            taskManagerDismissedFailedServices.delete(unit);
+        }
+    });
+}
+
+function dismissFailedService(unit) {
+    const service = taskManagerFailedServices.find(s => s.unit === unit);
+    const key = service ? _failedServiceStateKey(service) : '';
+    taskManagerDismissedFailedServices.set(unit, key);
+    renderFailedServices();
+}
+
+async function fetchFailedServices() {
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    if (!socket || !socket.id || !terminalToken) {
+        taskManagerFailedServices = [];
+        renderFailedServices();
+        return [];
+    }
+
+    try {
+        const resp = await fetch(`${basePath}/terminal/services/failed`, {
+            headers: {
+                'X-Terminal-Session': socket.id,
+                'X-Terminal-Token': terminalToken,
+            },
+        });
+        if (!resp.ok) {
+            console.error('Failed to fetch failed services:', resp.status);
+            return [];
+        }
+
+        const data = await resp.json();
+        taskManagerFailedServices = Array.isArray(data.failed_services) ? data.failed_services : [];
+        syncDismissedFailedServices();
+        renderFailedServices();
+        return taskManagerFailedServices;
+    } catch (e) {
+        console.error('Failed to fetch failed services:', e);
+        return [];
+    }
+}
+
+async function fetchServiceFailureDetails(unit) {
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    if (!socket || !socket.id || !terminalToken) {
+        throw new Error('No active terminal session');
+    }
+
+    const resp = await fetch(`${basePath}/terminal/service/failure?unit=${encodeURIComponent(unit)}`, {
+        headers: {
+            'X-Terminal-Session': socket.id,
+            'X-Terminal-Token': terminalToken,
+        },
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+        throw new Error(data.error || 'Failed to fetch failure details');
+    }
+    return data;
+}
+
+function showServiceFailurePopup(title, details = {}, fallbackError = '') {
+    const overlay = document.getElementById('service-failure-overlay');
+    if (!overlay) return;
+
+    const unit = details.unit || 'Unknown service';
+    const state = details.active_state || 'unknown';
+    const result = details.result || '';
+    const exitStatus = details.exit_status || '';
+    const mainPid = details.main_pid || '';
+    const started = details.started || '';
+    const finished = details.finished || '';
+    const restartCount = details.restart_count || '0';
+    const logExcerpt = details.log_excerpt || '';
+
+    document.getElementById('service-failure-title').textContent = title || 'Service Needs Attention';
+    document.getElementById('service-failure-unit').textContent = unit;
+    document.getElementById('service-failure-state').textContent = state;
+    document.getElementById('service-failure-result').textContent = result || 'none';
+
+    // Conditionally show exit status row
+    const exitRow = document.getElementById('service-failure-exit-row');
+    const exitEl = document.getElementById('service-failure-exit');
+    if (exitStatus && exitStatus !== '0') {
+        exitEl.textContent = exitStatus;
+        exitRow.classList.remove('hidden');
+    } else {
+        exitRow.classList.add('hidden');
+    }
+
+    // Conditionally show PID row
+    const pidRow = document.getElementById('service-failure-pid-row');
+    const pidEl = document.getElementById('service-failure-pid');
+    if (mainPid && mainPid !== '0') {
+        pidEl.textContent = mainPid;
+        pidRow.classList.remove('hidden');
+    } else {
+        pidRow.classList.add('hidden');
+    }
+
+    // Conditionally show started row
+    const startedRow = document.getElementById('service-failure-started-row');
+    const startedEl = document.getElementById('service-failure-started');
+    if (started) {
+        startedEl.textContent = started;
+        startedRow.classList.remove('hidden');
+    } else {
+        startedRow.classList.add('hidden');
+    }
+
+    // Conditionally show finished row
+    const finishedRow = document.getElementById('service-failure-finished-row');
+    const finishedEl = document.getElementById('service-failure-finished');
+    if (finished) {
+        finishedEl.textContent = finished;
+        finishedRow.classList.remove('hidden');
+    } else {
+        finishedRow.classList.add('hidden');
+    }
+
+    // Conditionally show restart count row
+    const restartsRow = document.getElementById('service-failure-restarts-row');
+    const restartsEl = document.getElementById('service-failure-restarts');
+    if (restartCount && restartCount !== '0') {
+        restartsEl.textContent = restartCount;
+        restartsRow.classList.remove('hidden');
+    } else {
+        restartsRow.classList.add('hidden');
+    }
+
+    const logEl = document.getElementById('service-failure-log');
+    if (logExcerpt) {
+        logEl.textContent = logExcerpt;
+        logEl.classList.remove('hidden');
+    } else {
+        logEl.textContent = '';
+        logEl.classList.add('hidden');
+    }
+
+    // Reset extra logs container
+    const extraLogsEl = document.getElementById('service-failure-extra-logs');
+    if (extraLogsEl) {
+        extraLogsEl.innerHTML = '';
+        extraLogsEl.classList.add('hidden');
+    }
+
+    // Store current unit for "Find more logs" button
+    overlay.dataset.currentUnit = unit;
+
+    overlay.classList.remove('hidden');
+}
+
+async function findMoreServiceLogs() {
+    const overlay = document.getElementById('service-failure-overlay');
+    const unit = overlay?.dataset.currentUnit;
+    if (!unit) return;
+
+    const extraLogsEl = document.getElementById('service-failure-extra-logs');
+    const findLogsBtn = document.getElementById('service-failure-find-logs');
+    if (!extraLogsEl) return;
+
+    // Show loading state
+    findLogsBtn.disabled = true;
+    findLogsBtn.textContent = 'Searching...';
+    extraLogsEl.innerHTML = '<p class="service-log-searching">Scanning for log files...</p>';
+    extraLogsEl.classList.remove('hidden');
+
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    try {
+        const resp = await fetch(`${basePath}/terminal/service/logs?unit=${encodeURIComponent(unit)}`, {
+            headers: {
+                'X-Terminal-Session': socket?.id || '',
+                'X-Terminal-Token': terminalToken || '',
+            },
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            extraLogsEl.innerHTML = `<p class="service-log-error">Error: ${escapeHtml(data.error || 'Failed to search')}</p>`;
+            return;
+        }
+
+        if (!data.log_files || data.log_files.length === 0) {
+            extraLogsEl.innerHTML = `<p class="service-log-none">No log files found in ${escapeHtml(data.working_directory || 'working directory')}</p>`;
+            return;
+        }
+
+        // Show list of found log files
+        let html = `<p class="service-log-found">Found ${data.log_files.length} log file(s) in ${escapeHtml(data.working_directory)}:</p>`;
+        html += '<div class="service-log-list">';
+        for (const file of data.log_files) {
+            const relPath = file.path.replace(data.working_directory + '/', '');
+            html += `<button class="service-log-file-btn" data-path="${escapeHtml(file.path)}" data-unit="${escapeHtml(unit)}">${escapeHtml(relPath)}</button>`;
+        }
+        html += '</div>';
+        html += '<pre id="service-failure-extra-log-content" class="service-failure-log hidden"></pre>';
+        extraLogsEl.innerHTML = html;
+
+        // Add click handlers
+        extraLogsEl.querySelectorAll('.service-log-file-btn').forEach(btn => {
+            btn.onclick = () => loadLogFileContent(btn.dataset.unit, btn.dataset.path);
+        });
+
+    } catch (e) {
+        extraLogsEl.innerHTML = `<p class="service-log-error">Error: ${escapeHtml(e.message)}</p>`;
+    } finally {
+        findLogsBtn.disabled = false;
+        findLogsBtn.textContent = 'Find more logs';
+    }
+}
+
+async function loadLogFileContent(unit, filePath) {
+    const extraLogContent = document.getElementById('service-failure-extra-log-content');
+    if (!extraLogContent) return;
+
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+
+    try {
+        extraLogContent.textContent = 'Loading...';
+        extraLogContent.classList.remove('hidden');
+
+        const resp = await fetch(`${basePath}/terminal/service/logs?unit=${encodeURIComponent(unit)}&file=${encodeURIComponent(filePath)}`, {
+            headers: {
+                'X-Terminal-Session': socket?.id || '',
+                'X-Terminal-Token': terminalToken || '',
+            },
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            extraLogContent.textContent = `Error: ${data.error || 'Failed to read file'}`;
+            return;
+        }
+
+        extraLogContent.textContent = data.content || '(empty)';
+    } catch (e) {
+        extraLogContent.textContent = `Error: ${e.message}`;
+    }
+}
+
+function hideServiceFailurePopup() {
+    const overlay = document.getElementById('service-failure-overlay');
+    if (overlay) {
+        overlay.classList.add('hidden');
+        delete overlay.dataset.currentUnit;
+    }
+}
+
+async function inspectFailedService(unit) {
+    const fallback = taskManagerFailedServices.find(service => service.unit === unit) || { unit };
+    try {
+        const details = await fetchServiceFailureDetails(unit);
+        showServiceFailurePopup('Service Needs Attention', details);
+    } catch (e) {
+        showServiceFailurePopup('Service Needs Attention', fallback, e.message);
+    }
+}
+
 function syncStoppedServicesWithProcesses() {
     const activeUnits = new Set(
         taskManagerProcesses
@@ -1031,7 +1320,7 @@ function renderStoppedServices() {
                     </div>
                     <div class="tm-stopped-actions">
                         <button class="tm-stopped-btn tm-stopped-start" data-unit="${escapeHtml(service.unit)}" title="Start service">Start</button>
-                        <button class="tm-stopped-btn tm-stopped-remove" data-unit="${escapeHtml(service.unit)}" title="Remove entry">Remove</button>
+                        <button class="tm-stopped-btn tm-stopped-remove" data-unit="${escapeHtml(service.unit)}" title="Dismiss entry">Dismiss</button>
                     </div>
                 </div>
             `).join('')}
@@ -1041,7 +1330,9 @@ function renderStoppedServices() {
     container.querySelectorAll('.tm-stopped-start').forEach(btn => {
         btn.onclick = (e) => {
             e.stopPropagation();
-            controlService(btn.dataset.unit, 'start');
+            controlService(btn.dataset.unit, 'start', {
+                includeFailedRefresh: true,
+            });
         };
     });
 
@@ -1049,6 +1340,79 @@ function renderStoppedServices() {
         btn.onclick = (e) => {
             e.stopPropagation();
             removeStoppedService(btn.dataset.unit);
+        };
+    });
+}
+
+function renderFailedServices() {
+    const container = document.getElementById('tm-failed-services');
+    if (!container) return;
+
+    const services = taskManagerFailedServices
+        .filter(service => service.unit && !taskManagerDismissedFailedServices.has(service.unit))
+        .filter(service => {
+            if (!taskManagerFilter) return true;
+            const haystack = `${service.unit} ${service.short_status || ''} ${service.reason_preview || ''} ${service.description || ''}`.toLowerCase();
+            return haystack.includes(taskManagerFilter);
+        })
+        .sort((a, b) => a.unit.localeCompare(b.unit));
+
+    if (services.length === 0) {
+        container.innerHTML = '';
+        container.classList.add('hidden');
+        return;
+    }
+
+    container.classList.remove('hidden');
+    container.innerHTML = `
+        <div class="tm-failed-header">
+            <div>
+                <div class="tm-failed-title">Failed Services</div>
+                <div class="tm-failed-caption">Systemd reported these units as failed when the task manager opened or last refreshed.</div>
+            </div>
+            <div class="tm-failed-badge">Needs attention</div>
+        </div>
+        <div class="tm-failed-list">
+            ${services.map(service => `
+                <div class="tm-failed-item">
+                    <div class="tm-failed-copy" data-unit="${escapeHtml(service.unit)}" title="Show failure details and recent logs">
+                        <div class="tm-failed-topline">
+                            <span class="tm-failed-unit">${escapeHtml(service.unit)}</span>
+                            <span class="tm-failed-status">${escapeHtml(service.short_status || 'failed')}</span>
+                        </div>
+                        <div class="tm-failed-reason">${escapeHtml(service.reason_preview || service.description || 'Open to inspect recent failure output')}</div>
+                    </div>
+                    <div class="tm-failed-actions">
+                        <button class="tm-failed-btn tm-failed-restart" data-unit="${escapeHtml(service.unit)}" title="Restart service">Restart</button>
+                        <button class="tm-failed-btn tm-failed-remove" data-unit="${escapeHtml(service.unit)}" title="Dismiss this entry until the failure state changes">Dismiss</button>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+
+    container.querySelectorAll('.tm-failed-copy').forEach(copy => {
+        copy.onclick = async (e) => {
+            e.stopPropagation();
+            await inspectFailedService(copy.dataset.unit);
+        };
+    });
+
+    container.querySelectorAll('.tm-failed-restart').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            taskManagerDismissedFailedServices.delete(btn.dataset.unit);
+            controlService(btn.dataset.unit, 'restart', {
+                showFailurePopupOnError: true,
+                includeFailedRefresh: true,
+            });
+        };
+    });
+
+    container.querySelectorAll('.tm-failed-remove').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            dismissFailedService(btn.dataset.unit);
         };
     });
 }
@@ -1253,7 +1617,11 @@ function renderTaskManagerTable() {
         // Main button sends restart
         mainBtn.onclick = (e) => {
             e.stopPropagation();
-            controlService(unit, 'restart', { command: process?.command });
+            controlService(unit, 'restart', {
+                command: process?.command,
+                includeFailedRefresh: true,
+                showFailurePopupOnError: true,
+            });
         };
 
         // Arrow button toggles menu
@@ -1274,7 +1642,11 @@ function renderTaskManagerTable() {
                 const action = opt.dataset.action;
                 menu.classList.add('hidden');
                 taskManagerOpenServiceMenuPid = null;
-                controlService(unit, action, { command: process?.command });
+                controlService(unit, action, {
+                    command: process?.command,
+                    includeFailedRefresh: !['enable', 'disable'].includes(action),
+                    showFailurePopupOnError: action === 'restart',
+                });
             };
         });
     });
@@ -1611,22 +1983,38 @@ async function controlService(unit, action, options = {}) {
         });
 
         const data = await resp.json();
+        const shouldRefreshFailed = options.includeFailedRefresh || !['enable', 'disable'].includes(action);
 
         if (resp.ok && data.success) {
+            if (!['enable', 'disable'].includes(action)) {
+                taskManagerDismissedFailedServices.delete(unit);
+            }
             if (action === 'stop') {
                 rememberStoppedService(unit, options.command);
-            } else if (action === 'start' || action === 'restart') {
-                removeStoppedService(unit);
             }
             appendOutput(`${data.message}\n`, 'info');
-            // Refresh the process list after a short delay
-            setTimeout(fetchTaskManagerData, 1000);
+            // Refresh process data quickly, but only refresh failed-unit discovery on explicit actions.
+            setTimeout(() => {
+                fetchTaskManagerData();
+                if (shouldRefreshFailed) {
+                    fetchFailedServices();
+                }
+            }, 1000);
         } else {
             appendOutput(`Error: ${data.error || 'Failed to control service'}\n`, 'error');
+            if (options.showFailurePopupOnError && action === 'restart') {
+                showServiceFailurePopup('Restart Failed', data.service || { unit, reason_preview: data.error }, data.error || 'Failed to restart service');
+            }
+            if (shouldRefreshFailed) {
+                fetchFailedServices();
+            }
         }
     } catch (e) {
         console.error('Failed to control service:', e);
         appendOutput(`Error: ${e.message}\n`, 'error');
+        if (options.showFailurePopupOnError && action === 'restart') {
+            showServiceFailurePopup('Restart Failed', { unit, reason_preview: e.message }, e.message);
+        }
     }
 }
 
@@ -1719,6 +2107,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // Set up sudo confirmation popup handlers
     const sudoCancelBtn = document.getElementById('sudo-confirm-cancel');
     const sudoYesBtn = document.getElementById('sudo-confirm-yes');
+    const serviceFailureOverlay = document.getElementById('service-failure-overlay');
+    const serviceFailureCloseBtn = document.getElementById('service-failure-close');
     if (sudoCancelBtn) {
         sudoCancelBtn.onclick = hideSudoConfirm;
     }
@@ -1728,6 +2118,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 sudoConfirmCallback();
             }
             hideSudoConfirm();
+        };
+    }
+    if (serviceFailureCloseBtn) {
+        serviceFailureCloseBtn.onclick = hideServiceFailurePopup;
+    }
+    const serviceFailureFindLogsBtn = document.getElementById('service-failure-find-logs');
+    if (serviceFailureFindLogsBtn) {
+        serviceFailureFindLogsBtn.onclick = findMoreServiceLogs;
+    }
+    if (serviceFailureOverlay) {
+        serviceFailureOverlay.onclick = (e) => {
+            if (e.target === serviceFailureOverlay) {
+                hideServiceFailurePopup();
+            }
         };
     }
 
