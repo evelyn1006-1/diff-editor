@@ -7,6 +7,7 @@ User=evelyn
 Group=www-data
 WorkingDirectory=/home/evelyn/diff-editor-terminal
 ExecStart=/usr/local/bin/gunicorn --config /home/evelyn/diff-editor-terminal/gunicorn_terminal.conf.py wsgi_terminal:app
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=3
 
