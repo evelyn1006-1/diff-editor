@@ -946,6 +946,14 @@ function tokenizeCommand(command) {
 
 function reduceCommandToken(token) {
     const unquoted = token.replace(/^['"]|['"]$/g, '');
+    // Preserve option keys: --config=/etc/app.yml → --config=app.yml
+    const eqIdx = unquoted.indexOf('=');
+    if (eqIdx !== -1) {
+        const key = unquoted.slice(0, eqIdx + 1);
+        const val = unquoted.slice(eqIdx + 1);
+        const basename = val.includes('/') ? val.split('/').pop() : val;
+        return key + (basename || val);
+    }
     const basename = unquoted.includes('/') ? unquoted.split('/').pop() : unquoted;
     return basename || unquoted;
 }
@@ -967,14 +975,7 @@ function formatCollapsedCommand(command) {
     const tokens = tokenizeCommand(command);
     if (tokens.length === 0) return command;
 
-    const parts = [reduceCommandToken(tokens[0])];
-    if (tokens[1]) {
-        parts.push(reduceCommandToken(tokens[1]));
-    }
-    if (tokens.length > 2) {
-        parts.push(tokens.slice(2).join(' '));
-    }
-    return parts.join(' ');
+    return tokens.map(reduceCommandToken).join(' ');
 }
 
 function getStoppedServiceLabel(command) {
@@ -1429,6 +1430,20 @@ function compareProcessesBySort(a, b) {
             valA = a.user.toLowerCase();
             valB = b.user.toLowerCase();
             break;
+        case 'state':
+            // Concern-based ordering (descending = most concerning first)
+            // D(isk wait) > Z(ombie) > X(dead) > T(stopped) > Other > R(unning) > S(leeping) > I(dle)
+            // Higher rank = sorted first in descending mode
+            const stateDescRank = { D: 7, Z: 6, X: 5, T: 4, R: 2, S: 1, I: 0 };
+            // Active-based ordering (ascending = most active first)
+            // R(unning) > D(isk wait) > S(leeping) > I(dle) > T(stopped) > Z(ombie) > X(dead) > Other
+            // Lower rank = sorted first in ascending mode
+            const stateAscRank = { R: 0, D: 1, S: 2, I: 3, T: 4, Z: 5, X: 6 };
+            const ranks = taskManagerSortAsc ? stateAscRank : stateDescRank;
+            const fallback = taskManagerSortAsc ? 7 : 3;
+            valA = ranks[a.state] ?? fallback;
+            valB = ranks[b.state] ?? fallback;
+            break;
         case 'cpu':
             valA = a.cpu;
             valB = b.cpu;
@@ -1448,7 +1463,15 @@ function compareProcessesBySort(a, b) {
 
     if (valA < valB) return taskManagerSortAsc ? -1 : 1;
     if (valA > valB) return taskManagerSortAsc ? 1 : -1;
-    return 0;
+
+    // Tiebreaker: when sorting by CPU (or default), use the stickier sort_cpu
+    // EMA to keep recently-active processes above truly-idle ones within the
+    // same displayed CPU value.
+    if (taskManagerSortColumn === 'cpu' || !taskManagerSortColumn) {
+        const sa = a.sort_cpu || 0, sb = b.sort_cpu || 0;
+        if (sa !== sb) return taskManagerSortAsc ? sa - sb : sb - sa;
+    }
+    return a.pid - b.pid;
 }
 
 function renderTaskManagerTable() {
@@ -1468,6 +1491,7 @@ function renderTaskManagerTable() {
                 p.command.toLowerCase().includes(taskManagerFilter) ||
                 p.user.toLowerCase().includes(taskManagerFilter) ||
                 String(p.pid).includes(taskManagerFilter) ||
+                (p.state && p.state.toLowerCase().includes(taskManagerFilter)) ||
                 (p.systemd_unit && p.systemd_unit.toLowerCase().includes(taskManagerFilter))
             );
         }
@@ -1487,7 +1511,7 @@ function renderTaskManagerTable() {
 
     // Render rows
     if (displayList.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="tm-empty">No processes found</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" class="tm-empty">No processes found</td></tr>';
         return;
     }
 
@@ -1505,9 +1529,11 @@ function renderTaskManagerTable() {
         const systemdUnit = p.systemd_unit || null;
 
         // Service control button (shown only for systemd-managed processes)
+        const svcDefault = p.has_reload ? 'reload' : 'restart';
+        const svcLabel = p.has_reload ? 'Reload' : 'Restart';
         const serviceBtn = systemdUnit ? `
-                <div class="tm-split-btn tm-service-btn" data-pid="${p.pid}" data-unit="${escapeHtml(systemdUnit)}">
-                    <button class="tm-split-main tm-svc-main" title="Restart service">Restart</button>
+                <div class="tm-split-btn tm-service-btn" data-pid="${p.pid}" data-unit="${escapeHtml(systemdUnit)}" data-default-action="${svcDefault}">
+                    <button class="tm-split-main tm-svc-main" title="${svcLabel} service">${svcLabel}</button>
                     <button class="tm-split-arrow" title="Service actions">&#9662;</button>
                     <div class="tm-split-menu hidden">
                         <div class="tm-menu-header">Service</div>
@@ -1525,9 +1551,10 @@ function renderTaskManagerTable() {
         <tr data-pid="${p.pid}" class="${childClass}${matchClass}${rootClass}">
             <td>${p.pid}</td>
             <td>${escapeHtml(p.user)}</td>
+            <td class="tm-state tm-state-${p.state || 'S'}" title="${{'R':'Running','S':'Sleeping','D':'Disk Wait','Z':'Zombie','T':'Stopped','I':'Idle'}[p.state] || p.state || ''}">${p.state || ''}</td>
             <td>${p.cpu.toFixed(1)}</td>
             <td>${p.mem.toFixed(1)}</td>
-            <td class="tm-command${cmdExpanded ? ' cmd-expanded' : ''}${detailsExpanded ? ' details-expanded' : ''}">
+            <td class="tm-command${cmdExpanded ? ' cmd-expanded' : ''}${detailsExpanded ? ' details-expanded' : ''}${systemdUnit ? ' tm-has-service' : ''}">
                 <div class="tm-command-wrapper">
                     <button class="tm-expand-details-btn" title="Show process details (ports, I/O, memory)">&#9654;</button>
                     <div class="tm-command-content">
@@ -1615,10 +1642,11 @@ function renderTaskManagerTable() {
             menu.classList.remove('hidden');
         }
 
-        // Main button sends restart
+        // Main button sends the default action (reload if supported, else restart)
+        const defaultAction = container.dataset.defaultAction || 'restart';
         mainBtn.onclick = (e) => {
             e.stopPropagation();
-            controlService(unit, 'restart', {
+            controlService(unit, defaultAction, {
                 command: process?.command,
                 includeFailedRefresh: true,
                 showFailurePopupOnError: true,
@@ -1713,6 +1741,7 @@ function buildProcessTree(processes, filter = '') {
             if (p.command.toLowerCase().includes(lowerFilter) ||
                 p.user.toLowerCase().includes(lowerFilter) ||
                 String(pid).includes(lowerFilter) ||
+                (p.state && p.state.toLowerCase().includes(lowerFilter)) ||
                 (p.systemd_unit && p.systemd_unit.toLowerCase().includes(lowerFilter))) {
                 matchingPids.add(pid);
                 p.isMatch = true;
@@ -1828,6 +1857,8 @@ async function fetchProcessDetails(pid, isRefresh = false) {
             threads: data.threads || null,
             memory: data.memory || null,
             systemd: data.systemd || null,
+            start_time: data.start_time || null,
+            cpu_time: data.cpu_time || null,
         });
         renderTaskManagerTable();
 
@@ -1855,6 +1886,26 @@ function formatProcessDetails(details) {
     }
 
     const parts = [];
+
+    // Start time and CPU time
+    if (details.start_time || details.cpu_time) {
+        const items = [];
+        if (details.start_time) {
+            const d = new Date(details.start_time * 1000);
+            const now = new Date();
+            const diffMs = now - d;
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHrs = Math.floor(diffMs / 3600000);
+            const diffDays = Math.floor(diffMs / 86400000);
+            const age = diffDays > 0 ? `${diffDays}d ago` : diffHrs > 0 ? `${diffHrs}h ago` : `${diffMins}m ago`;
+            const timeStr = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            items.push(`<span class="tm-detail-label">Started:</span> ${timeStr} (${age})`);
+        }
+        if (details.cpu_time) {
+            items.push(`<span class="tm-detail-label">CPU Time:</span> ${details.cpu_time}`);
+        }
+        parts.push(`<div class="tm-detail-row">${items.join(' &nbsp;|&nbsp; ')}</div>`);
+    }
 
     // Working directory
     if (details.cwd) {

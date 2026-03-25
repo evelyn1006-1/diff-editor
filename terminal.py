@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import time
 import getpass
+import pwd
 from pathlib import Path
 from urllib.parse import quote
 
@@ -818,6 +819,25 @@ def _complete_npm_global_packages(prefix: str, cwd: str | None = None) -> set[st
 # Store previous CPU times for calculating usage percentage (overall + per-core)
 _prev_cpu_times: dict[str, dict[str, int]] = {}
 
+# Per-process CPU time tracking for delta-based %cpu calculation
+_prev_proc_cpu: dict[int, tuple[int, int, float]] = {}  # pid -> (starttime, total_ticks, timestamp)
+_CLK_TCK = os.sysconf("SC_CLK_TCK") or 100
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+_uid_to_name: dict[int, str] = {}
+_total_mem_kb: int | None = None
+_boot_time: int | None = None
+
+# EMA smoothing for CPU display and sort stability
+# Display (α=0.88): responsive, nearly raw — what the user sees
+# Sort    (α=0.6):  more inertia — used as tiebreaker when display values match
+_DISPLAY_CPU_ALPHA = 0.88
+_SORT_CPU_ALPHA = 0.6
+_ema_display_cpu: dict[int, float] = {}  # pid -> smoothed display cpu (full precision)
+_ema_sort_cpu: dict[int, float] = {}     # pid -> smoothed sort cpu (full precision)
+
+# Cache for whether a systemd unit has ExecReload defined (one batched lookup, then cached)
+_unit_has_reload: dict[str, bool] = {}
+
 
 def _get_cpu_stats() -> dict:
     """Get CPU stats including overall %, breakdown, and per-core usage."""
@@ -911,34 +931,71 @@ def _get_uptime() -> dict:
         return {"seconds": 0, "formatted": "unknown"}
 
 
-def _get_process_counts() -> dict:
-    """Get process state counts."""
-    counts = {"total": 0, "running": 0, "sleeping": 0, "stopped": 0, "zombie": 0}
+def _get_total_mem_kb() -> int:
+    """Read total physical memory from /proc/meminfo (cached after first call)."""
+    global _total_mem_kb
+    if _total_mem_kb is None:
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        _total_mem_kb = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+        if _total_mem_kb is None:
+            _total_mem_kb = 1
+    return _total_mem_kb
+
+
+def _get_boot_time() -> int:
+    """Read system boot time from /proc/stat (cached after first call)."""
+    global _boot_time
+    if _boot_time is None:
+        try:
+            with open("/proc/stat") as f:
+                for line in f:
+                    if line.startswith("btime "):
+                        _boot_time = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pass
+        if _boot_time is None:
+            _boot_time = 0
+    return _boot_time
+
+
+def _get_username(uid: int) -> str:
+    """Resolve UID to username with caching."""
+    name = _uid_to_name.get(uid)
+    if name is None:
+        try:
+            name = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            name = str(uid)
+        _uid_to_name[uid] = name
+    return name
+
+
+def _read_proc_stat(pid: int) -> tuple[str, int, int, int, int, int] | None:
+    """Parse /proc/{pid}/stat -> (state, ppid, utime, stime, starttime, rss_pages)."""
     try:
-        result = subprocess.run(
-            ["ps", "axo", "stat"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if result.returncode == 0:
-            for line in result.stdout.strip().split("\n")[1:]:  # Skip header
-                stat = line.strip()
-                if not stat:
-                    continue
-                counts["total"] += 1
-                first_char = stat[0]
-                if first_char == "R":
-                    counts["running"] += 1
-                elif first_char in ("S", "D", "I"):
-                    counts["sleeping"] += 1
-                elif first_char == "T":
-                    counts["stopped"] += 1
-                elif first_char == "Z":
-                    counts["zombie"] += 1
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return counts
+        with open(f"/proc/{pid}/stat") as f:
+            data = f.read()
+    except OSError:
+        return None
+    # comm field can contain spaces/parens — find the last ')' to skip it safely
+    i = data.rfind(")")
+    if i == -1:
+        return None
+    fields = data[i + 2:].split()
+    if len(fields) < 22:
+        return None
+    try:
+        return (fields[0], int(fields[1]), int(fields[11]), int(fields[12]),
+                int(fields[19]), int(fields[21]))
+    except (ValueError, IndexError):
+        return None
 
 
 def _get_memory_info() -> dict:
@@ -980,68 +1037,157 @@ def _get_memory_info() -> dict:
         }
 
 
-def _get_processes() -> list[dict]:
-    """Get process list with PPID for tree view."""
-    processes = []
+def _get_processes() -> tuple[list[dict], dict]:
+    """Get process list and state counts directly from /proc.
+
+    Returns (processes, process_counts).  Replaces both the old ps-based
+    _get_processes and _get_process_counts with a single /proc walk, which
+    avoids the whitespace-parsing bugs that ps output is prone to and
+    eliminates two subprocess spawns per refresh cycle.
+    """
+    global _prev_proc_cpu, _ema_display_cpu, _ema_sort_cpu
+
+    processes: list[dict] = []
+    counts = {"total": 0, "running": 0, "sleeping": 0, "stopped": 0, "zombie": 0}
+    now = time.time()
+    total_mem_kb = _get_total_mem_kb()
+    current_cpu: dict[int, tuple[int, float]] = {}
+    new_ema_display: dict[int, float] = {}
+    new_ema_sort: dict[int, float] = {}
+
     try:
-        # Use custom format to get PPID
-        result = subprocess.run(
-            ["ps", "axo", "user,pid,ppid,%cpu,%mem,vsz,rss,tty,stat,start,time,command", "--sort=-%cpu"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            lines = result.stdout.strip().split("\n")
-            # First pass: collect processes and their units
-            pid_to_unit: dict[int, str | None] = {}
-            for line in lines[1:500]:  # Increased limit for tree view
-                parts = line.split(None, 11)
-                if len(parts) >= 12:
-                    cmd = parts[11]
-                    if cmd.startswith("ps axo") or cmd.startswith("ps ax"):
-                        continue
-                    pid = int(parts[1])
-                    ppid = int(parts[2])
-                    unit = _get_systemd_unit(pid)
-                    pid_to_unit[pid] = unit
-                    processes.append({
-                        "user": parts[0],
-                        "pid": pid,
-                        "ppid": ppid,
-                        "cpu": float(parts[3]),
-                        "mem": float(parts[4]),
-                        "vsz": int(parts[5]),
-                        "rss": int(parts[6]),
-                        "tty": parts[7],
-                        "stat": parts[8],
-                        "start": parts[9],
-                        "time": parts[10],
-                        "command": cmd,
-                    })
-            # Second pass: only show unit for root process of each service
-            for p in processes:
-                unit = pid_to_unit.get(p["pid"])
-                parent_unit = pid_to_unit.get(p["ppid"])
-                # Show unit only if parent has a different unit (or no unit)
-                p["systemd_unit"] = unit if unit and unit != parent_unit else None
-    except (subprocess.TimeoutExpired, OSError, ValueError):
-        pass
-    return processes
+        pids = [int(name) for name in os.listdir("/proc") if name.isdigit()]
+    except OSError:
+        return processes, counts
+
+    for pid in pids:
+        stat_data = _read_proc_stat(pid)
+        if stat_data is None:
+            continue
+        state, ppid, utime, stime, starttime_ticks, rss_pages = stat_data
+        total_ticks = utime + stime
+
+        # Count process states
+        counts["total"] += 1
+        if state == "R":
+            counts["running"] += 1
+        elif state in ("S", "D", "I"):
+            counts["sleeping"] += 1
+        elif state == "T":
+            counts["stopped"] += 1
+        elif state == "Z":
+            counts["zombie"] += 1
+
+        # Delta-based %cpu (shows current usage, not lifetime average)
+        # Include starttime in the cache key so PID reuse doesn't contaminate data.
+        prev = _prev_proc_cpu.get(pid)
+        pid_reused = prev is not None and prev[0] != starttime_ticks
+        if prev and not pid_reused:
+            _prev_start, prev_ticks, prev_time = prev
+            elapsed = now - prev_time
+            if elapsed > 0:
+                cpu_raw = max(0.0, (total_ticks - prev_ticks) / (_CLK_TCK * elapsed) * 100)
+            else:
+                cpu_raw = 0.0
+        else:
+            cpu_raw = 0.0
+        current_cpu[pid] = (starttime_ticks, total_ticks, now)
+
+        # EMA smoothing — display keeps full float precision, sort rounds to 4dp
+        # so decaying processes reach exactly 0 instead of lingering indefinitely.
+        # On PID reuse, discard stale EMA state.
+        prev_display = None if pid_reused else _ema_display_cpu.get(pid)
+        prev_sort = None if pid_reused else _ema_sort_cpu.get(pid)
+        display_cpu = (_DISPLAY_CPU_ALPHA * cpu_raw + (1 - _DISPLAY_CPU_ALPHA) * prev_display
+                       if prev_display is not None else cpu_raw)
+        sort_cpu = (_SORT_CPU_ALPHA * cpu_raw + (1 - _SORT_CPU_ALPHA) * prev_sort
+                    if prev_sort is not None else cpu_raw)
+        sort_cpu = round(sort_cpu, 4)
+        new_ema_display[pid] = display_cpu
+        new_ema_sort[pid] = sort_cpu
+        cpu_percent = round(display_cpu, 1)
+
+        # %mem from RSS pages
+        rss_kb = rss_pages * _PAGE_SIZE // 1024
+        mem_percent = round(rss_kb / total_mem_kb * 100, 1) if total_mem_kb > 0 else 0.0
+
+        # Username from /proc/{pid} ownership
+        try:
+            uid = os.stat(f"/proc/{pid}").st_uid
+        except OSError:
+            uid = 0
+        user = _get_username(uid)
+
+        # Command from /proc/{pid}/cmdline (null-separated args)
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline_raw = f.read()
+        except OSError:
+            cmdline_raw = b""
+        if cmdline_raw:
+            command = cmdline_raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        else:
+            # Kernel thread or zombie — fall back to [comm]
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    command = f"[{f.read().strip()}]"
+            except OSError:
+                command = "[unknown]"
+
+        processes.append({
+            "user": user,
+            "pid": pid,
+            "ppid": ppid,
+            "cpu": cpu_percent,
+            "sort_cpu": sort_cpu,
+            "mem": mem_percent,
+            "state": state,
+            "command": command,
+        })
+
+    _prev_proc_cpu = current_cpu
+    _ema_display_cpu = new_ema_display
+    _ema_sort_cpu = new_ema_sort
+
+    # Primary sort by displayed CPU (rounded), tiebreak by smoothed sort_cpu
+    # (stickier EMA), then PID for final stability
+    processes.sort(key=lambda p: (-p["cpu"], -p["sort_cpu"], p["pid"]))
+    processes = processes[:500]
+
+    # Look up systemd units only for displayed processes (not the full /proc set).
+    # Show unit badge only on the root process of each service.
+    pid_to_unit: dict[int, str | None] = {}
+    for p in processes:
+        pid_to_unit[p["pid"]] = _get_systemd_unit(p["pid"])
+    for p in processes:
+        unit = pid_to_unit.get(p["pid"])
+        parent_unit = pid_to_unit.get(p["ppid"])
+        p["systemd_unit"] = unit if unit and unit != parent_unit else None
+
+    # Batch-fetch ExecReload for any uncached units (single systemctl call).
+    visible_units = [p["systemd_unit"] for p in processes if p["systemd_unit"]]
+    if visible_units:
+        _populate_reload_cache(visible_units)
+    for p in processes:
+        if p["systemd_unit"]:
+            p["has_reload"] = _unit_has_reload.get(p["systemd_unit"], False)
+
+    return processes, counts
 
 
 @terminal_bp.route("/terminal/processes")
 def get_processes():
     """Return system stats and process list for task manager."""
     cpu_stats = _get_cpu_stats()
+    processes, process_counts = _get_processes()
     return jsonify({
         "cpu_percent": cpu_stats["percent"],
         "cpu": cpu_stats,
         "memory": _get_memory_info(),
         "load": _get_load_average(),
         "uptime": _get_uptime(),
-        "process_counts": _get_process_counts(),
-        "processes": _get_processes(),
+        "process_counts": process_counts,
+        "processes": processes,
         "current_user": getpass.getuser(),
     })
 
@@ -1514,6 +1660,7 @@ def get_failed_services_endpoint():
     if not pty_manager.validate_token(terminal_session_id, terminal_token):
         return jsonify({"error": "Invalid or missing terminal session"}), 403
 
+    _unit_has_reload.clear()  # re-probe on next process fetch (task manager reopened)
     return jsonify({"failed_services": _get_failed_services()})
 
 
@@ -1646,6 +1793,39 @@ def _get_systemd_unit(pid: int) -> str | None:
     return None
 
 
+def _populate_reload_cache(units: list[str]) -> None:
+    """Batch-fetch ExecReload for uncached units in a single systemctl call."""
+    uncached = [u for u in units if u not in _unit_has_reload]
+    if not uncached:
+        return
+    try:
+        result = subprocess.run(
+            ["systemctl", "show", *uncached, "--property=Id,ExecReload"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # Default all queried units to False so we never retry on failure.
+        # Parse output regardless of returncode — systemctl show returns
+        # valid data for known units even when some in the batch are invalid
+        # (and returns RC 0 in almost all cases anyway).
+        for u in uncached:
+            _unit_has_reload.setdefault(u, False)
+        # Units without ExecReload omit the line entirely, so its presence
+        # in a block means reload is supported.
+        for block in result.stdout.split("\n\n"):
+            if "ExecReload=" not in block:
+                continue
+            for line in block.splitlines():
+                if line.startswith("Id="):
+                    _unit_has_reload[line.split("=", 1)[1].strip()] = True
+                    break
+    except (subprocess.TimeoutExpired, OSError):
+        # Cache as False so we don't retry a failing subprocess every refresh
+        for u in uncached:
+            _unit_has_reload.setdefault(u, False)
+
+
 def _get_systemd_info(pid: int) -> dict | None:
     """Get systemd unit info including enabled status (for details panel)."""
     unit = _get_systemd_unit(pid)
@@ -1682,7 +1862,29 @@ def _get_process_details(pid: int) -> dict:
         "threads": None,
         "memory": None,
         "systemd": None,
+        "start_time": None,
+        "cpu_time": None,
     }
+
+    # ─── Start time and cumulative CPU time from /proc/{pid}/stat ───
+    stat_data = _read_proc_stat(pid)
+    if stat_data:
+        _state, _ppid, utime, stime, starttime_ticks, _rss = stat_data
+        boot_time = _get_boot_time()
+        if boot_time:
+            result["start_time"] = boot_time + starttime_ticks / _CLK_TCK
+        total_cpu_secs = (utime + stime) / _CLK_TCK
+        if total_cpu_secs >= 3600:
+            h = int(total_cpu_secs // 3600)
+            m = int((total_cpu_secs % 3600) // 60)
+            s = int(total_cpu_secs % 60)
+            result["cpu_time"] = f"{h}:{m:02d}:{s:02d}"
+        elif total_cpu_secs >= 60:
+            m = int(total_cpu_secs // 60)
+            s = int(total_cpu_secs % 60)
+            result["cpu_time"] = f"{m}:{s:02d}"
+        else:
+            result["cpu_time"] = f"{total_cpu_secs:.1f}s"
 
     # ─── Network: Listening ports ───
     try:
