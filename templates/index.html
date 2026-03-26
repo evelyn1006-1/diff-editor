@@ -10,7 +10,17 @@
 <div class="browser-container">
     <div class="browser-header">
         <button id="btn-up" title="Go up">../</button>
-        <button id="btn-new-file" title="Create a new file in this directory">New File</button>
+        <div class="dropdown-wrap">
+            <button id="btn-new" title="Create new...">+ New</button>
+            <div id="new-dropdown" class="dropdown-menu">
+                <button class="dropdown-item" id="btn-new-file">New File</button>
+                <button class="dropdown-item" id="btn-new-dir">New Directory</button>
+                <label class="dropdown-item" id="btn-upload">
+                    Upload File
+                    <input type="file" id="upload-input" multiple hidden>
+                </label>
+            </div>
+        </div>
         <input type="text" id="path-input" value="{{ default_root }}" placeholder="/path/to/directory">
         <label class="toggle">
             <input type="checkbox" id="show-hidden">

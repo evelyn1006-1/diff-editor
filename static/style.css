@@ -209,6 +209,47 @@ main {
     margin-bottom: 1rem;
 }
 
+.dropdown-wrap {
+    position: relative;
+}
+
+.dropdown-menu {
+    display: none;
+    position: absolute;
+    top: calc(100% + 0.3rem);
+    left: 0;
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 0.3rem;
+    z-index: 100;
+    min-width: 150px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.dropdown-menu.open {
+    display: flex;
+    flex-direction: column;
+}
+
+.dropdown-item {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+    padding: 0.45rem 0.75rem;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s;
+}
+
+.dropdown-item:hover {
+    background: var(--bg-tertiary);
+}
+
 #path-input {
     flex: 1;
     background: var(--panel-bg);
@@ -292,6 +333,10 @@ main {
 .file-item .name {
     font-family: 'Comic Neue', sans-serif;
     flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .file-item .badge {
@@ -327,6 +372,200 @@ main {
 .file-item .badge.deleted {
     background: rgba(255, 77, 109, 0.15);
     color: var(--error);
+}
+
+.file-actions {
+    display: flex;
+    gap: 0.3rem;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.btn-action {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.8rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-bg);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+}
+
+.btn-action:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+
+.btn-delete:hover, .btn-delete-dir:hover {
+    background: rgba(255, 77, 109, 0.15);
+    color: var(--error);
+}
+
+/* Directory delete preview modal */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+}
+
+.modal-dialog {
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 16px;
+    padding: 1.5rem;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-title {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    color: var(--error);
+}
+
+.modal-summary {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+}
+
+.preview-list {
+    flex: 1;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.5rem;
+    margin-bottom: 1rem;
+    max-height: 40vh;
+    background: var(--bg-tertiary);
+}
+
+.preview-entry {
+    font-family: 'Comic Neue', monospace;
+    font-size: 0.8rem;
+    padding: 0.15rem 0.4rem;
+    color: var(--text-primary);
+    word-break: break-all;
+}
+
+.preview-entry.preview-more {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.modal-buttons {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+}
+
+.btn-modal {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.9rem;
+    padding: 0.4rem 1.2rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.btn-modal-cancel {
+    background: var(--panel-bg);
+    color: var(--text-primary);
+}
+
+.btn-modal-cancel:hover {
+    background: var(--bg-tertiary);
+}
+
+.btn-modal-delete {
+    background: rgba(255, 77, 109, 0.15);
+    color: var(--error);
+    border-color: var(--error);
+}
+
+.btn-modal-delete:hover {
+    background: rgba(255, 77, 109, 0.3);
+}
+
+.upload-file-list {
+    max-height: 8rem;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.4rem;
+    margin-bottom: 0.75rem;
+    background: var(--bg-tertiary);
+}
+
+.upload-progress-wrap {
+    height: 1.2rem;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 0.4rem;
+}
+
+.upload-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(135deg, var(--accent), #e84899);
+    border-radius: 10px;
+    transition: width 0.2s ease;
+}
+
+.upload-status {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+    text-align: center;
+    color: var(--text-secondary);
+    margin-bottom: 0.75rem;
+}
+
+.confirm-path-input {
+    width: 100%;
+    box-sizing: border-box;
+    margin-top: 0.4rem;
+    padding: 0.45rem 0.65rem;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.8rem;
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 8px;
+    color: var(--text-primary);
+}
+
+.confirm-path-input:focus {
+    outline: none;
+    border-color: var(--error);
+}
+
+.confirm-path-error {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.8rem;
+    color: var(--error);
+    margin-top: 0.3rem;
 }
 
 .loading {

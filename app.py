@@ -5,6 +5,7 @@ Diff Editor - A web-based side-by-side file diff and editing tool.
 import difflib
 import fcntl
 import hashlib
+import io
 import json
 import logging
 import math
@@ -19,7 +20,7 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, session, url_for, Response
+from flask import Flask, render_template, request, jsonify, session, url_for, Response, send_file
 from werkzeug.middleware.proxy_fix import ProxyFix
 from openai import OpenAI
 
@@ -39,7 +40,7 @@ _access_handler.setFormatter(logging.Formatter(
 ))
 access_logger.addHandler(_access_handler)
 
-from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user
+from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, delete_path, delete_directory, rename_path, zip_directory
 from utils.git_ops import find_git_root, get_head_content_bytes, is_tracked_by_git, get_directory_git_status, get_tracked_files
 
 
@@ -58,7 +59,9 @@ def resolve_request_path(raw_path: str, field_name: str = "path") -> tuple[Path 
         return None, f"Invalid {field_name}"
 
     try:
-        return Path(raw_path).resolve(), None
+        # Use abspath instead of resolve() to avoid following symlinks.
+        # This still normalizes ".." for path traversal prevention.
+        return Path(os.path.abspath(raw_path)), None
     except (OSError, RuntimeError, ValueError):
         return None, f"Invalid {field_name}"
 
@@ -1159,6 +1162,303 @@ def create_app() -> Flask:
             "message": "File created",
             "path": str(target),
         })
+
+    @app.post("/api/dir/create")
+    def create_directory_route():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        directory = data.get("directory", "")
+        name = str(data.get("name", "")).strip()
+
+        if not directory:
+            return jsonify({"error": "No directory specified"}), 400
+        if not name:
+            return jsonify({"error": "No directory name provided"}), 400
+        if "\x00" in name:
+            return jsonify({"error": "Invalid name"}), 400
+        if "/" in name or "\\" in name:
+            return jsonify({"error": "Name cannot include path separators"}), 400
+        if name in {".", ".."}:
+            return jsonify({"error": "Invalid name"}), 400
+
+        dir_path, error = resolve_request_path(directory, "directory")
+        if error:
+            return jsonify({"error": error}), 400
+        if not dir_path.exists():
+            return jsonify({"error": "Directory not found"}), 404
+        if not dir_path.is_dir():
+            return jsonify({"error": "Not a directory"}), 400
+
+        target = (dir_path / name).resolve()
+        if target.exists():
+            return jsonify({"error": "A file or directory with that name already exists"}), 409
+
+        success, message = create_dir(target)
+        if not success:
+            return jsonify({"error": message}), 500
+
+        return jsonify({
+            "success": True,
+            "message": message,
+            "path": str(target),
+        })
+
+    @app.post("/api/file/upload")
+    def upload_files():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        directory = request.form.get("directory", "")
+        if not directory:
+            return jsonify({"error": "No directory specified"}), 400
+
+        dir_path, error = resolve_request_path(directory, "directory")
+        if error:
+            return jsonify({"error": error}), 400
+        if not dir_path.exists():
+            return jsonify({"error": "Directory not found"}), 404
+        if not dir_path.is_dir():
+            return jsonify({"error": "Not a directory"}), 400
+
+        files = request.files.getlist("files")
+        if not files:
+            return jsonify({"error": "No files provided"}), 400
+
+        saved = []
+        skipped = []
+        for f in files:
+            if not f.filename:
+                continue
+            name = Path(f.filename).name
+            if not name or name in {".", ".."} or "\x00" in name:
+                continue
+
+            target = (dir_path / name).resolve()
+            if target.exists():
+                skipped.append(name)
+                continue
+            content = f.read()
+
+            success, message = write_file_bytes(target, content)
+            if success:
+                saved.append(name)
+            else:
+                return jsonify({"error": f"Failed to save {name}: {message}"}), 500
+
+        msg = f"{len(saved)} file(s) uploaded"
+        if skipped:
+            msg += f", {len(skipped)} skipped (already exist): {', '.join(skipped)}"
+
+        return jsonify({
+            "success": True,
+            "message": msg,
+            "files": saved,
+            "skipped": skipped,
+        })
+
+    @app.get("/api/file/download")
+    def download_file():
+        file_path = request.args.get("path", "")
+        if not file_path:
+            return jsonify({"error": "No path specified"}), 400
+
+        path, error = resolve_request_path(file_path, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not path.exists():
+            return jsonify({"error": "File not found"}), 404
+
+        if not path.is_file():
+            return jsonify({"error": "Not a file"}), 400
+
+        # Use read_file_bytes which has sudo fallback for unreadable files
+        if os.access(path, os.R_OK):
+            return send_file(path, as_attachment=True, download_name=path.name)
+
+        success, data = read_file_bytes(path)
+        if not success:
+            return jsonify({"error": data}), 500
+
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return send_file(io.BytesIO(data), as_attachment=True, download_name=path.name, mimetype=mime)
+
+    @app.post("/api/file/delete")
+    def delete_file():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        file_path = data.get("path", "")
+        if not file_path:
+            return jsonify({"error": "No path specified"}), 400
+
+        path, error = resolve_request_path(file_path, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not path.exists():
+            return jsonify({"error": "File not found"}), 404
+
+        if not path.is_file():
+            return jsonify({"error": "Not a file"}), 400
+
+        success, message = delete_path(path)
+        if not success:
+            return jsonify({"error": message}), 500
+
+        return jsonify({"success": True, "message": message})
+
+    @app.post("/api/rename")
+    def rename_item():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        old_path_str = data.get("path", "")
+        new_name = str(data.get("new_name", "")).strip()
+
+        if not old_path_str:
+            return jsonify({"error": "No path specified"}), 400
+        if not new_name:
+            return jsonify({"error": "No new name provided"}), 400
+        if "\x00" in new_name:
+            return jsonify({"error": "Invalid name"}), 400
+        if "/" in new_name or "\\" in new_name:
+            return jsonify({"error": "Name cannot include path separators"}), 400
+        if new_name in {".", ".."}:
+            return jsonify({"error": "Invalid name"}), 400
+
+        path, error = resolve_request_path(old_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not path.exists():
+            return jsonify({"error": "Path not found"}), 404
+
+        target = (path.parent / new_name).resolve()
+        if target.exists():
+            return jsonify({"error": "A file or directory with that name already exists"}), 409
+
+        success, message = rename_path(path, target)
+        if not success:
+            return jsonify({"error": message}), 500
+
+        return jsonify({"success": True, "path": str(target)})
+
+    @app.get("/api/dir/preview")
+    def preview_directory():
+        dir_path_str = request.args.get("path", "")
+        if not dir_path_str:
+            return jsonify({"error": "No path specified"}), 400
+
+        path, error = resolve_request_path(dir_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not path.exists():
+            return jsonify({"error": "Directory not found"}), 404
+        if not path.is_dir():
+            return jsonify({"error": "Not a directory"}), 400
+
+        files = []
+        dirs = []
+        try:
+            for entry in sorted(path.rglob("*")):
+                rel = str(entry.relative_to(path))
+                if entry.is_dir():
+                    dirs.append(rel + "/")
+                else:
+                    files.append(rel)
+        except PermissionError:
+            return jsonify({"error": "Permission denied"}), 403
+
+        return jsonify({
+            "path": str(path),
+            "files": files,
+            "dirs": dirs,
+            "total_files": len(files),
+            "total_dirs": len(dirs),
+        })
+
+    @app.post("/api/dir/delete")
+    def delete_directory_route():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        dir_path_str = data.get("path", "")
+        if not dir_path_str:
+            return jsonify({"error": "No path specified"}), 400
+
+        path, error = resolve_request_path(dir_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not path.exists():
+            return jsonify({"error": "Directory not found"}), 404
+        if not path.is_dir():
+            return jsonify({"error": "Not a directory"}), 400
+
+        success, message = delete_directory(path)
+        if not success:
+            return jsonify({"error": message}), 500
+
+        return jsonify({"success": True, "message": message})
+
+    @app.get("/api/dir/download")
+    def download_directory_zip():
+        dir_path_str = request.args.get("path", "")
+        if not dir_path_str:
+            return jsonify({"error": "No path specified"}), 400
+
+        path, error = resolve_request_path(dir_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not path.exists():
+            return jsonify({"error": "Directory not found"}), 404
+        if not path.is_dir():
+            return jsonify({"error": "Not a directory"}), 400
+
+        success, result = zip_directory(path)
+        if not success:
+            return jsonify({"error": result}), 500
+
+        response = send_file(
+            result,
+            as_attachment=True,
+            download_name=f"{path.name}.zip",
+            mimetype="application/zip",
+        )
+
+        @response.call_on_close
+        def _cleanup():
+            try:
+                os.unlink(result)
+            except OSError:
+                pass
+
+        return response
 
     @app.post("/api/file")
     def save_file():
