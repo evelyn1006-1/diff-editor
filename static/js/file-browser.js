@@ -3,6 +3,9 @@
  */
 
 let currentPath = '';
+let selectedPaths = new Set();
+let lastClickedIndex = -1;
+let selectMode = false;
 
 function initFileBrowser(defaultRoot) {
     currentPath = defaultRoot;
@@ -44,6 +47,8 @@ async function loadDirectory(path) {
     const pathInput = document.getElementById('path-input');
     const showHidden = document.getElementById('show-hidden').checked;
 
+    clearSelection();
+    exitSelectMode();
     fileList.innerHTML = '<div class="loading">Loading...</div>';
 
     try {
@@ -65,10 +70,87 @@ async function loadDirectory(path) {
 
         fileList.innerHTML = data.items.map(item => createFileItem(item)).join('');
 
-        // Add click handlers
-        fileList.querySelectorAll('.file-item').forEach(el => {
-            el.addEventListener('click', () => handleItemClick(el.dataset.path, el.dataset.isDir === 'true'));
+        // Click handlers with selection support
+        const allItems = [...fileList.querySelectorAll('.file-item')];
+        selectedPaths.clear();
+        lastClickedIndex = -1;
+
+        allItems.forEach((el, idx) => {
+            // Click handler
+            el.addEventListener('click', (e) => {
+                if (e.target.closest('.file-actions')) return;
+
+                if (selectMode) {
+                    e.preventDefault();
+                    if (e.shiftKey && lastClickedIndex >= 0) {
+                        // Range selection in select mode
+                        const from = Math.min(lastClickedIndex, idx);
+                        const to = Math.max(lastClickedIndex, idx);
+                        selectedPaths.clear();
+                        allItems.forEach(item => item.classList.remove('selected'));
+                        for (let i = from; i <= to; i++) {
+                            allItems[i].classList.add('selected');
+                            selectedPaths.add(allItems[i].dataset.path);
+                        }
+                    } else {
+                        toggleSelect(el);
+                        lastClickedIndex = idx;
+                    }
+                    updateSelectBar();
+                    if (selectedPaths.size === 0) exitSelectMode();
+                } else if (e.ctrlKey || e.metaKey) {
+                    e.preventDefault();
+                    if (!selectMode) enterSelectMode();
+                    toggleSelect(el);
+                    lastClickedIndex = idx;
+                    updateSelectBar();
+                } else if (selectedPaths.size > 0) {
+                    clearSelection();
+                    exitSelectMode();
+                    handleItemClick(el.dataset.path, el.dataset.isDir === 'true');
+                } else {
+                    handleItemClick(el.dataset.path, el.dataset.isDir === 'true');
+                }
+            });
+
+            // Long-press to enter select mode (mobile)
+            let longPressTimer = null;
+
+            el.addEventListener('touchstart', (e) => {
+                if (e.target.closest('.file-actions')) return;
+                longPressTimer = setTimeout(() => {
+                    longPressTimer = null;
+                    if (!selectMode) enterSelectMode();
+                    toggleSelect(el);
+                    lastClickedIndex = idx;
+                    updateSelectBar();
+                    // Prevent the subsequent click/tap
+                    el.dataset.longPressed = 'true';
+                    // Haptic feedback if available
+                    if (navigator.vibrate) navigator.vibrate(30);
+                }, 500);
+            }, { passive: true });
+
+            el.addEventListener('touchmove', () => {
+                if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+            }, { passive: true });
+
+            el.addEventListener('touchend', () => {
+                if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+            });
+
+            el.addEventListener('click', (e) => {
+                // Suppress the click that follows a long-press
+                if (el.dataset.longPressed === 'true') {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    delete el.dataset.longPressed;
+                }
+            }, true); // capture phase to fire before the main click handler
         });
+
+        // Drag and drop
+        setupDragAndDrop(allItems);
 
         // Download buttons
         fileList.querySelectorAll('.btn-download').forEach(btn => {
@@ -213,7 +295,7 @@ function createFileItem(item) {
         : '';
 
     return `
-        <div class="file-item" data-path="${escapeHtml(item.path)}" data-is-dir="${item.is_dir}">
+        <div class="file-item" data-path="${escapeHtml(item.path)}" data-is-dir="${item.is_dir}" data-name="${escapeHtml(item.name)}" draggable="true">
             ${icon}
             <span class="name">${escapeHtml(item.name)}</span>${symlinkTarget}
             ${badges}
@@ -789,6 +871,203 @@ function showFileModal({ path, name, isDir, mode }) {
     updateActivateVisibility();
     updateActionLabel();
     setTimeout(() => nameInput.focus(), 50);
+}
+
+// --- Select mode (mobile long-press) ---
+
+function enterSelectMode() {
+    selectMode = true;
+    document.querySelector('.file-list')?.classList.add('select-mode');
+    // Create selection bar if it doesn't exist
+    if (!document.getElementById('select-bar')) {
+        const bar = document.createElement('div');
+        bar.id = 'select-bar';
+        bar.innerHTML = `
+            <span class="select-bar-count">0 selected</span>
+            <button class="select-bar-cancel">Cancel</button>
+        `;
+        bar.querySelector('.select-bar-cancel').addEventListener('click', () => {
+            clearSelection();
+            exitSelectMode();
+        });
+        document.querySelector('.browser-container')?.prepend(bar);
+    }
+    updateSelectBar();
+}
+
+function exitSelectMode() {
+    selectMode = false;
+    document.querySelector('.file-list')?.classList.remove('select-mode');
+    document.getElementById('select-bar')?.remove();
+}
+
+function updateSelectBar() {
+    const countEl = document.querySelector('.select-bar-count');
+    if (countEl) {
+        const n = selectedPaths.size;
+        countEl.textContent = `${n} selected`;
+    }
+}
+
+// --- Selection helpers ---
+
+function toggleSelect(el) {
+    const path = el.dataset.path;
+    if (selectedPaths.has(path)) {
+        selectedPaths.delete(path);
+        el.classList.remove('selected');
+    } else {
+        selectedPaths.add(path);
+        el.classList.add('selected');
+    }
+}
+
+function clearSelection() {
+    selectedPaths.clear();
+    document.querySelectorAll('.file-item.selected').forEach(el => el.classList.remove('selected'));
+    lastClickedIndex = -1;
+}
+
+// --- Drag and drop ---
+
+function setupDragAndDrop(allItems) {
+    let dragGhost = null;
+
+    allItems.forEach(el => {
+        el.addEventListener('dragstart', (e) => {
+            const path = el.dataset.path;
+
+            // If dragging an unselected item, select only it
+            if (!selectedPaths.has(path)) {
+                clearSelection();
+                selectedPaths.add(path);
+                el.classList.add('selected');
+            }
+
+            // Build the list of items being dragged
+            const dragPaths = [...selectedPaths];
+            e.dataTransfer.setData('application/x-file-paths', JSON.stringify(dragPaths));
+            e.dataTransfer.effectAllowed = 'move';
+
+            // Custom drag ghost
+            dragGhost = document.createElement('div');
+            dragGhost.className = 'drag-ghost';
+            const names = dragPaths.map(p => {
+                const item = document.querySelector(`.file-item[data-path="${CSS.escape(p)}"]`);
+                return item ? item.dataset.name : p.split('/').pop();
+            });
+            if (names.length === 1) {
+                dragGhost.textContent = names[0];
+            } else {
+                dragGhost.textContent = `${names[0]} + ${names.length - 1} more`;
+            }
+            document.body.appendChild(dragGhost);
+            e.dataTransfer.setDragImage(dragGhost, 0, 0);
+
+            el.classList.add('dragging');
+            requestAnimationFrame(() => {
+                selectedPaths.forEach(p => {
+                    const item = document.querySelector(`.file-item[data-path="${CSS.escape(p)}"]`);
+                    if (item) item.classList.add('dragging');
+                });
+            });
+        });
+
+        el.addEventListener('dragend', () => {
+            document.querySelectorAll('.file-item.dragging').forEach(item => item.classList.remove('dragging'));
+            document.querySelectorAll('.file-item.drop-target').forEach(item => item.classList.remove('drop-target'));
+            document.getElementById('btn-up')?.classList.remove('drop-target');
+            if (dragGhost) { dragGhost.remove(); dragGhost = null; }
+        });
+
+        // Drop target handling (only for directories)
+        if (el.dataset.isDir === 'true') {
+            el.addEventListener('dragover', (e) => {
+                // Don't allow dropping onto a selected (dragged) item
+                if (selectedPaths.has(el.dataset.path)) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                el.classList.add('drop-target');
+            });
+
+            el.addEventListener('dragleave', () => {
+                el.classList.remove('drop-target');
+            });
+
+            el.addEventListener('drop', (e) => {
+                e.preventDefault();
+                el.classList.remove('drop-target');
+                const paths = JSON.parse(e.dataTransfer.getData('application/x-file-paths') || '[]');
+                if (paths.length > 0) {
+                    moveItems(paths, el.dataset.path);
+                }
+            });
+        }
+    });
+
+    // ../  button as drop target (move to parent)
+    const btnUp = document.getElementById('btn-up');
+    if (btnUp) {
+        btnUp.addEventListener('dragover', (e) => {
+            const parts = currentPath.split('/').filter(p => p);
+            if (parts.length < 1) return; // already at root
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            btnUp.classList.add('drop-target');
+        });
+        btnUp.addEventListener('dragleave', () => btnUp.classList.remove('drop-target'));
+        btnUp.addEventListener('drop', (e) => {
+            e.preventDefault();
+            btnUp.classList.remove('drop-target');
+            const parts = currentPath.split('/').filter(p => p);
+            if (parts.length < 1) return;
+            const parentPath = parts.length > 1 ? '/' + parts.slice(0, -1).join('/') : '/';
+            const paths = JSON.parse(e.dataTransfer.getData('application/x-file-paths') || '[]');
+            if (paths.length > 0) {
+                moveItems(paths, parentPath);
+            }
+        });
+    }
+}
+
+let _moveInFlight = false;
+async function moveItems(paths, destDir) {
+    if (_moveInFlight) return;
+    _moveInFlight = true;
+
+    let errors = [];
+    for (const srcPath of paths) {
+        const name = srcPath.split('/').pop();
+        try {
+            const response = await fetch('api/rename', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': CSRF_TOKEN,
+                },
+                body: JSON.stringify({
+                    path: srcPath,
+                    new_name: name,
+                    directory: destDir,
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                errors.push(`${name}: ${data.error}`);
+            }
+        } catch (err) {
+            errors.push(`${name}: ${err.message}`);
+        }
+    }
+
+    if (errors.length > 0) {
+        window.alert(`Some items could not be moved:\n\n${errors.join('\n')}`);
+    }
+
+    clearSelection();
+    exitSelectMode();
+    _moveInFlight = false;
+    loadDirectory(currentPath);
 }
 
 function escapeHtml(text) {

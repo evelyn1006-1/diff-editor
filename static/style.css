@@ -316,6 +316,86 @@ main {
     background: var(--bg-tertiary);
 }
 
+.file-item.selected {
+    background: rgba(214, 51, 132, 0.1);
+}
+
+.file-item.selected:hover {
+    background: rgba(214, 51, 132, 0.15);
+}
+
+.file-item.dragging {
+    opacity: 0.4;
+}
+
+.file-item.drop-target {
+    background: rgba(214, 51, 132, 0.2);
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
+}
+
+#btn-up.drop-target {
+    background: rgba(214, 51, 132, 0.2);
+    outline: 2px dashed var(--accent);
+    outline-offset: -2px;
+}
+
+.drag-ghost {
+    position: fixed;
+    top: -1000px;
+    left: -1000px;
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+    padding: 0.35rem 0.7rem;
+    background: var(--panel-bg);
+    border: 2px solid var(--accent);
+    border-radius: 10px;
+    color: var(--accent);
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 9999;
+}
+
+#select-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+    background: rgba(255, 230, 180, 0.4);
+    border: 2px solid var(--accent);
+    border-radius: 12px;
+    margin-bottom: 0.5rem;
+    animation: selectBarIn 0.15s ease-out;
+}
+
+@keyframes selectBarIn {
+    from { opacity: 0; transform: translateY(-0.5rem); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.select-bar-count {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--accent);
+}
+
+.select-bar-cancel {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.8rem;
+    padding: 0.25rem 0.65rem;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--accent);
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.select-bar-cancel:hover {
+    background: rgba(214, 51, 132, 0.15);
+}
+
 .file-item .icon {
     width: 1.2rem;
     text-align: center;
