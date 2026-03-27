@@ -2,6 +2,7 @@
 File operations with sudo support for reading/writing files outside home directory.
 """
 
+import errno
 import os
 import shutil
 import subprocess
@@ -236,6 +237,168 @@ def delete_directory(path: Path) -> tuple[bool, str]:
         return False, str(e)
 
 
+def create_symlink(source: Path, link: Path) -> tuple[bool, str]:
+    """
+    Create a symlink at `link` pointing to `source`. Uses sudo ln if not directly creatable.
+    Returns (success, message).
+    """
+    source = Path(os.path.abspath(source))
+    link = Path(os.path.abspath(link))
+
+    try:
+        link.symlink_to(source)
+        return True, "Symlink created"
+    except PermissionError:
+        pass
+    except OSError as e:
+        return False, str(e)
+
+    # Fall back to sudo ln -s
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "ln", "-s", str(source), str(link)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return True, "Symlink created (with sudo)"
+        else:
+            error = result.stderr.decode("utf-8", errors="replace")
+            return False, f"sudo ln failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Symlink operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def ensure_directory(path: Path) -> tuple[bool, str]:
+    """
+    Create a directory and any missing parents. Uses sudo mkdir -p if needed.
+    Returns (success, message).
+    """
+    path = Path(os.path.abspath(path))
+
+    if path.is_dir():
+        return True, "Directory exists"
+
+    try:
+        path.mkdir(parents=True)
+        return True, "Directory created"
+    except PermissionError:
+        pass
+    except OSError as e:
+        return False, str(e)
+
+    # Fall back to sudo mkdir -p
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "mkdir", "-p", str(path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return True, "Directory created (with sudo)"
+        else:
+            error = result.stderr.decode("utf-8", errors="replace")
+            return False, f"sudo mkdir -p failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Create directory operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def copy_directory(path: Path, target: Path) -> tuple[bool, str]:
+    """
+    Copy a directory recursively. Uses sudo cp -a if not directly copyable.
+    Returns (success, message).
+    """
+    path = Path(os.path.abspath(path))
+    target = Path(os.path.abspath(target))
+
+    # If path is itself a symlink, just recreate the link (matches cp -a)
+    if path.is_symlink():
+        try:
+            os.symlink(os.readlink(path), target)
+            return True, "Directory copied"
+        except PermissionError:
+            pass
+        except OSError as e:
+            return False, str(e)
+    else:
+        try:
+            shutil.copytree(path, target, symlinks=True)
+            return True, "Directory copied"
+        except (PermissionError, shutil.Error):
+            pass
+        except OSError as e:
+            return False, str(e)
+
+    # Clean up any partial copy with sudo before falling back
+    if target.exists():
+        subprocess.run(
+            ["sudo", "-n", "rm", "-rf", str(target)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+        )
+
+    # Fall back to sudo cp -a
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "cp", "-a", str(path), str(target)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            return True, "Directory copied (with sudo)"
+        else:
+            error = result.stderr.decode("utf-8", errors="replace")
+            return False, f"sudo cp failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Copy operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def copy_file(path: Path, target: Path) -> tuple[bool, str]:
+    """
+    Copy a file. Uses sudo cp if not directly copyable.
+    Returns (success, message).
+    """
+    path = Path(os.path.abspath(path))
+    target = Path(os.path.abspath(target))
+
+    try:
+        if path.is_symlink():
+            os.symlink(os.readlink(path), target)
+        else:
+            shutil.copy2(path, target)
+        return True, "File copied"
+    except PermissionError:
+        pass
+    except OSError as e:
+        return False, str(e)
+
+    # Fall back to sudo cp
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "cp", "-a", str(path), str(target)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return True, "File copied (with sudo)"
+        else:
+            error = result.stderr.decode("utf-8", errors="replace")
+            return False, f"sudo cp failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Copy operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+
 def rename_path(path: Path, target: Path) -> tuple[bool, str]:
     """
     Rename/move a file or directory. Uses sudo mv if not directly renameable.
@@ -250,7 +413,16 @@ def rename_path(path: Path, target: Path) -> tuple[bool, str]:
     except PermissionError:
         pass
     except OSError as e:
-        return False, str(e)
+        if e.errno != errno.EXDEV:
+            return False, str(e)
+        # Cross-filesystem — try shutil.move before sudo
+        try:
+            shutil.move(str(path), str(target))
+            return True, "Moved"
+        except (PermissionError, shutil.Error):
+            pass
+        except OSError:
+            pass
 
     # Fall back to sudo mv
     try:

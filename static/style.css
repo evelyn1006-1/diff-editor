@@ -339,6 +339,19 @@ main {
     white-space: nowrap;
 }
 
+.file-item .symlink-target {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    opacity: 0.55;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 40%;
+    min-width: 0;
+    flex-shrink: 1;
+}
+
 .file-item .badge {
     font-family: 'Comic Neue', sans-serif;
     font-size: 0.75rem;
@@ -405,6 +418,36 @@ main {
 .btn-delete:hover, .btn-delete-dir:hover {
     background: rgba(255, 77, 109, 0.15);
     color: var(--error);
+}
+
+.actions-dropdown-wrap {
+    display: none;
+    position: relative;
+}
+
+.actions-dropdown {
+    display: none;
+    position: absolute;
+    top: calc(100% + 0.3rem);
+    right: 0;
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 0.3rem;
+    z-index: 100;
+    min-width: 130px;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    flex-direction: column;
+}
+
+.actions-dropdown.flip-up {
+    top: auto;
+    bottom: calc(100% + 0.3rem);
+}
+
+.actions-dropdown.open {
+    display: flex;
 }
 
 /* Directory delete preview modal */
@@ -506,6 +549,105 @@ main {
 
 .btn-modal-delete:hover {
     background: rgba(255, 77, 109, 0.3);
+}
+
+.btn-modal-copy {
+    background: rgba(214, 51, 132, 0.15);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.btn-modal-copy:hover:not(:disabled) {
+    background: rgba(214, 51, 132, 0.3);
+}
+
+.btn-modal-copy:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.copy-modal-title {
+    color: var(--accent);
+}
+
+.copy-label {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.25rem;
+}
+
+.copy-input {
+    width: 100%;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 0.45rem 0.65rem;
+    border-radius: 10px;
+    font-family: "SF Mono", Monaco, monospace;
+    font-size: 0.85rem;
+    margin-bottom: 0.6rem;
+    box-sizing: border-box;
+}
+
+.copy-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(214, 51, 132, 0.15);
+}
+
+.copy-shortcuts {
+    display: flex;
+    gap: 0.4rem;
+    margin-bottom: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.btn-shortcut {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.78rem;
+    padding: 0.3rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.btn-shortcut:hover {
+    background: rgba(214, 51, 132, 0.1);
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+.copy-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-bottom: 0.7rem;
+}
+
+.copy-option {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.83rem;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
+}
+
+.copy-option input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.copy-error {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+    color: var(--error);
+    margin-bottom: 0.6rem;
 }
 
 .upload-file-list {
@@ -950,6 +1092,15 @@ body.terminal-raised {
 
     .desktop-only {
         display: none !important;
+    }
+
+    /* Collapse file action buttons into a single dropdown */
+    .file-actions > .btn-action:not(.btn-actions-toggle) {
+        display: none;
+    }
+
+    .actions-dropdown-wrap {
+        display: block;
     }
 
     /* Show icons, hide text for safe toggle buttons */

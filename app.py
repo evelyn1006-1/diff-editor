@@ -40,7 +40,7 @@ _access_handler.setFormatter(logging.Formatter(
 ))
 access_logger.addHandler(_access_handler)
 
-from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, delete_path, delete_directory, rename_path, zip_directory
+from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, create_symlink, ensure_directory, copy_directory, copy_file, delete_path, delete_directory, rename_path, zip_directory
 from utils.git_ops import find_git_root, get_head_content_bytes, is_tracked_by_git, get_directory_git_status, get_tracked_files
 
 
@@ -942,10 +942,13 @@ def create_app() -> Flask:
                     # Only mark as git-tracked if actually in git's index (not just in a repo folder)
                     is_tracked = entry_path in tracked_files if not is_dir else False
 
+                    is_link = entry.is_symlink()
                     items.append({
                         "name": entry.name,
                         "path": entry_path,
                         "is_dir": is_dir,
+                        "is_symlink": is_link,
+                        "symlink_target": str(os.readlink(entry)) if is_link else None,
                         "is_git": is_tracked,
                         "git_status": file_git_status,
                         "writable": is_writable_by_user(entry) if not is_dir else None,
@@ -1320,6 +1323,237 @@ def create_app() -> Flask:
 
         return jsonify({"success": True, "message": message})
 
+    def _activate_service(dest_dir: str, filename: str, activate: bool, *, old_filename: str | None = None) -> str | None:
+        """Run activation commands for systemd or nginx after a copy/symlink/rename."""
+        if not activate:
+            return None
+
+        try:
+            if dest_dir.rstrip("/") == "/etc/systemd/system":
+                subprocess.run(
+                    ["sudo", "-n", "systemctl", "daemon-reload"],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                )
+                # Enable new unit first, only then disable old
+                result = subprocess.run(
+                    ["sudo", "-n", "systemctl", "enable", "--now", filename],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
+                )
+                if result.returncode != 0:
+                    return f"Service activation failed: {result.stderr.decode('utf-8', errors='replace')}"
+                if old_filename and old_filename != filename:
+                    subprocess.run(
+                        ["sudo", "-n", "systemctl", "disable", "--now", old_filename],
+                        stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
+                    )
+                return f"Service {filename} enabled and started."
+
+            if dest_dir.rstrip("/") == "/etc/nginx/sites-available":
+                # Remove old dangling sites-enabled link before testing
+                # (the file was already renamed, so the old link is dangling)
+                if old_filename and old_filename != filename:
+                    old_link = Path("/etc/nginx/sites-enabled") / old_filename
+                    if old_link.is_symlink():
+                        subprocess.run(
+                            ["sudo", "-n", "rm", "-f", str(old_link)],
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                        )
+                # Create new sites-enabled link
+                enabled_link = Path("/etc/nginx/sites-enabled") / filename
+                created_link = False
+                if not enabled_link.exists():
+                    subprocess.run(
+                        ["sudo", "-n", "ln", "-sf", f"/etc/nginx/sites-available/{filename}", str(enabled_link)],
+                        stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                    )
+                    created_link = True
+                test = subprocess.run(
+                    ["sudo", "-n", "nginx", "-t"],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                )
+                if test.returncode != 0:
+                    # Rollback: remove the new link
+                    if created_link:
+                        subprocess.run(
+                            ["sudo", "-n", "rm", "-f", str(enabled_link)],
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                        )
+                    return f"nginx config test failed: {test.stderr.decode('utf-8', errors='replace')}"
+                reload = subprocess.run(
+                    ["sudo", "-n", "systemctl", "reload", "nginx"],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                )
+                if reload.returncode == 0:
+                    return f"Site {filename} enabled and nginx reloaded."
+                return f"nginx reload failed: {reload.stderr.decode('utf-8', errors='replace')}"
+        except subprocess.TimeoutExpired:
+            return "Activation timed out."
+        except Exception as e:
+            return f"Activation error: {e}"
+
+        return None
+
+    @app.post("/api/file/copy")
+    def copy_file_route():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        src_path_str = data.get("path", "")
+        new_name = str(data.get("new_name", "")).strip()
+        dest_dir_str = str(data.get("directory", "")).strip()
+
+        if not src_path_str:
+            return jsonify({"error": "No path specified"}), 400
+        if not new_name:
+            return jsonify({"error": "No new name provided"}), 400
+        if "\x00" in new_name:
+            return jsonify({"error": "Invalid name"}), 400
+        if "/" in new_name or "\\" in new_name:
+            return jsonify({"error": "Name cannot include path separators"}), 400
+        if new_name in {".", ".."}:
+            return jsonify({"error": "Invalid name"}), 400
+
+        path, error = resolve_request_path(src_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        as_symlink = bool(data.get("symlink", False))
+        create_dirs = bool(data.get("create_dirs", False))
+        activate = bool(data.get("activate", False))
+        overwrite = bool(data.get("overwrite", False))
+
+        if not path.exists() and not path.is_symlink():
+            return jsonify({"error": "File not found"}), 404
+        if not path.is_file() and not path.is_symlink():
+            return jsonify({"error": "Not a file"}), 400
+
+        if dest_dir_str:
+            dest_dir, error = resolve_request_path(dest_dir_str, "directory")
+            if error:
+                return jsonify({"error": error}), 400
+            if not dest_dir.is_dir():
+                if create_dirs:
+                    ok, msg = ensure_directory(dest_dir)
+                    if not ok:
+                        return jsonify({"error": msg}), 500
+                else:
+                    return jsonify({"error": "Destination directory does not exist"}), 400
+        else:
+            dest_dir = path.parent
+
+        target = Path(os.path.abspath(dest_dir / new_name))
+        if target.resolve() == path.resolve():
+            return jsonify({"error": "Source and destination are the same file"}), 400
+        if target.exists() or target.is_symlink():
+            if overwrite:
+                if target.is_dir() and not target.is_symlink():
+                    ok, msg = delete_directory(target)
+                else:
+                    ok, msg = delete_path(target)
+                if not ok:
+                    return jsonify({"error": f"Failed to remove existing target: {msg}"}), 500
+            else:
+                return jsonify({"error": "A file with that name already exists"}), 409
+
+        if as_symlink:
+            success, message = create_symlink(path, target)
+        else:
+            success, message = copy_file(path, target)
+        if not success:
+            return jsonify({"error": message}), 500
+
+        # Activate for systemd / nginx
+        act_msg = _activate_service(str(dest_dir), new_name, activate)
+
+        return jsonify({"success": True, "path": str(target), "activate_message": act_msg})
+
+    @app.post("/api/dir/copy")
+    def copy_directory_route():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        src_path_str = data.get("path", "")
+        new_name = str(data.get("new_name", "")).strip()
+        dest_dir_str = str(data.get("directory", "")).strip()
+
+        if not src_path_str:
+            return jsonify({"error": "No path specified"}), 400
+        if not new_name:
+            return jsonify({"error": "No new name provided"}), 400
+        if "\x00" in new_name:
+            return jsonify({"error": "Invalid name"}), 400
+        if "/" in new_name or "\\" in new_name:
+            return jsonify({"error": "Name cannot include path separators"}), 400
+        if new_name in {".", ".."}:
+            return jsonify({"error": "Invalid name"}), 400
+
+        path, error = resolve_request_path(src_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        as_symlink = bool(data.get("symlink", False))
+        create_dirs = bool(data.get("create_dirs", False))
+        activate = bool(data.get("activate", False))
+        overwrite = bool(data.get("overwrite", False))
+
+        if not path.exists():
+            return jsonify({"error": "Directory not found"}), 404
+        if not path.is_dir():
+            return jsonify({"error": "Not a directory"}), 400
+
+        if dest_dir_str:
+            dest_dir, error = resolve_request_path(dest_dir_str, "directory")
+            if error:
+                return jsonify({"error": error}), 400
+            if not dest_dir.is_dir():
+                if create_dirs:
+                    ok, msg = ensure_directory(dest_dir)
+                    if not ok:
+                        return jsonify({"error": msg}), 500
+                else:
+                    return jsonify({"error": "Destination directory does not exist"}), 400
+        else:
+            dest_dir = path.parent
+
+        target = Path(os.path.abspath(dest_dir / new_name))
+        resolved_path = path.resolve()
+        if target.resolve() == resolved_path:
+            return jsonify({"error": "Source and destination are the same directory"}), 400
+        if not path.is_symlink() and str(target.resolve()).startswith(str(resolved_path) + "/"):
+            return jsonify({"error": "Cannot copy a directory into itself"}), 400
+        if target.exists() or target.is_symlink():
+            if overwrite:
+                if target.is_dir() and not target.is_symlink():
+                    ok, msg = delete_directory(target)
+                else:
+                    ok, msg = delete_path(target)
+                if not ok:
+                    return jsonify({"error": f"Failed to remove existing target: {msg}"}), 500
+            else:
+                return jsonify({"error": "A file or directory with that name already exists"}), 409
+
+        if as_symlink:
+            success, message = create_symlink(path, target)
+        else:
+            success, message = copy_directory(path, target)
+        if not success:
+            return jsonify({"error": message}), 500
+
+        # Activate for systemd / nginx
+        act_msg = _activate_service(str(dest_dir), new_name, activate)
+
+        return jsonify({"success": True, "path": str(target), "activate_message": act_msg})
+
     @app.post("/api/rename")
     def rename_item():
         csrf = request.headers.get("X-CSRF-Token", "")
@@ -1332,6 +1566,10 @@ def create_app() -> Flask:
 
         old_path_str = data.get("path", "")
         new_name = str(data.get("new_name", "")).strip()
+        dest_dir_str = str(data.get("directory", "")).strip()
+        create_dirs = bool(data.get("create_dirs", False))
+        overwrite = bool(data.get("overwrite", False))
+        activate = bool(data.get("activate", False))
 
         if not old_path_str:
             return jsonify({"error": "No path specified"}), 400
@@ -1351,15 +1589,45 @@ def create_app() -> Flask:
         if not path.exists():
             return jsonify({"error": "Path not found"}), 404
 
-        target = (path.parent / new_name).resolve()
-        if target.exists():
-            return jsonify({"error": "A file or directory with that name already exists"}), 409
+        if dest_dir_str:
+            dest_dir, error = resolve_request_path(dest_dir_str, "directory")
+            if error:
+                return jsonify({"error": error}), 400
+            if not dest_dir.is_dir():
+                if create_dirs:
+                    ok, msg = ensure_directory(dest_dir)
+                    if not ok:
+                        return jsonify({"error": msg}), 500
+                else:
+                    return jsonify({"error": "Destination directory does not exist"}), 400
+        else:
+            dest_dir = path.parent
+
+        target = Path(os.path.abspath(dest_dir / new_name))
+        resolved_path = path.resolve()
+        if target.resolve() == resolved_path:
+            return jsonify({"error": "Source and destination are the same path"}), 400
+        if path.is_dir() and not path.is_symlink() and str(target.resolve()).startswith(str(resolved_path) + "/"):
+            return jsonify({"error": "Cannot move a directory into itself"}), 400
+        if target.exists() or target.is_symlink():
+            if overwrite:
+                if target.is_dir() and not target.is_symlink():
+                    ok, msg = delete_directory(target)
+                else:
+                    ok, msg = delete_path(target)
+                if not ok:
+                    return jsonify({"error": f"Failed to remove existing target: {msg}"}), 500
+            else:
+                return jsonify({"error": "A file or directory with that name already exists"}), 409
 
         success, message = rename_path(path, target)
         if not success:
             return jsonify({"error": message}), 500
 
-        return jsonify({"success": True, "path": str(target)})
+        # Activate for systemd / nginx
+        act_msg = _activate_service(str(dest_dir), new_name, activate, old_filename=path.name)
+
+        return jsonify({"success": True, "path": str(target), "activate_message": act_msg})
 
     @app.get("/api/dir/preview")
     def preview_directory():
@@ -1742,7 +2010,7 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
             "codex", "exec", "review",
             "-m", "gpt-5.4",
             "-c", f'model_reasoning_effort="{reasoning_effort}"',
-            "--enable", "fast_mode",
+            # "--enable", "fast_mode",
             "--json",
         ]
 
