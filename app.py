@@ -40,7 +40,7 @@ _access_handler.setFormatter(logging.Formatter(
 ))
 access_logger.addHandler(_access_handler)
 
-from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, create_symlink, ensure_directory, copy_directory, copy_file, delete_path, delete_directory, rename_path, zip_directory
+from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, create_symlink, ensure_directory, copy_directory, copy_file, make_executable, delete_path, delete_directory, rename_path, zip_directory
 from utils.git_ops import find_git_root, get_head_content_bytes, is_tracked_by_git, get_directory_git_status, get_tracked_files
 
 
@@ -1467,6 +1467,9 @@ def create_app() -> Flask:
         if not success:
             return jsonify({"error": message}), 500
 
+        if str(dest_dir).rstrip("/") == "/usr/local/bin":
+            make_executable(target)
+
         # Activate for systemd / nginx
         act_msg = _activate_service(str(dest_dir), new_name, activate)
 
@@ -1623,6 +1626,9 @@ def create_app() -> Flask:
         success, message = rename_path(path, target)
         if not success:
             return jsonify({"error": message}), 500
+
+        if str(dest_dir).rstrip("/") == "/usr/local/bin":
+            make_executable(target)
 
         # Activate for systemd / nginx
         act_msg = _activate_service(str(dest_dir), new_name, activate, old_filename=path.name)

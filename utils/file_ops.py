@@ -399,6 +399,20 @@ def copy_file(path: Path, target: Path) -> tuple[bool, str]:
         return False, str(e)
 
 
+def make_executable(path: Path) -> None:
+    """Make a file executable. Uses sudo chmod if needed."""
+    path = Path(os.path.abspath(path))
+    try:
+        path.chmod(path.stat().st_mode | 0o111)
+    except PermissionError:
+        subprocess.run(
+            ["sudo", "-n", "chmod", "+x", str(path)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+        )
+    except OSError:
+        pass
+
+
 def rename_path(path: Path, target: Path) -> tuple[bool, str]:
     """
     Rename/move a file or directory. Uses sudo mv if not directly renameable.
