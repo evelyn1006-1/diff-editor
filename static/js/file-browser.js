@@ -164,7 +164,11 @@ async function loadDirectory(path) {
         fileList.querySelectorAll('.btn-delete').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                deleteFile(btn.dataset.path, btn.dataset.name);
+                if (selectMode && selectedPaths.has(btn.dataset.path)) {
+                    batchDelete();
+                } else {
+                    deleteFile(btn.dataset.path, btn.dataset.name);
+                }
             });
         });
 
@@ -188,7 +192,11 @@ async function loadDirectory(path) {
         fileList.querySelectorAll('.btn-delete-dir').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                deleteDirectory(btn.dataset.path, btn.dataset.name);
+                if (selectMode && selectedPaths.has(btn.dataset.path)) {
+                    batchDelete();
+                } else {
+                    deleteDirectory(btn.dataset.path, btn.dataset.name);
+                }
             });
         });
 
@@ -307,10 +315,108 @@ function createFileItem(item) {
 function handleItemClick(path, isDir) {
     if (isDir) {
         loadDirectory(path);
+    } else if (path.toLowerCase().endsWith('.zip')) {
+        showZipModal(path);
     } else {
         // Open in diff editor
         window.location.href = `diff?file=${encodeURIComponent(path)}`;
     }
+}
+
+function showZipModal(zipPath) {
+    const name = zipPath.split('/').pop();
+    const stem = name.replace(/\.zip$/i, '');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-title copy-modal-title">Extract zip</div>
+            <div class="modal-summary">${escapeHtml(name)} <span class="zip-info" style="opacity:0.6"></span></div>
+            <div class="zip-actions">
+                <button class="btn-zip" data-mode="directory">Extract to <strong>${escapeHtml(stem)}/</strong></button>
+                <button class="btn-zip" data-mode="here">Extract to current directory</button>
+                <button class="btn-zip btn-zip-open">Open anyway</button>
+                <button class="btn-zip btn-zip-cancel">Cancel</button>
+            </div>
+            <div class="zip-status" style="display:none"></div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    // Fetch zip info (size + file count)
+    const infoEl = overlay.querySelector('.zip-info');
+    fetch(`api/file/zip-info?path=${encodeURIComponent(zipPath)}`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            if (!data || !infoEl) return;
+            const size = data.size < 1024 ? `${data.size} B`
+                : data.size < 1048576 ? `${(data.size / 1024).toFixed(1)} KB`
+                : `${(data.size / 1048576).toFixed(1)} MB`;
+            infoEl.textContent = `(${size}, ${data.file_count} file${data.file_count !== 1 ? 's' : ''})`;
+        })
+        .catch(() => {});
+
+    const statusEl = overlay.querySelector('.zip-status');
+    const buttons = overlay.querySelectorAll('.btn-zip');
+
+    function disableAll() {
+        buttons.forEach(b => b.disabled = true);
+    }
+
+    function close() {
+        overlay.remove();
+    }
+
+    // Extract buttons
+    overlay.querySelectorAll('.btn-zip[data-mode]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+            disableAll();
+            statusEl.textContent = 'Extracting...';
+            statusEl.style.display = '';
+            statusEl.style.color = '';
+
+            try {
+                const response = await fetch('api/file/extract', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-CSRF-Token': CSRF_TOKEN,
+                    },
+                    body: JSON.stringify({ path: zipPath, mode: btn.dataset.mode }),
+                });
+
+                const data = await response.json();
+                if (!response.ok) {
+                    statusEl.textContent = data.error || 'Extract failed.';
+                    statusEl.style.color = 'var(--error)';
+                    buttons.forEach(b => b.disabled = false);
+                    return;
+                }
+
+                close();
+                if (data.warning) {
+                    window.alert(data.warning);
+                }
+                loadDirectory(currentPath);
+            } catch (err) {
+                statusEl.textContent = `Error: ${err.message}`;
+                statusEl.style.color = 'var(--error)';
+                buttons.forEach(b => b.disabled = false);
+            }
+        });
+    });
+
+    // Open anyway
+    overlay.querySelector('.btn-zip-open').addEventListener('click', () => {
+        close();
+        window.location.href = `diff?file=${encodeURIComponent(zipPath)}`;
+    });
+
+    // Cancel
+    overlay.querySelector('.btn-zip-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 }
 
 function goUp() {
@@ -435,30 +541,11 @@ async function deleteDirectory(path, name) {
             listHtml = '<div class="preview-entry preview-more">Directory is empty</div>';
         }
 
-        // Safe = nested inside a top-level home dir (4+ segments), or anywhere in /tmp
-        // e.g. /home/user/repo/sub is safe, but /home/user/repo is not
-        const parts = path.split('/').filter(p => p);
-        const isSafePath = (path.startsWith('/home/') && parts.length > 3) ||
-                           (path.startsWith('/tmp/') && path !== '/tmp');
-        const needsConfirmPath = !isSafePath;
-
-        let confirmHtml = '';
-        if (needsConfirmPath) {
-            confirmHtml = `
-                <div class="confirm-path" style="display:none">
-                    <div class="modal-summary" style="margin-top:0.75rem">This is a top-level or system directory. Type the full path to confirm:</div>
-                    <input type="text" class="confirm-path-input" autocomplete="off">
-                    <div class="confirm-path-error" style="display:none">Path does not match.</div>
-                </div>
-            `;
-        }
-
         overlay.innerHTML = `
             <div class="modal-dialog">
                 <div class="modal-title">Delete "${escapeHtml(name)}"?</div>
-                <div class="modal-summary">${data.total_files} file${data.total_files !== 1 ? 's' : ''} and ${data.total_dirs} subdirector${data.total_dirs !== 1 ? 'ies' : 'y'} will be permanently deleted.</div>
+                <div class="modal-summary">${data.total_files} file${data.total_files !== 1 ? 's' : ''} and ${data.total_dirs} subdirector${data.total_dirs !== 1 ? 'ies' : 'y'} will be moved to the recycle bin.</div>
                 <div class="preview-list">${listHtml}</div>
-                ${confirmHtml}
                 <div class="modal-buttons">
                     <button class="btn-modal btn-modal-cancel">Cancel</button>
                     <button class="btn-modal btn-modal-delete">Delete</button>
@@ -468,44 +555,11 @@ async function deleteDirectory(path, name) {
 
         document.body.appendChild(overlay);
 
-        // Set placeholder safely via DOM to avoid HTML attribute escaping issues
-        const confirmInput = overlay.querySelector('.confirm-path-input');
-        if (confirmInput) confirmInput.placeholder = path;
-
         // Wait for user choice
         const result = await new Promise(resolve => {
-            const btnDelete = overlay.querySelector('.btn-modal-delete');
-            const confirmSection = overlay.querySelector('.confirm-path');
-
+            overlay.querySelector('.btn-modal-delete').addEventListener('click', () => resolve(true));
             overlay.querySelector('.btn-modal-cancel').addEventListener('click', () => resolve(false));
             overlay.addEventListener('click', (e) => { if (e.target === overlay) resolve(false); });
-
-            if (needsConfirmPath) {
-                const input = overlay.querySelector('.confirm-path-input');
-                const error = overlay.querySelector('.confirm-path-error');
-
-                btnDelete.addEventListener('click', () => {
-                    if (confirmSection.style.display === 'none') {
-                        // First click: expand the confirmation section
-                        confirmSection.style.display = 'block';
-                        input.focus();
-                        return;
-                    }
-                    // Second click: validate the typed path
-                    if (input.value.trim() === path) {
-                        resolve(true);
-                    } else {
-                        error.style.display = 'block';
-                    }
-                });
-
-                input.addEventListener('keydown', (e) => {
-                    if (e.key === 'Enter') btnDelete.click();
-                });
-                input.addEventListener('input', () => { error.style.display = 'none'; });
-            } else {
-                btnDelete.addEventListener('click', () => resolve(true));
-            }
         });
 
         overlay.remove();
@@ -1067,6 +1121,112 @@ async function moveItems(paths, destDir) {
     clearSelection();
     exitSelectMode();
     _moveInFlight = false;
+    loadDirectory(currentPath);
+}
+
+async function batchDelete() {
+    const paths = [...selectedPaths];
+    const items = paths.map(p => {
+        const el = document.querySelector(`.file-item[data-path="${CSS.escape(p)}"]`);
+        return { path: p, name: p.split('/').pop(), isDir: el?.dataset.isDir === 'true' };
+    });
+
+    const files = items.filter(i => !i.isDir);
+    const dirs = items.filter(i => i.isDir);
+
+    // Fetch previews for all directories in parallel
+    const dirPreviews = await Promise.all(dirs.map(async (d) => {
+        try {
+            const resp = await fetch(`api/dir/preview?path=${encodeURIComponent(d.path)}`);
+            if (resp.ok) return { ...d, preview: await resp.json() };
+        } catch {}
+        return { ...d, preview: null };
+    }));
+
+    // Build preview list: selected items first, then directory contents
+    let totalFiles = files.length;
+    let totalDirs = 0;
+    let entries = [];
+
+    // Selected files
+    files.forEach(f => entries.push(f.name));
+    // Selected directories + their contents
+    dirPreviews.forEach(d => {
+        entries.push(d.name + '/');
+        if (d.preview) {
+            totalFiles += d.preview.total_files;
+            totalDirs += d.preview.total_dirs;
+            [...d.preview.dirs, ...d.preview.files].forEach(e => entries.push('  ' + d.name + '/' + e));
+        }
+    });
+
+    const maxShow = 50;
+    const truncated = entries.length > maxShow;
+    const shown = entries.slice(0, maxShow);
+
+    let listHtml = shown.map(e => `<div class="preview-entry">${escapeHtml(e)}</div>`).join('');
+    if (truncated) {
+        listHtml += `<div class="preview-entry preview-more">... and ${entries.length - maxShow} more</div>`;
+    }
+
+    const summaryParts = [];
+    if (totalFiles > 0) summaryParts.push(`${totalFiles} file${totalFiles !== 1 ? 's' : ''}`);
+    if (totalDirs > 0) summaryParts.push(`${totalDirs} subdirector${totalDirs !== 1 ? 'ies' : 'y'}`);
+    if (dirs.length > 0) summaryParts.push(`${dirs.length} director${dirs.length !== 1 ? 'ies' : 'y'}`);
+    const summary = summaryParts.join(', ') + ' will be moved to the recycle bin.';
+
+    // Show modal
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-title">Delete ${items.length} item${items.length !== 1 ? 's' : ''}?</div>
+            <div class="modal-summary">${summary}</div>
+            <div class="preview-list">${listHtml}</div>
+            <div class="modal-buttons">
+                <button class="btn-modal btn-modal-cancel">Cancel</button>
+                <button class="btn-modal btn-modal-delete">Delete</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const confirmed = await new Promise(resolve => {
+        overlay.querySelector('.btn-modal-delete').addEventListener('click', () => resolve(true));
+        overlay.querySelector('.btn-modal-cancel').addEventListener('click', () => resolve(false));
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) resolve(false); });
+    });
+    overlay.remove();
+    if (!confirmed) return;
+
+    // Perform deletions
+    let errors = [];
+    for (const item of items) {
+        const endpoint = item.isDir ? 'api/dir/delete' : 'api/file/delete';
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-Token': CSRF_TOKEN,
+                },
+                body: JSON.stringify({ path: item.path }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                errors.push(`${item.name}: ${data.error}`);
+            }
+        } catch (err) {
+            errors.push(`${item.name}: ${err.message}`);
+        }
+    }
+
+    if (errors.length > 0) {
+        window.alert(`Some items could not be deleted:\n\n${errors.join('\n')}`);
+    }
+
+    clearSelection();
+    exitSelectMode();
     loadDirectory(currentPath);
 }
 

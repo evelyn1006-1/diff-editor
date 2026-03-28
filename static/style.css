@@ -730,6 +730,55 @@ main {
     margin-bottom: 0.6rem;
 }
 
+.zip-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+}
+
+.btn-zip {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.9rem;
+    padding: 0.55rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.btn-zip:hover:not(:disabled) {
+    background: rgba(214, 51, 132, 0.1);
+    border-color: var(--accent);
+}
+
+.btn-zip:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
+.btn-zip-cancel {
+    background: transparent;
+    color: var(--text-secondary);
+    border-color: transparent;
+    text-align: center;
+}
+
+.btn-zip-cancel:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    border-color: var(--border);
+}
+
+.zip-status {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.85rem;
+    text-align: center;
+    padding-top: 0.5rem;
+}
+
 .upload-file-list {
     max-height: 8rem;
     overflow-y: auto;

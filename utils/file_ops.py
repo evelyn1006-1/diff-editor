@@ -3,14 +3,19 @@ File operations with sudo support for reading/writing files outside home directo
 """
 
 import errno
+import json
 import os
+import secrets
 import shutil
 import subprocess
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 HOME_DIR = Path.home()
+RECYCLE_BIN = Path("/var/tmp/RECYCLE_BIN")
+RECYCLE_META_DIR = Path("/var/lib/recycle-bin")
 
 
 def is_writable_by_user(path: Path) -> bool:
@@ -165,76 +170,104 @@ def create_dir(path: Path) -> tuple[bool, str]:
         return False, str(e)
 
 
-def delete_path(path: Path) -> tuple[bool, str]:
+def _move_to_trash(path: Path) -> tuple[bool, str]:
     """
-    Delete a file. Uses sudo rm if not directly deletable.
+    Move a file, directory, or symlink to the recycle bin.
     Returns (success, message).
     """
     path = Path(os.path.abspath(path))
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
+    hex_id = secrets.token_hex(4)
+    trash_name = f"{path.name}__{timestamp}_{hex_id}"
+    trash_dest = RECYCLE_BIN / trash_name
 
+    meta = json.dumps({
+        "original_path": str(path),
+        "deleted_at": timestamp,
+        "trash_name": trash_name,
+    })
+
+    # Ensure directories exist
+    for d in (RECYCLE_BIN, RECYCLE_META_DIR):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            subprocess.run(
+                ["sudo", "-n", "mkdir", "-p", str(d)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
     try:
-        path.unlink()
-        return True, "File deleted"
+        if oct(RECYCLE_BIN.stat().st_mode)[-4:] != "1777":
+            subprocess.run(
+                ["sudo", "-n", "chmod", "1777", str(RECYCLE_BIN)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
+        if oct(RECYCLE_META_DIR.stat().st_mode)[-4:] != "1777":
+            subprocess.run(
+                ["sudo", "-n", "chmod", "1777", str(RECYCLE_META_DIR)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
+    except OSError:
+        pass
+
+    def _write_meta():
+        try:
+            meta_file = RECYCLE_META_DIR / f"{trash_name}.json"
+            try:
+                meta_file.write_text(meta)
+            except PermissionError:
+                subprocess.run(
+                    ["sudo", "-n", "tee", str(meta_file)],
+                    input=meta.encode(), capture_output=True, timeout=10,
+                )
+        except Exception:
+            pass  # metadata is best-effort; the move already succeeded
+
+    # Try direct rename (fast, same filesystem)
+    try:
+        path.rename(trash_dest)
+        _write_meta()
+        return True, "Moved to recycle bin"
     except PermissionError:
         pass
     except OSError as e:
-        return False, str(e)
+        if e.errno == errno.EXDEV:
+            try:
+                shutil.move(str(path), str(trash_dest))
+                _write_meta()
+                return True, "Moved to recycle bin"
+            except (PermissionError, shutil.Error, OSError):
+                pass
+        elif e.errno not in (errno.EACCES, errno.EPERM):
+            return False, str(e)
 
-    # Fall back to sudo rm
+    # Fall back to sudo mv
     try:
         result = subprocess.run(
-            ["sudo", "-n", "rm", "-f", str(path)],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return True, "File deleted (with sudo)"
-        else:
-            error = result.stderr.decode("utf-8", errors="replace")
-            return False, f"sudo rm failed: {error}"
-    except subprocess.TimeoutExpired:
-        return False, "Delete operation timed out"
-    except Exception as e:
-        return False, str(e)
-
-
-def delete_directory(path: Path) -> tuple[bool, str]:
-    """
-    Delete a directory recursively. Uses sudo rm -rf if not directly deletable.
-    Returns (success, message).
-    """
-    path = Path(os.path.abspath(path))
-
-    # If it's a symlink, just remove the link itself
-    if path.is_symlink():
-        return delete_path(path)
-
-    try:
-        shutil.rmtree(path)
-        return True, "Directory deleted"
-    except PermissionError:
-        pass
-    except OSError as e:
-        return False, str(e)
-
-    # Fall back to sudo rm -rf
-    try:
-        result = subprocess.run(
-            ["sudo", "-n", "rm", "-rf", str(path)],
+            ["sudo", "-n", "mv", str(path), str(trash_dest)],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
         )
         if result.returncode == 0:
-            return True, "Directory deleted (with sudo)"
-        else:
-            error = result.stderr.decode("utf-8", errors="replace")
-            return False, f"sudo rm -rf failed: {error}"
+            _write_meta()
+            return True, "Moved to recycle bin (with sudo)"
+        error = result.stderr.decode("utf-8", errors="replace")
+        return False, f"Failed to move to recycle bin: {error}"
     except subprocess.TimeoutExpired:
         return False, "Delete operation timed out"
     except Exception as e:
         return False, str(e)
+
+
+def delete_path(path: Path) -> tuple[bool, str]:
+    """Move a file or symlink to the recycle bin."""
+    return _move_to_trash(Path(os.path.abspath(path)))
+
+
+def delete_directory(path: Path) -> tuple[bool, str]:
+    """Move a directory (or symlink) to the recycle bin."""
+    return _move_to_trash(Path(os.path.abspath(path)))
 
 
 def create_symlink(source: Path, link: Path) -> tuple[bool, str]:

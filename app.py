@@ -1316,12 +1316,60 @@ def create_app() -> Flask:
 
         if not path.is_file():
             return jsonify({"error": "Not a file"}), 400
+        if _is_protected_path(path):
+            return jsonify({"error": "Cannot delete files in a system directory"}), 403
 
         success, message = delete_path(path)
         if not success:
             return jsonify({"error": message}), 500
 
         return jsonify({"success": True, "message": message})
+
+    # Directories where removing anything inside would break boot or basic functionality
+    _PROTECTED_TREES = {
+        "/boot",            # kernel, initramfs, grub
+        "/dev", "/proc", "/sys", "/run",  # virtual/runtime filesystems
+    }
+    # Top-level system directories that should never be deleted
+    _PROTECTED_TOPLEVEL = {
+        "/bin", "/sbin", "/lib", "/lib64",
+        "/usr", "/etc", "/var", "/boot",
+        "/dev", "/proc", "/sys", "/run",
+        "/home", "/root", "/srv", "/opt",
+        "/mnt", "/media", "/snap",
+    }
+    # Specific critical directories (not their contents — just the dirs themselves)
+    _PROTECTED_DIRS = {
+        "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64",
+        "/etc/systemd", "/etc/ssh",
+    }
+    # Specific critical files
+    _PROTECTED_FILES = {
+        "/etc/fstab", "/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow",
+        "/etc/sudoers", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf",
+        "/etc/ssh/sshd_config",
+    }
+
+    def _is_protected_path(path: Path) -> bool:
+        """Check if a path is critical for boot or basic system functionality."""
+        resolved = str(Path(os.path.abspath(path)))
+        # Block root
+        if resolved == "/":
+            return True
+        # Block known system top-level directories
+        if resolved in _PROTECTED_TOPLEVEL:
+            return True
+        # Block anything inside protected trees
+        for tree in _PROTECTED_TREES:
+            if resolved == tree or resolved.startswith(tree + "/"):
+                return True
+        # Block protected directories themselves
+        if resolved in _PROTECTED_DIRS:
+            return True
+        # Block protected files
+        if resolved in _PROTECTED_FILES:
+            return True
+        return False
 
     def _activate_service(dest_dir: str, filename: str, activate: bool, *, old_filename: str | None = None) -> str | None:
         """Run activation commands for systemd or nginx after a copy/symlink/rename."""
@@ -1451,6 +1499,8 @@ def create_app() -> Flask:
             return jsonify({"error": "Source and destination are the same file"}), 400
         if target.exists() or target.is_symlink():
             if overwrite:
+                if _is_protected_path(target):
+                    return jsonify({"error": "Cannot overwrite a protected system path"}), 403
                 if target.is_dir() and not target.is_symlink():
                     ok, msg = delete_directory(target)
                 else:
@@ -1536,6 +1586,8 @@ def create_app() -> Flask:
             return jsonify({"error": "Cannot copy a directory into itself"}), 400
         if target.exists() or target.is_symlink():
             if overwrite:
+                if _is_protected_path(target):
+                    return jsonify({"error": "Cannot overwrite a protected system path"}), 403
                 if target.is_dir() and not target.is_symlink():
                     ok, msg = delete_directory(target)
                 else:
@@ -1614,6 +1666,8 @@ def create_app() -> Flask:
             return jsonify({"error": "Cannot move a directory into itself"}), 400
         if target.exists() or target.is_symlink():
             if overwrite:
+                if _is_protected_path(target):
+                    return jsonify({"error": "Cannot overwrite a protected system path"}), 403
                 if target.is_dir() and not target.is_symlink():
                     ok, msg = delete_directory(target)
                 else:
@@ -1692,6 +1746,8 @@ def create_app() -> Flask:
             return jsonify({"error": "Directory not found"}), 404
         if not path.is_dir():
             return jsonify({"error": "Not a directory"}), 400
+        if _is_protected_path(path):
+            return jsonify({"error": "Cannot delete a system directory"}), 403
 
         success, message = delete_directory(path)
         if not success:
@@ -1733,6 +1789,152 @@ def create_app() -> Flask:
                 pass
 
         return response
+
+    @app.get("/api/file/zip-info")
+    def zip_info():
+        zip_path_str = request.args.get("path", "")
+        if not zip_path_str:
+            return jsonify({"error": "No path specified"}), 400
+
+        zip_path, error = resolve_request_path(zip_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not zip_path.exists():
+            return jsonify({"error": "File not found"}), 404
+
+        import zipfile as zf
+        try:
+            size = zip_path.stat().st_size
+            with zf.ZipFile(zip_path, "r") as z:
+                file_count = sum(1 for i in z.infolist() if not i.is_dir())
+            return jsonify({"size": size, "file_count": file_count})
+        except (OSError, zf.BadZipFile):
+            return jsonify({"error": "Cannot read zip file"}), 400
+
+    @app.post("/api/file/extract")
+    def extract_zip():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        zip_path_str = data.get("path", "")
+        mode = data.get("mode", "directory")  # "directory" or "here"
+
+        if not zip_path_str:
+            return jsonify({"error": "No path specified"}), 400
+
+        zip_path, error = resolve_request_path(zip_path_str, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        if not zip_path.exists():
+            return jsonify({"error": "File not found"}), 404
+
+        import zipfile as zf
+        import shutil as _shutil
+
+        def _dedupe(p: Path) -> Path:
+            """Find a unique name by appending (2), (3), etc."""
+            if not p.exists() and not p.is_symlink():
+                return p
+            stem = p.stem
+            suffix = p.suffix
+            parent = p.parent
+            n = 2
+            while True:
+                candidate = parent / f"{stem} ({n}){suffix}"
+                if not candidate.exists() and not candidate.is_symlink():
+                    return candidate
+                n += 1
+
+        if mode == "directory":
+            dest = _dedupe(zip_path.parent / zip_path.stem)
+        else:
+            dest = zip_path.parent
+
+        try:
+            with zf.ZipFile(zip_path, "r") as z:
+                dest_resolved = str(dest.resolve()).rstrip("/") + "/"
+
+                if mode == "directory":
+                    # dest is fresh — no symlinks to worry about
+                    for name in z.namelist():
+                        resolved = str((dest / name).resolve())
+                        if resolved != dest_resolved.rstrip("/") and not resolved.startswith(dest_resolved):
+                            return jsonify({"error": f"Zip contains unsafe path: {name}"}), 400
+                    dest.mkdir()
+                    z.extractall(dest)
+                else:
+                    # Build rename map for conflicting top-level entries
+                    rename_map = {}  # original top-level name -> deduped name
+                    for info in z.infolist():
+                        parts = info.filename.rstrip("/").split("/")
+                        top = parts[0]
+                        if top not in rename_map:
+                            deduped = _dedupe(dest / top)
+                            rename_map[top] = deduped.name
+
+                    # Security check against deduped paths (avoids symlink confusion)
+                    for name in z.namelist():
+                        parts = name.rstrip("/").split("/")
+                        parts[0] = rename_map.get(parts[0], parts[0])
+                        mapped = "/".join(parts)
+                        resolved = str(Path(os.path.abspath(dest / mapped)))
+                        if resolved != dest_resolved.rstrip("/") and not resolved.startswith(dest_resolved):
+                            return jsonify({"error": f"Zip contains unsafe path: {name}"}), 400
+
+                    # Extract with mapped paths
+                    for info in z.infolist():
+                        parts = info.filename.rstrip("/").split("/")
+                        parts[0] = rename_map.get(parts[0], parts[0])
+                        target = dest / "/".join(parts)
+
+                        if info.is_dir():
+                            target.mkdir(parents=True, exist_ok=True)
+                        else:
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            with z.open(info) as src, open(target, "wb") as dst:
+                                _shutil.copyfileobj(src, dst)
+
+            count = sum(1 for i in zf.ZipFile(zip_path, "r").infolist() if not i.is_dir())
+            return jsonify({"success": True, "count": count, "dest": str(dest)})
+        except PermissionError:
+            pass
+        except (OSError, zf.BadZipFile) as e:
+            return jsonify({"error": str(e)}), 400
+
+        # Fall back to sudo unzip (no dedup — best effort)
+        try:
+            if mode == "directory":
+                subprocess.run(
+                    ["sudo", "-n", "mkdir", "-p", str(dest)],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+                )
+            result = subprocess.run(
+                ["sudo", "-n", "unzip", "-n", str(zip_path), "-d", str(dest)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+            )
+            if result.returncode in (0, 1):
+                warning = None
+                if result.returncode == 1:
+                    # Parse skipped files from unzip output
+                    stdout = result.stdout.decode("utf-8", errors="replace")
+                    skipped = [line.split("exists")[0].strip().split()[-1]
+                               for line in stdout.splitlines() if "already exists" in line.lower()]
+                    if skipped:
+                        warning = f"{len(skipped)} file(s) skipped (already exist)"
+                return jsonify({"success": True, "dest": str(dest), "warning": warning})
+            error_msg = result.stderr.decode("utf-8", errors="replace")
+            return jsonify({"error": f"unzip failed: {error_msg}"}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "Extract operation timed out"}), 500
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
     @app.post("/api/file")
     def save_file():
