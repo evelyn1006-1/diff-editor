@@ -163,6 +163,46 @@ async function initDiffEditor() {
             runBtn.addEventListener('click', runFile);
         }
 
+        // Auto-refresh for log files
+        if (isAutoRefreshLogFile(FILE_PATH)) {
+            const models = diffEditor.getModel();
+            let logRefreshInFlight = false;
+            setInterval(async () => {
+                if (isModified || logRefreshInFlight) return;
+                logRefreshInFlight = true;
+                try {
+                    const resp = await fetch(`api/file?path=${encodeURIComponent(FILE_PATH)}`);
+                    if (!resp.ok) return;
+                    const d = await resp.json();
+                    if (d.content !== currentContent) {
+                        const editor = diffEditor.getModifiedEditor();
+                        const textarea = isTextboxMode ? document.getElementById('textbox-editor') : null;
+                        const wasAtBottom = textarea
+                            ? isElementNearBottom(textarea)
+                            : isElementNearBottom(editor);
+
+                        // Update currentContent BEFORE setValue so onDidChangeContent
+                        // sees them as equal and doesn't mark the buffer dirty
+                        currentContent = d.content;
+                        models.modified.setValue(d.content);
+                        isModified = false;
+                        updateStatus();
+
+                        // Keep textbox in sync if active
+                        if (textarea) {
+                            syncTextboxModeExternalContent(d.content, { followTail: wasAtBottom });
+                        }
+
+                        if (!textarea && wasAtBottom) {
+                            editor.revealLine(models.modified.getLineCount());
+                        }
+                    }
+                } catch {} finally {
+                    logRefreshInFlight = false;
+                }
+            }, 1500);
+        }
+
     } catch (err) {
         statusEl.textContent = `Error: ${err.message}`;
         statusEl.className = 'status error';
@@ -916,6 +956,34 @@ let textboxHighlightScrollTimeout = null;
 const UNIFIED_DIFF_UPDATE_DELAY_MS = 600;
 const TEXTBOX_HIGHLIGHT_UPDATE_DELAY_MS = 120;
 const TEXTBOX_HIGHLIGHT_SCROLL_IDLE_DELAY_MS = 90;
+const AUTO_REFRESH_LOG_SUFFIXES = ['.log', '.jsonl', '.err', '.out', '.trace', '.logfile', '.access'];
+const ROTATED_LOG_SUFFIX_RE = /\.(log|jsonl|err|out|trace|logfile|access|txt)\.(gz|[0-9]+)$/i;
+
+function isAutoRefreshLogFile(filePath) {
+    if (!filePath) return false;
+
+    const fileName = String(filePath).split('/').pop() || '';
+    const loweredName = fileName.toLowerCase();
+    if (!loweredName || loweredName === 'a.out') return false;
+    if (ROTATED_LOG_SUFFIX_RE.test(loweredName)) return false;
+
+    if (AUTO_REFRESH_LOG_SUFFIXES.some((suffix) => loweredName.endsWith(suffix))) {
+        return true;
+    }
+
+    return loweredName.endsWith('.txt') && loweredName.includes('log');
+}
+
+function isElementNearBottom(view) {
+    if (!view) return false;
+    if (typeof view.getScrollTop === 'function') {
+        const scrollTop = view.getScrollTop();
+        const scrollHeight = view.getScrollHeight();
+        const clientHeight = view.getLayoutInfo().height;
+        return scrollTop + clientHeight >= scrollHeight - 10;
+    }
+    return view.scrollTop + view.clientHeight >= view.scrollHeight - 10;
+}
 
 function getTextareaContentWidth(textarea) {
     const computedStyle = window.getComputedStyle(textarea);
@@ -1071,6 +1139,43 @@ function scheduleTextboxHighlightScrollSync(textarea, highlightEl) {
         syncTextboxHighlightScroll(textarea, highlightEl);
         setTextboxHighlightScrolling(highlightEl, false);
     }, TEXTBOX_HIGHLIGHT_SCROLL_IDLE_DELAY_MS);
+}
+
+function syncTextboxModeExternalContent(content, { followTail = false } = {}) {
+    const textarea = document.getElementById('textbox-editor');
+    if (!textarea) return;
+
+    const highlightEl = document.getElementById('textbox-highlight');
+    const lineNumsEl = document.getElementById('textbox-line-nums');
+
+    textarea.value = content;
+
+    if (textboxUpdateLineNumbers) {
+        textboxUpdateLineNumbers(true);
+    }
+
+    cancelPendingTextboxHighlightUpdate();
+    renderHighlightedTextboxContent(highlightEl, content);
+
+    if (unifiedDiffEditor) {
+        cancelPendingUnifiedDiffUpdate();
+        setUnifiedDiffModifiedContent(content);
+    }
+
+    if (followTail) {
+        textarea.scrollTop = textarea.scrollHeight;
+    }
+
+    if (lineNumsEl) {
+        lineNumsEl.scrollTop = textarea.scrollTop;
+    }
+    syncTextboxHighlightScroll(textarea, highlightEl);
+
+    if (followTail && unifiedDiffEditor) {
+        unifiedDiffEditor.getModifiedEditor().revealLine(
+            unifiedDiffModifiedModel ? unifiedDiffModifiedModel.getLineCount() : textarea.value.split('\n').length
+        );
+    }
 }
 
 function cancelPendingUnifiedDiffUpdate() {
