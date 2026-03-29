@@ -332,6 +332,14 @@ def compute_run_tooling_status(language: str) -> tuple[dict[str, object], int]:
             "error": "Brainfuck execution requires a `bf` interpreter in PATH.",
         }, 200
 
+    if normalized == "magma":
+        if command_exists("magma"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "Magma execution requires a `magma` interpreter in PATH.",
+        }, 200
+
     return {"error": "Unsupported language"}, 400
 
 
@@ -1043,7 +1051,7 @@ def create_app() -> Flask:
             ".php": "php", ".swift": "swift", ".kt": "kotlin",
             ".nginx": "nginx", ".conf": "ini", ".ini": "ini",
             ".toml": "toml", ".env": "dotenv", ".txt": "plaintext",
-            ".bf": "brainfuck",
+            ".bf": "brainfuck", ".mag": "magma",
         }
         language = language_map.get(suffix)
 
@@ -1057,7 +1065,7 @@ def create_app() -> Flask:
                     "node": "javascript", "nodejs": "javascript",
                     "ruby": "ruby", "perl": "perl", "perl5": "perl", "php": "php",
                     "lua": "lua", "awk": "shell", "sed": "shell",
-                    "bf": "brainfuck",
+                    "bf": "brainfuck", "magma": "magma",
                 }
                 # Extract interpreter: handle both /usr/bin/env X and /usr/bin/X
                 parts = first_line[2:].strip().split()

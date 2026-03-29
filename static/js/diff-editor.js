@@ -157,7 +157,7 @@ async function initDiffEditor() {
 
         // Run button - show for runnable file types
         const runBtn = document.getElementById('btn-run');
-        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java', 'ruby', 'perl', 'rust', 'csharp', 'brainfuck'];
+        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java', 'ruby', 'perl', 'rust', 'csharp', 'brainfuck', 'magma'];
         if (runnableLanguages.includes(fileLanguage)) {
             runBtn.classList.remove('hidden');
             runBtn.addEventListener('click', runFile);
@@ -788,6 +788,10 @@ async function fetchRunToolingStatus(language) {
     return data;
 }
 
+function shellQuote(value) {
+    return `'${String(value).replace(/'/g, "'\"'\"'")}'`;
+}
+
 async function runFile() {
     const statusEl = document.getElementById('status');
     const runBtn = document.getElementById('btn-run');
@@ -802,6 +806,13 @@ async function runFile() {
     ).toString(16);
     const outPath = `/tmp/run_${basename}_${filePathId}`;
     const csharpProjectDir = `${outPath}_csproj`;
+    const outExePath = `${outPath}.exe`;
+    const quotedFilePath = shellQuote(FILE_PATH);
+    const quotedOutPath = shellQuote(outPath);
+    const quotedOutExePath = shellQuote(outExePath);
+    const quotedCsharpProjectDir = shellQuote(csharpProjectDir);
+    const quotedCsharpProjectFile = shellQuote(`${csharpProjectDir}/Runner.csproj`);
+    const quotedCsharpProgramPath = shellQuote(`${csharpProjectDir}/Program.cs`);
 
     let toolingStatus;
     try {
@@ -822,43 +833,43 @@ async function runFile() {
     let runCommand;
     switch (fileLanguage) {
         case 'python':
-            runCommand = `python3 ${FILE_PATH}`;
+            runCommand = `python3 ${quotedFilePath}`;
             break;
         case 'javascript':
-            runCommand = `node ${FILE_PATH}`;
+            runCommand = `node ${quotedFilePath}`;
             break;
         case 'shell':
-            runCommand = `bash ${FILE_PATH}`;
+            runCommand = `bash ${quotedFilePath}`;
             break;
         case 'go':
-            runCommand = `go run ${FILE_PATH}`;
+            runCommand = `go run ${quotedFilePath}`;
             break;
         case 'c':
-            runCommand = `gcc ${FILE_PATH} -o ${outPath} && ${outPath}`;
+            runCommand = `gcc ${quotedFilePath} -o ${quotedOutPath} && ${quotedOutPath}`;
             break;
         case 'cpp':
-            runCommand = `g++ ${FILE_PATH} -o ${outPath} && ${outPath}`;
+            runCommand = `g++ ${quotedFilePath} -o ${quotedOutPath} && ${quotedOutPath}`;
             break;
         case 'java':
             // Java 11+ single-file source execution
-            runCommand = `java ${FILE_PATH}`;
+            runCommand = `java ${quotedFilePath}`;
             break;
         case 'ruby':
-            runCommand = `ruby ${FILE_PATH}`;
+            runCommand = `ruby ${quotedFilePath}`;
             break;
         case 'perl':
-            runCommand = `perl ${FILE_PATH}`;
+            runCommand = `perl ${quotedFilePath}`;
             break;
         case 'rust':
-            runCommand = `rustc ${FILE_PATH} -o ${outPath} && ${outPath}`;
+            runCommand = `rustc ${quotedFilePath} -o ${quotedOutPath} && ${quotedOutPath}`;
             break;
         case 'csharp':
             if (toolingStatus.runner === 'dotnet') {
-                runCommand = `if [ ! -f ${csharpProjectDir}/Runner.csproj ]; then dotnet new console -n Runner -o ${csharpProjectDir} >/dev/null; fi && cp ${FILE_PATH} ${csharpProjectDir}/Program.cs && dotnet run --project ${csharpProjectDir}/Runner.csproj --no-restore`;
+                runCommand = `if [ ! -f ${quotedCsharpProjectFile} ]; then dotnet new console -n Runner -o ${quotedCsharpProjectDir} >/dev/null; fi && cp ${quotedFilePath} ${quotedCsharpProgramPath} && dotnet run --project ${quotedCsharpProjectFile} --no-restore`;
             } else if (toolingStatus.runner === 'csc') {
-                runCommand = `${toolingStatus.compiler} -nologo -out:${outPath}.exe ${FILE_PATH} && mono ${outPath}.exe`;
+                runCommand = `${toolingStatus.compiler} -nologo -out:${quotedOutExePath} ${quotedFilePath} && mono ${quotedOutExePath}`;
             } else if (toolingStatus.runner === 'mcs') {
-                runCommand = `mcs ${FILE_PATH} -out:${outPath}.exe && mono ${outPath}.exe`;
+                runCommand = `mcs ${quotedFilePath} -out:${quotedOutExePath} && mono ${quotedOutExePath}`;
             } else {
                 statusEl.textContent = 'No C# runner available';
                 statusEl.className = 'status error';
@@ -866,7 +877,10 @@ async function runFile() {
             }
             break;
         case 'brainfuck':
-            runCommand = `bf ${FILE_PATH}`;
+            runCommand = `bf ${quotedFilePath}`;
+            break;
+        case 'magma':
+            runCommand = `magma ${quotedFilePath}`;
             break;
         default:
             return;
