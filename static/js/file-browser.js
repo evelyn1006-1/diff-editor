@@ -7,6 +7,175 @@ let selectedPaths = new Set();
 let lastClickedIndex = -1;
 let selectMode = false;
 
+const ACTIVATABLE_DIRS = {
+    '/etc/systemd/system': 'Enable & start service',
+    '/etc/nginx/sites-available': 'Enable site & reload nginx',
+};
+
+const BATCH_SHORTCUTS = [
+    { label: 'Executables', dir: '/usr/local/bin' },
+    { label: 'systemd', dir: '/etc/systemd/system' },
+    { label: 'nginx', dir: '/etc/nginx/sites-available' },
+];
+
+function normalizeDirectoryPath(path) {
+    return path.trim().replace(/\/+/g, '/').replace(/\/\.$/, '').replace(/\/+$/, '') || '/';
+}
+
+function getFileShortcuts(name) {
+    return [
+        { label: 'Executables', dir: '/usr/local/bin', filename: name.replace(/\.[^.]+$/, '') },
+        { label: 'systemd', dir: '/etc/systemd/system', filename: name.endsWith('.service') ? name : `${name}.service` },
+        { label: 'nginx', dir: '/etc/nginx/sites-available', filename: name },
+    ];
+}
+
+function getActivationLabel(dir, { allowActivation = true } = {}) {
+    if (!allowActivation) {
+        return '';
+    }
+    return ACTIVATABLE_DIRS[normalizeDirectoryPath(dir)] || '';
+}
+
+function getSelectionItems(paths) {
+    return paths.map((path) => {
+        const itemEl = document.querySelector(`.file-item[data-path="${CSS.escape(path)}"]`);
+        return {
+            path,
+            name: itemEl?.dataset.name || path.split('/').pop(),
+            isDir: itemEl?.dataset.isDir === 'true',
+        };
+    });
+}
+
+function renderShortcutButtons(shortcuts) {
+    if (!shortcuts.length) {
+        return '';
+    }
+
+    return `<div class="copy-shortcuts">
+        ${shortcuts.map((s, i) => `<button class="btn-shortcut" data-idx="${i}">${escapeHtml(s.label)}</button>`).join('')}
+    </div>`;
+}
+
+function getSymlinkOptionHtml(isCopy) {
+    if (!isCopy) {
+        return '';
+    }
+
+    return '<label class="copy-option"><input type="checkbox" class="chk-symlink"> Symlink instead of copy</label>';
+}
+
+function createCopyModal({ titleHtml, summaryHtml = '', shortcuts = [], fieldsHtml, symlinkOptionHtml = '', actionLabel }) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-title copy-modal-title">${titleHtml}</div>
+            ${summaryHtml ? `<div class="modal-summary">${summaryHtml}</div>` : ''}
+            ${renderShortcutButtons(shortcuts)}
+            ${fieldsHtml}
+            <div class="copy-options">
+                ${symlinkOptionHtml}
+                <label class="copy-option"><input type="checkbox" class="chk-overwrite"> Replace if already exists</label>
+                <label class="copy-option"><input type="checkbox" class="chk-create-dirs"> Create directory if it doesn't exist</label>
+                <label class="copy-option copy-option-activate" style="display:none"><input type="checkbox" class="chk-activate"> <span class="activate-label"></span></label>
+            </div>
+            <div class="copy-error" style="display:none"></div>
+            <div class="modal-buttons">
+                <button class="btn-modal btn-modal-cancel">Cancel</button>
+                <button class="btn-modal btn-modal-copy">${actionLabel}</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+    return overlay;
+}
+
+function getCopyModalControls(overlay) {
+    return {
+        dirInput: overlay.querySelector('.copy-dir-input'),
+        errorEl: overlay.querySelector('.copy-error'),
+        actionBtn: overlay.querySelector('.btn-modal-copy'),
+        chkSymlink: overlay.querySelector('.chk-symlink'),
+        chkOverwrite: overlay.querySelector('.chk-overwrite'),
+        chkCreateDirs: overlay.querySelector('.chk-create-dirs'),
+        chkActivate: overlay.querySelector('.chk-activate'),
+        activateRow: overlay.querySelector('.copy-option-activate'),
+        activateLabel: overlay.querySelector('.activate-label'),
+    };
+}
+
+function createActivationVisibilityUpdater({ dirInput, activateRow, activateLabel, chkActivate, allowActivation }) {
+    return function updateActivateVisibility() {
+        const activationLabel = getActivationLabel(dirInput.value, { allowActivation });
+        if (activationLabel) {
+            activateLabel.textContent = activationLabel;
+            activateRow.style.display = '';
+        } else {
+            activateRow.style.display = 'none';
+            chkActivate.checked = false;
+        }
+    };
+}
+
+function hideModalError(errorEl) {
+    errorEl.style.display = 'none';
+}
+
+function showModalError(errorEl, content) {
+    if (Array.isArray(content)) {
+        errorEl.innerHTML = content.map(escapeHtml).join('<br>');
+    } else {
+        errorEl.textContent = content;
+    }
+    errorEl.style.display = 'block';
+}
+
+function bindShortcutButtons(overlay, shortcuts, onSelect) {
+    overlay.querySelectorAll('.btn-shortcut').forEach(btn => {
+        btn.addEventListener('click', () => onSelect(shortcuts[btn.dataset.idx]));
+    });
+}
+
+function buildOperationRequest({ mode, path, name, isDir, directory, overwrite, createDirs, activate, isSymlink }) {
+    const isCopy = mode === 'copy';
+    const body = {
+        path,
+        new_name: name,
+        directory,
+        overwrite,
+        create_dirs: createDirs,
+        activate,
+    };
+
+    if (isCopy) {
+        body.symlink = isSymlink;
+    }
+
+    return {
+        endpoint: isCopy ? (isDir ? 'api/dir/copy' : 'api/file/copy') : 'api/rename',
+        body,
+    };
+}
+
+async function postJson(endpoint, body) {
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': CSRF_TOKEN,
+        },
+        body: JSON.stringify(body),
+    });
+
+    return {
+        response,
+        data: await response.json(),
+    };
+}
+
 function initFileBrowser(defaultRoot) {
     currentPath = defaultRoot;
 
@@ -156,7 +325,11 @@ async function loadDirectory(path) {
         fileList.querySelectorAll('.btn-download').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                downloadFile(btn.dataset.path);
+                if (selectMode && selectedPaths.has(btn.dataset.path)) {
+                    batchDownload();
+                } else {
+                    downloadFile(btn.dataset.path);
+                }
             });
         });
 
@@ -176,7 +349,11 @@ async function loadDirectory(path) {
         fileList.querySelectorAll('.btn-rename').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                renameItem(btn.dataset.path, btn.dataset.name);
+                if (selectMode && selectedPaths.has(btn.dataset.path)) {
+                    showBatchFileModal({ paths: [...selectedPaths], mode: 'move' });
+                } else {
+                    renameItem(btn.dataset.path, btn.dataset.name);
+                }
             });
         });
 
@@ -184,7 +361,11 @@ async function loadDirectory(path) {
         fileList.querySelectorAll('.btn-download-dir').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                downloadDir(btn.dataset.path);
+                if (selectMode && selectedPaths.has(btn.dataset.path)) {
+                    batchDownload();
+                } else {
+                    downloadDir(btn.dataset.path);
+                }
             });
         });
 
@@ -204,7 +385,11 @@ async function loadDirectory(path) {
         fileList.querySelectorAll('.btn-copy-file').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                copyFile(btn.dataset.path, btn.dataset.name);
+                if (selectMode && selectedPaths.has(btn.dataset.path)) {
+                    showBatchFileModal({ paths: [...selectedPaths], mode: 'copy' });
+                } else {
+                    copyFile(btn.dataset.path, btn.dataset.name);
+                }
             });
         });
 
@@ -212,7 +397,11 @@ async function loadDirectory(path) {
         fileList.querySelectorAll('.btn-copy-dir').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                copyDir(btn.dataset.path, btn.dataset.name);
+                if (selectMode && selectedPaths.has(btn.dataset.path)) {
+                    showBatchFileModal({ paths: [...selectedPaths], mode: 'copy' });
+                } else {
+                    copyDir(btn.dataset.path, btn.dataset.name);
+                }
             });
         });
 
@@ -247,6 +436,7 @@ async function loadDirectory(path) {
 
 function createFileItem(item) {
     const icon = item.is_dir ? '<span class="icon folder">&#128193;</span>' : '<span class="icon">&#128196;</span>';
+    const renameLabel = 'Rename/move';
 
     let badges = '';
     if (!item.is_dir) {
@@ -269,23 +459,23 @@ function createFileItem(item) {
     if (item.is_dir) {
         actionButtons = `
             <button class="btn-action btn-copy-dir" title="Copy" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697;</button>
-            <button class="btn-action btn-rename" title="Rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998;</button>
+            <button class="btn-action btn-rename" title="${renameLabel}" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998;</button>
             <button class="btn-action btn-download-dir" title="Download as zip" data-path="${escapeHtml(item.path)}">&#11015;</button>
             <button class="btn-action btn-delete-dir" title="Delete directory" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005;</button>`;
         dropdownItems = `
             <button class="dropdown-item btn-copy-dir" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697; Copy</button>
-            <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; Rename</button>
+            <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; ${renameLabel}</button>
             <button class="dropdown-item btn-download-dir" data-path="${escapeHtml(item.path)}">&#11015; Download</button>
             <button class="dropdown-item btn-delete-dir" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005; Delete</button>`;
     } else {
         actionButtons = `
             <button class="btn-action btn-copy-file" title="Copy" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697;</button>
-            <button class="btn-action btn-rename" title="Rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998;</button>
+            <button class="btn-action btn-rename" title="${renameLabel}" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998;</button>
             <button class="btn-action btn-download" title="Download" data-path="${escapeHtml(item.path)}">&#11015;</button>
             <button class="btn-action btn-delete" title="Delete" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005;</button>`;
         dropdownItems = `
             <button class="dropdown-item btn-copy-file" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697; Copy</button>
-            <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; Rename</button>
+            <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; ${renameLabel}</button>
             <button class="dropdown-item btn-download" data-path="${escapeHtml(item.path)}">&#11015; Download</button>
             <button class="dropdown-item btn-delete" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005; Delete</button>`;
     }
@@ -475,6 +665,19 @@ function downloadFile(path) {
 function downloadDir(path) {
     const a = document.createElement('a');
     a.href = `api/dir/download?path=${encodeURIComponent(path)}`;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+}
+
+function batchDownload() {
+    const params = new URLSearchParams();
+    for (const p of selectedPaths) {
+        params.append('path', p);
+    }
+    const a = document.createElement('a');
+    a.href = `api/batch/download?${params}`;
     a.download = '';
     document.body.appendChild(a);
     a.click();
@@ -716,86 +919,49 @@ function showFileModal({ path, name, isDir, mode }) {
     const verbLower = isCopy ? 'copy' : 'move';
     const verbIng = isCopy ? 'Copying' : 'Renaming';
 
-    let endpoint;
-    if (isCopy) {
-        endpoint = isDir ? 'api/dir/copy' : 'api/file/copy';
-    } else {
-        endpoint = 'api/rename';
-    }
-
     const dotIdx = name.lastIndexOf('.');
     const defaultName = isCopy
         ? ((!isDir && dotIdx > 0) ? `${name.slice(0, dotIdx)} (2)${name.slice(dotIdx)}` : `${name} (2)`)
         : name;
 
-    const ACTIVATABLE_DIRS = {
-        '/etc/systemd/system': 'Enable & start service',
-        '/etc/nginx/sites-available': 'Enable site & reload nginx',
-    };
-
-    const shortcuts = [
-        { label: 'Executables', dir: '/usr/local/bin', filename: name.replace(/\.[^.]+$/, '') },
-        { label: 'systemd', dir: '/etc/systemd/system', filename: name.endsWith('.service') ? name : `${name}.service` },
-        { label: 'nginx', dir: '/etc/nginx/sites-available', filename: name },
-    ];
-
-    const symlinkOption = isCopy
-        ? '<label class="copy-option"><input type="checkbox" class="chk-symlink"> Symlink instead of copy</label>'
-        : '';
-
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-        <div class="modal-dialog">
-            <div class="modal-title copy-modal-title"><span class="modal-verb">${verb}</span> ${isDir ? 'directory' : 'file'}</div>
-            <div class="modal-summary"><span class="modal-verb-ing">${verbIng}</span> "${escapeHtml(name)}"</div>
-            ${isDir ? '' : `<div class="copy-shortcuts">
-                ${shortcuts.map((s, i) => `<button class="btn-shortcut" data-idx="${i}">${escapeHtml(s.label)}</button>`).join('')}
-            </div>`}
+    const shortcuts = isDir ? [] : getFileShortcuts(name);
+    const overlay = createCopyModal({
+        titleHtml: `<span class="modal-verb">${verb}</span> ${isDir ? 'directory' : 'file'}`,
+        summaryHtml: `<span class="modal-verb-ing">${verbIng}</span> "${escapeHtml(name)}"`,
+        shortcuts,
+        fieldsHtml: `
             <label class="copy-label">Destination</label>
             <input type="text" class="copy-input copy-dir-input" autocomplete="off">
             <label class="copy-label">Name</label>
             <input type="text" class="copy-input copy-name-input" autocomplete="off">
-            <div class="copy-options">
-                ${symlinkOption}
-                <label class="copy-option"><input type="checkbox" class="chk-overwrite"> Replace if already exists</label>
-                <label class="copy-option"><input type="checkbox" class="chk-create-dirs"> Create directory if it doesn't exist</label>
-                <label class="copy-option copy-option-activate" style="display:none"><input type="checkbox" class="chk-activate"> <span class="activate-label"></span></label>
-            </div>
-            <div class="copy-error" style="display:none"></div>
-            <div class="modal-buttons">
-                <button class="btn-modal btn-modal-cancel">Cancel</button>
-                <button class="btn-modal btn-modal-copy">${verb}</button>
-            </div>
-        </div>
-    `;
+        `,
+        symlinkOptionHtml: getSymlinkOptionHtml(isCopy),
+        actionLabel: verb,
+    });
 
-    document.body.appendChild(overlay);
-
-    const dirInput = overlay.querySelector('.copy-dir-input');
+    const {
+        dirInput,
+        errorEl,
+        actionBtn,
+        chkSymlink,
+        chkOverwrite,
+        chkCreateDirs,
+        chkActivate,
+        activateRow,
+        activateLabel,
+    } = getCopyModalControls(overlay);
     const nameInput = overlay.querySelector('.copy-name-input');
-    const errorEl = overlay.querySelector('.copy-error');
-    const actionBtn = overlay.querySelector('.btn-modal-copy');
-    const chkSymlink = overlay.querySelector('.chk-symlink');
-    const chkOverwrite = overlay.querySelector('.chk-overwrite');
-    const chkCreateDirs = overlay.querySelector('.chk-create-dirs');
-    const chkActivate = overlay.querySelector('.chk-activate');
-    const activateRow = overlay.querySelector('.copy-option-activate');
-    const activateLabel = overlay.querySelector('.activate-label');
 
     dirInput.value = currentPath;
     nameInput.value = defaultName;
 
-    function updateActivateVisibility() {
-        const dir = dirInput.value.trim().replace(/\/+$/, '');
-        if (!isDir && ACTIVATABLE_DIRS[dir]) {
-            activateLabel.textContent = ACTIVATABLE_DIRS[dir];
-            activateRow.style.display = '';
-        } else {
-            activateRow.style.display = 'none';
-            chkActivate.checked = false;
-        }
-    }
+    const updateActivateVisibility = createActivationVisibilityUpdater({
+        dirInput,
+        activateRow,
+        activateLabel,
+        chkActivate,
+        allowActivation: !isDir,
+    });
 
     const verbSpans = overlay.querySelectorAll('.modal-verb');
     const verbIngSpans = overlay.querySelectorAll('.modal-verb-ing');
@@ -819,30 +985,21 @@ function showFileModal({ path, name, isDir, mode }) {
         }
     }
 
-    // Shortcut buttons
-    overlay.querySelectorAll('.btn-shortcut').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const s = shortcuts[btn.dataset.idx];
-            dirInput.value = s.dir;
-            nameInput.value = s.filename;
-            updateActivateVisibility();
-            updateActionLabel();
-            nameInput.focus();
-        });
+    bindShortcutButtons(overlay, shortcuts, (shortcut) => {
+        dirInput.value = shortcut.dir;
+        nameInput.value = shortcut.filename;
+        updateActivateVisibility();
+        updateActionLabel();
+        nameInput.focus();
     });
 
     dirInput.addEventListener('input', () => {
-        errorEl.style.display = 'none';
+        hideModalError(errorEl);
         updateActivateVisibility();
         updateActionLabel();
     });
 
     if (chkSymlink) chkSymlink.addEventListener('change', updateActionLabel);
-
-    function showError(msg) {
-        errorEl.textContent = msg;
-        errorEl.style.display = 'block';
-    }
 
     let submitting = false;
 
@@ -854,13 +1011,13 @@ function showFileModal({ path, name, isDir, mode }) {
         if (submitting) return;
         const trimmedName = nameInput.value.trim();
         const trimmedDir = dirInput.value.trim();
-        errorEl.style.display = 'none';
+        hideModalError(errorEl);
 
-        if (!trimmedName) { showError('Name cannot be empty.'); return; }
-        if (!trimmedDir) { showError('Destination cannot be empty.'); return; }
-        const normDir = trimmedDir.replace(/\/+/g, '/').replace(/\/\.$/, '').replace(/\/+$/, '') || '/';
-        if (normDir === (currentPath.replace(/\/+$/, '') || '/') && trimmedName === name) {
-            showError(isCopy
+        if (!trimmedName) { showModalError(errorEl, 'Name cannot be empty.'); return; }
+        if (!trimmedDir) { showModalError(errorEl, 'Destination cannot be empty.'); return; }
+        const normDir = normalizeDirectoryPath(trimmedDir);
+        if (normDir === normalizeDirectoryPath(currentPath) && trimmedName === name) {
+            showModalError(errorEl, isCopy
                 ? `Cannot ${verbLower} ${isDir ? 'a directory' : 'a file'} onto itself.`
                 : 'Nothing to change.');
             return;
@@ -873,28 +1030,20 @@ function showFileModal({ path, name, isDir, mode }) {
         actionBtn.textContent = isSymlink ? 'Linking...' : `${currentVerbIng}...`;
 
         try {
-            const body = {
+            const { endpoint, body } = buildOperationRequest({
+                mode,
                 path,
-                new_name: trimmedName,
+                name: trimmedName,
+                isDir,
                 directory: trimmedDir,
                 overwrite: chkOverwrite.checked,
-                create_dirs: chkCreateDirs.checked,
+                createDirs: chkCreateDirs.checked,
                 activate: chkActivate.checked,
-            };
-            if (isCopy) body.symlink = isSymlink;
-
-            const response = await fetch(endpoint, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': CSRF_TOKEN,
-                },
-                body: JSON.stringify(body),
+                isSymlink,
             });
-
-            const data = await response.json();
+            const { response, data } = await postJson(endpoint, body);
             if (!response.ok) {
-                showError(data.error || `${verb} failed.`);
+                showModalError(errorEl, data.error || `${verb} failed.`);
                 submitting = false;
                 actionBtn.disabled = false;
                 updateActionLabel();
@@ -908,7 +1057,7 @@ function showFileModal({ path, name, isDir, mode }) {
             }
             loadDirectory(currentPath);
         } catch (err) {
-            showError(`Error: ${err.message}`);
+            showModalError(errorEl, `Error: ${err.message}`);
             submitting = false;
             actionBtn.disabled = false;
             updateActionLabel();
@@ -920,11 +1069,174 @@ function showFileModal({ path, name, isDir, mode }) {
     actionBtn.addEventListener('click', submit);
     nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     dirInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nameInput.focus(); } });
-    nameInput.addEventListener('input', () => { errorEl.style.display = 'none'; });
+    nameInput.addEventListener('input', () => { hideModalError(errorEl); });
 
     updateActivateVisibility();
     updateActionLabel();
     setTimeout(() => nameInput.focus(), 50);
+}
+
+function showBatchFileModal({ paths, mode }) {
+    const isCopy = mode === 'copy';
+    const verb = isCopy ? 'Copy' : 'Move';
+    const verbIng = isCopy ? 'Copying' : 'Moving';
+    const n = paths.length;
+    const items = getSelectionItems(paths);
+    const hasDirectories = items.some((item) => item.isDir);
+    const shortcuts = hasDirectories ? [] : BATCH_SHORTCUTS;
+
+    const names = items.map((item) => item.name);
+    const maxShow = 3;
+    const namePreview = names.slice(0, maxShow).join('\n')
+        + (names.length > maxShow ? `\n… (${n} total)` : `\n(${n} total)`);
+
+    const overlay = createCopyModal({
+        titleHtml: `${verb} ${n} item${n !== 1 ? 's' : ''}`,
+        shortcuts,
+        fieldsHtml: `
+            <label class="copy-label">Destination</label>
+            <input type="text" class="copy-input copy-dir-input" autocomplete="off">
+            <label class="copy-label">Names</label>
+            <textarea class="copy-input copy-names-batch" rows="${Math.min(n + 1, 5)}" disabled></textarea>
+        `,
+        symlinkOptionHtml: getSymlinkOptionHtml(isCopy),
+        actionLabel: verb,
+    });
+
+    const {
+        dirInput,
+        errorEl,
+        actionBtn,
+        chkSymlink,
+        chkOverwrite,
+        chkCreateDirs,
+        chkActivate,
+        activateRow,
+        activateLabel,
+    } = getCopyModalControls(overlay);
+    const namesTextarea = overlay.querySelector('.copy-names-batch');
+
+    dirInput.value = currentPath;
+    namesTextarea.value = namePreview;
+
+    const updateActivateVisibility = createActivationVisibilityUpdater({
+        dirInput,
+        activateRow,
+        activateLabel,
+        chkActivate,
+        allowActivation: !hasDirectories,
+    });
+
+    bindShortcutButtons(overlay, shortcuts, (shortcut) => {
+        dirInput.value = shortcut.dir;
+        updateActivateVisibility();
+        dirInput.focus();
+    });
+
+    dirInput.addEventListener('input', () => {
+        hideModalError(errorEl);
+        updateActivateVisibility();
+    });
+
+    if (chkSymlink) {
+        chkSymlink.addEventListener('change', () => {
+            actionBtn.textContent = chkSymlink.checked ? 'Symlink' : verb;
+        });
+    }
+
+    let submitting = false;
+
+    function close() {
+        if (!submitting) overlay.remove();
+    }
+
+    async function submit() {
+        if (submitting) return;
+        const trimmedDir = dirInput.value.trim();
+        hideModalError(errorEl);
+
+        if (!trimmedDir) { showModalError(errorEl, ['Destination cannot be empty.']); return; }
+
+        const isSymlink = chkSymlink && chkSymlink.checked;
+        submitting = true;
+        actionBtn.disabled = true;
+        actionBtn.textContent = isSymlink ? 'Linking...' : `${verbIng}...`;
+
+        const errors = [];
+        const activationErrors = [];
+        const activationMessages = [];
+        for (const item of items) {
+            const { path, name, isDir } = item;
+
+            const { endpoint, body } = buildOperationRequest({
+                mode,
+                path,
+                name,
+                isDir,
+                directory: trimmedDir,
+                overwrite: chkOverwrite.checked,
+                createDirs: chkCreateDirs.checked,
+                activate: !hasDirectories && chkActivate.checked,
+                isSymlink,
+            });
+
+            try {
+                const { response, data } = await postJson(endpoint, body);
+                if (!response.ok) {
+                    errors.push(`${name}: ${data.error}`);
+                    continue;
+                }
+
+                if (data.activate_message) {
+                    const message = `${name}: ${data.activate_message}`;
+                    if (data.activate_error) {
+                        activationErrors.push(message);
+                    } else {
+                        activationMessages.push(message);
+                    }
+                }
+            } catch (err) {
+                errors.push(`${name}: ${err.message}`);
+            }
+        }
+
+        submitting = false;
+
+        if (errors.length > 0) {
+            const lines = [`${errors.length} item${errors.length !== 1 ? 's' : ''} failed:`, ...errors];
+            if (activationErrors.length > 0) {
+                lines.push('', 'Activation issues:', ...activationErrors);
+            }
+            showModalError(errorEl, lines);
+            actionBtn.disabled = false;
+            actionBtn.textContent = isSymlink ? 'Symlink' : verb;
+            return;
+        }
+
+        close();
+        clearSelection();
+        exitSelectMode();
+        loadDirectory(currentPath);
+
+        if (activationErrors.length > 0 || activationMessages.length > 0) {
+            const notices = [];
+            if (activationErrors.length > 0) {
+                notices.push(`Activation issues:\n\n${activationErrors.join('\n\n')}`);
+            }
+            if (activationMessages.length > 0) {
+                notices.push(`Activation results:\n\n${activationMessages.join('\n\n')}`);
+            }
+            window.alert(notices.join('\n\n'));
+        }
+    }
+
+    overlay.querySelector('.btn-modal-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    actionBtn.addEventListener('click', submit);
+    dirInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+
+    updateActivateVisibility();
+    setTimeout(() => dirInput.focus(), 50);
 }
 
 // --- Select mode (mobile long-press) ---

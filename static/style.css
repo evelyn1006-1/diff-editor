@@ -505,6 +505,15 @@ main {
     position: relative;
 }
 
+/* Remove class="collapsed-actions" from .browser-container to restore the fully expanded view */
+.collapsed-actions .actions-dropdown-wrap {
+    display: block;
+}
+
+.collapsed-actions .file-actions > .btn-action:not(.btn-delete):not(.btn-delete-dir):not(.btn-actions-toggle) {
+    display: none;
+}
+
 .actions-dropdown {
     display: none;
     position: absolute;
@@ -668,6 +677,16 @@ main {
     font-size: 0.85rem;
     margin-bottom: 0.6rem;
     box-sizing: border-box;
+}
+
+textarea.copy-input {
+    resize: none;
+    line-height: 1.5;
+}
+
+textarea.copy-input:disabled {
+    opacity: 0.5;
+    cursor: default;
 }
 
 .copy-input:focus {

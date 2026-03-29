@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -1379,10 +1380,16 @@ def create_app() -> Flask:
             return True
         return False
 
-    def _activate_service(dest_dir: str, filename: str, activate: bool, *, old_filename: str | None = None) -> str | None:
+    def _activation_result(message: str | None = None, *, error: bool = False) -> dict[str, str | bool | None]:
+        return {
+            "message": message,
+            "error": error,
+        }
+
+    def _activate_service(dest_dir: str, filename: str, activate: bool, *, old_filename: str | None = None) -> dict[str, str | bool | None]:
         """Run activation commands for systemd or nginx after a copy/symlink/rename."""
         if not activate:
-            return None
+            return _activation_result()
 
         try:
             if dest_dir.rstrip("/") == "/etc/systemd/system":
@@ -1396,13 +1403,16 @@ def create_app() -> Flask:
                     stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
                 )
                 if result.returncode != 0:
-                    return f"Service activation failed: {result.stderr.decode('utf-8', errors='replace')}"
+                    return _activation_result(
+                        f"Service activation failed: {result.stderr.decode('utf-8', errors='replace')}",
+                        error=True,
+                    )
                 if old_filename and old_filename != filename:
                     subprocess.run(
                         ["sudo", "-n", "systemctl", "disable", "--now", old_filename],
                         stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
                     )
-                return f"Service {filename} enabled and started."
+                return _activation_result(f"Service {filename} enabled and started.")
 
             if dest_dir.rstrip("/") == "/etc/nginx/sites-available":
                 # Remove old dangling sites-enabled link before testing
@@ -1434,20 +1444,67 @@ def create_app() -> Flask:
                             ["sudo", "-n", "rm", "-f", str(enabled_link)],
                             stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
                         )
-                    return f"nginx config test failed: {test.stderr.decode('utf-8', errors='replace')}"
+                    return _activation_result(
+                        f"nginx config test failed: {test.stderr.decode('utf-8', errors='replace')}",
+                        error=True,
+                    )
                 reload = subprocess.run(
                     ["sudo", "-n", "systemctl", "reload", "nginx"],
                     stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
                 )
                 if reload.returncode == 0:
-                    return f"Site {filename} enabled and nginx reloaded."
-                return f"nginx reload failed: {reload.stderr.decode('utf-8', errors='replace')}"
+                    return _activation_result(f"Site {filename} enabled and nginx reloaded.")
+                return _activation_result(
+                    f"nginx reload failed: {reload.stderr.decode('utf-8', errors='replace')}",
+                    error=True,
+                )
         except subprocess.TimeoutExpired:
-            return "Activation timed out."
+            return _activation_result("Activation timed out.", error=True)
         except Exception as e:
-            return f"Activation error: {e}"
+            return _activation_result(f"Activation error: {e}", error=True)
 
-        return None
+        return _activation_result()
+
+    def _operation_success_payload(target: Path, activation: dict[str, str | bool | None]) -> dict[str, object]:
+        return {
+            "success": True,
+            "path": str(target),
+            "activate_message": activation["message"],
+            "activate_error": activation["error"],
+        }
+
+    def _cleanup_temp_path(path: Path | str | None, *, recursive: bool = False) -> None:
+        if not path:
+            return
+
+        temp_path = Path(path)
+
+        try:
+            if recursive:
+                shutil.rmtree(temp_path)
+            else:
+                temp_path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            pass
+
+        try:
+            cleanup = subprocess.run(
+                ["sudo", "-n", "rm", "-rf", str(temp_path)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=15,
+            )
+            if cleanup.returncode != 0:
+                app.logger.warning(
+                    "Failed to clean up temporary path %s: %s",
+                    temp_path,
+                    cleanup.stderr.decode("utf-8", errors="replace").strip(),
+                )
+        except Exception as e:
+            app.logger.warning("Failed to clean up temporary path %s: %s", temp_path, e)
 
     @app.post("/api/file/copy")
     def copy_file_route():
@@ -1529,9 +1586,9 @@ def create_app() -> Flask:
             make_executable(target)
 
         # Activate for systemd / nginx
-        act_msg = _activate_service(str(dest_dir), new_name, activate)
+        activation = _activate_service(str(dest_dir), new_name, activate)
 
-        return jsonify({"success": True, "path": str(target), "activate_message": act_msg})
+        return jsonify(_operation_success_payload(target, activation))
 
     @app.post("/api/dir/copy")
     def copy_directory_route():
@@ -1613,9 +1670,9 @@ def create_app() -> Flask:
             return jsonify({"error": message}), 500
 
         # Activate for systemd / nginx
-        act_msg = _activate_service(str(dest_dir), new_name, activate)
+        activation = _activate_service(str(dest_dir), new_name, activate)
 
-        return jsonify({"success": True, "path": str(target), "activate_message": act_msg})
+        return jsonify(_operation_success_payload(target, activation))
 
     @app.post("/api/rename")
     def rename_item():
@@ -1693,9 +1750,9 @@ def create_app() -> Flask:
             make_executable(target)
 
         # Activate for systemd / nginx
-        act_msg = _activate_service(str(dest_dir), new_name, activate, old_filename=path.name)
+        activation = _activate_service(str(dest_dir), new_name, activate, old_filename=path.name)
 
-        return jsonify({"success": True, "path": str(target), "activate_message": act_msg})
+        return jsonify(_operation_success_payload(target, activation))
 
     @app.get("/api/dir/preview")
     def preview_directory():
@@ -1791,10 +1848,70 @@ def create_app() -> Flask:
 
         @response.call_on_close
         def _cleanup():
-            try:
-                os.unlink(result)
-            except OSError:
-                pass
+            _cleanup_temp_path(result)
+
+        return response
+
+    @app.get("/api/batch/download")
+    def batch_download():
+        raw_paths = request.args.getlist("path")
+        if not raw_paths:
+            return jsonify({"error": "No paths specified"}), 400
+
+        paths = []
+        for raw in raw_paths:
+            p, err = resolve_request_path(raw)
+            if err:
+                return jsonify({"error": err}), 400
+            if not p.exists():
+                return jsonify({"error": f"Not found: {p.name}"}), 404
+            paths.append(p)
+
+        def _allocate_archive_name(source: Path, seen_names: dict[str, int]) -> str:
+            base = source.name or "item"
+            if base not in seen_names:
+                seen_names[base] = 1
+                return base
+
+            seen_names[base] += 1
+            n = seen_names[base]
+            return f"{source.stem} ({n}){source.suffix}" if not source.is_dir() else f"{base} ({n})"
+
+        staging_root = None
+        zip_path = None
+        try:
+            staging_root = Path(tempfile.mkdtemp(prefix="diff-editor-batch-"))
+            seen_names: dict[str, int] = {}
+
+            for p in paths:
+                target = staging_root / _allocate_archive_name(p, seen_names)
+                if p.is_dir():
+                    success, message = copy_directory(p, target)
+                else:
+                    success, message = copy_file(p, target)
+
+                if not success:
+                    return jsonify({"error": f"Failed to add {p.name} to archive: {message}"}), 500
+
+            success, result = zip_directory(staging_root)
+            if not success:
+                return jsonify({"error": result}), 500
+            zip_path = result
+        except OSError as e:
+            return jsonify({"error": str(e)}), 500
+        finally:
+            _cleanup_temp_path(staging_root, recursive=True)
+
+        response = send_file(
+            zip_path,
+            as_attachment=True,
+            download_name="selection.zip",
+            mimetype="application/zip",
+        )
+
+        @response.call_on_close
+        def _cleanup():
+            _cleanup_temp_path(zip_path)
 
         return response
 
