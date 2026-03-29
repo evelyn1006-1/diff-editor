@@ -1086,7 +1086,7 @@ function showBatchFileModal({ paths, mode }) {
     const shortcuts = hasDirectories ? [] : BATCH_SHORTCUTS;
 
     const names = items.map((item) => item.name);
-    const maxShow = 3;
+    const maxShow = 4;
     const namePreview = names.slice(0, maxShow).join('\n')
         + (names.length > maxShow ? `\n… (${n} total)` : `\n(${n} total)`);
 
@@ -1097,7 +1097,7 @@ function showBatchFileModal({ paths, mode }) {
             <label class="copy-label">Destination</label>
             <input type="text" class="copy-input copy-dir-input" autocomplete="off">
             <label class="copy-label">Names</label>
-            <textarea class="copy-input copy-names-batch" rows="${Math.min(n + 1, 5)}" disabled></textarea>
+            <textarea class="copy-input copy-names-batch" rows="${Math.min(n, maxShow) + 1}" disabled></textarea>
         `,
         symlinkOptionHtml: getSymlinkOptionHtml(isCopy),
         actionLabel: verb,

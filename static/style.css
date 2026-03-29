@@ -524,7 +524,7 @@ main {
     border-radius: 12px;
     padding: 0.3rem;
     z-index: 100;
-    min-width: 130px;
+    min-width: 145px;
     backdrop-filter: blur(8px);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
     flex-direction: column;
