@@ -88,6 +88,185 @@ def is_likely_binary(data: bytes) -> bool:
     return (control_count / len(data)) > 0.30
 
 
+IMAGE_EXIF_ORIENTATION_LABELS = {
+    1: "Normal",
+    2: "Mirrored horizontally",
+    3: "Rotated 180 deg",
+    4: "Mirrored vertically",
+    5: "Mirrored horizontally, rotated 90 deg CW",
+    6: "Rotated 90 deg CW",
+    7: "Mirrored horizontally, rotated 90 deg CCW",
+    8: "Rotated 90 deg CCW",
+}
+
+
+def parse_optional_float(value: object) -> float | None:
+    """Parse a numeric value, returning None for empty or invalid inputs."""
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_optional_int(value: object) -> int | None:
+    """Parse an integer-like value, returning None for empty or invalid inputs."""
+    parsed = parse_optional_float(value)
+    if parsed is None:
+        return None
+    try:
+        return int(parsed)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def parse_ffprobe_rate(value: object) -> float | None:
+    """Parse ffprobe rate values like 30000/1001 or 24."""
+    if value in (None, "", "N/A", "0/0"):
+        return None
+    if isinstance(value, str) and "/" in value:
+        num, den = value.split("/", 1)
+        numerator = parse_optional_float(num)
+        denominator = parse_optional_float(den)
+        if numerator is None or denominator in (None, 0):
+            return None
+        return numerator / denominator
+    return parse_optional_float(value)
+
+
+def parse_pdf_version(data: bytes | None) -> str | None:
+    """Extract a PDF version like 1.7 from the file header."""
+    if not data:
+        return None
+    match = re.search(rb"%PDF-(\d+(?:\.\d+)?)", data[:32])
+    if not match:
+        return None
+    return match.group(1).decode("ascii", errors="ignore")
+
+
+def normalize_metadata_text(value: object) -> str | None:
+    """Return a JSON-safe metadata string, dropping empty values."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    text = text.strip()
+    return text or None
+
+
+def get_image_orientation_label(img) -> str | None:
+    """Return a human-readable EXIF orientation label when available."""
+    try:
+        exif = img.getexif()
+    except Exception:
+        return None
+    if not exif:
+        return None
+    return IMAGE_EXIF_ORIENTATION_LABELS.get(exif.get(274))
+
+
+def build_image_info(img) -> dict:
+    """Collect compact, high-value metadata from a Pillow image object."""
+    try:
+        bands = tuple(img.getbands() or ())
+    except Exception:
+        bands = ()
+
+    return {
+        "width": img.width,
+        "height": img.height,
+        "mode": img.mode,
+        "format": img.format,
+        "has_alpha": ("A" in bands) or ("transparency" in getattr(img, "info", {})),
+        "orientation": get_image_orientation_label(img),
+        "frame_count": max(1, int(getattr(img, "n_frames", 1) or 1)),
+    }
+
+
+def build_pdf_info(reader, head: bytes | None) -> dict:
+    """Collect compact PDF metadata from a pypdf reader."""
+    pdf_info: dict = {
+        "encrypted": bool(reader.is_encrypted),
+        "version": parse_pdf_version(head),
+        "title": None,
+        "author": None,
+        "page_width_pt": None,
+        "page_height_pt": None,
+    }
+
+    try:
+        metadata = reader.metadata or {}
+        if metadata:
+            title = getattr(metadata, "title", None)
+            author = getattr(metadata, "author", None)
+            if title is None and hasattr(metadata, "get"):
+                title = metadata.get("/Title")
+            if author is None and hasattr(metadata, "get"):
+                author = metadata.get("/Author")
+            pdf_info["title"] = normalize_metadata_text(title)
+            pdf_info["author"] = normalize_metadata_text(author)
+    except Exception:
+        pass
+
+    if pdf_info["encrypted"]:
+        return pdf_info
+
+    try:
+        if reader.pages:
+            first_page = reader.pages[0]
+            pdf_info["page_width_pt"] = parse_optional_float(first_page.mediabox.width)
+            pdf_info["page_height_pt"] = parse_optional_float(first_page.mediabox.height)
+    except Exception:
+        pass
+
+    return pdf_info
+
+
+def build_media_info(ffprobe_data: dict) -> dict:
+    """Collect compact media metadata from ffprobe output."""
+    streams = ffprobe_data.get("streams", [])
+    format_info = ffprobe_data.get("format", {})
+    video_streams = [
+        stream
+        for stream in streams
+        if stream.get("codec_type") == "video"
+        and (stream.get("disposition") or {}).get("attached_pic") not in (1, "1", True)
+    ]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+
+    video_stream = video_streams[0] if video_streams else None
+    audio_stream = audio_streams[0] if audio_streams else None
+
+    bit_rate = (
+        parse_optional_int(format_info.get("bit_rate"))
+        or parse_optional_int(video_stream.get("bit_rate") if video_stream else None)
+        or parse_optional_int(audio_stream.get("bit_rate") if audio_stream else None)
+    )
+
+    return {
+        "is_audio_only": video_stream is None and audio_stream is not None,
+        "width": parse_optional_int(video_stream.get("width") if video_stream else None),
+        "height": parse_optional_int(video_stream.get("height") if video_stream else None),
+        "duration": parse_optional_float(format_info.get("duration")),
+        "video_codec": video_stream.get("codec_name") if video_stream else None,
+        "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
+        "container": format_info.get("format_long_name") or format_info.get("format_name"),
+        "bit_rate": bit_rate,
+        "frame_rate": parse_ffprobe_rate(
+            video_stream.get("avg_frame_rate") if video_stream else None
+        ) or parse_ffprobe_rate(video_stream.get("r_frame_rate") if video_stream else None),
+        "sample_rate": parse_optional_int(audio_stream.get("sample_rate") if audio_stream else None),
+        "channels": parse_optional_int(audio_stream.get("channels") if audio_stream else None),
+        "channel_layout": audio_stream.get("channel_layout") if audio_stream else None,
+        "audio_tracks": len(audio_streams),
+        "subtitle_tracks": len(subtitle_streams),
+    }
+
+
 def bytes_to_hex_view(data: bytes, bytes_per_line: int = 16) -> str:
     """Render bytes as a readable hex dump grouped by bytes."""
     if not data:
@@ -1948,6 +2127,8 @@ def create_app() -> Flask:
             "line_count": None,
             "image_info": None,
             "pdf_pages": None,
+            "pdf_info": None,
+            "media_info": None,
             "video_info": None,
             "size_recursive": None,
             "size_recursive_human": None,
@@ -1981,26 +2162,38 @@ def create_app() -> Flask:
                     from PIL import Image
                     if os.access(path, os.R_OK):
                         with Image.open(path) as img:
-                            result["image_info"] = {"width": img.width, "height": img.height, "mode": img.mode}
+                            result["image_info"] = build_image_info(img)
                     else:
                         ok, data = read_file_bytes(path)
                         if ok:
                             with Image.open(io.BytesIO(data)) as img:
-                                result["image_info"] = {"width": img.width, "height": img.height, "mode": img.mode}
+                                result["image_info"] = build_image_info(img)
                 except Exception:
                     pass
 
-            # PDF page count (pypdf reads from path)
+            # PDF metadata (pypdf reads from path)
             elif mime_type == "application/pdf":
                 try:
                     import pypdf
                     if os.access(path, os.R_OK):
                         with open(path, "rb") as f:
-                            result["pdf_pages"] = len(pypdf.PdfReader(f).pages)
+                            reader = pypdf.PdfReader(f)
+                            result["pdf_info"] = build_pdf_info(
+                                reader,
+                                head if isinstance(head, bytes) else None,
+                            )
+                            if not reader.is_encrypted:
+                                result["pdf_pages"] = len(reader.pages)
                     else:
                         ok, data = read_file_bytes(path)
                         if ok:
-                            result["pdf_pages"] = len(pypdf.PdfReader(io.BytesIO(data)).pages)
+                            reader = pypdf.PdfReader(io.BytesIO(data))
+                            result["pdf_info"] = build_pdf_info(
+                                reader,
+                                head if isinstance(head, bytes) else data[:32],
+                            )
+                            if not reader.is_encrypted:
+                                result["pdf_pages"] = len(reader.pages)
                 except Exception:
                     pass
 
@@ -2014,16 +2207,9 @@ def create_app() -> Flask:
                     )
                     if proc.returncode == 0:
                         ff = json.loads(proc.stdout)
-                        vs = next((st for st in ff.get("streams", []) if st.get("codec_type") == "video"), None)
-                        au = next((st for st in ff.get("streams", []) if st.get("codec_type") == "audio"), None)
-                        dur = ff.get("format", {}).get("duration")
-                        result["video_info"] = {
-                            "width": vs.get("width") if vs else None,
-                            "height": vs.get("height") if vs else None,
-                            "duration": float(dur) if dur else None,
-                            "video_codec": vs.get("codec_name") if vs else None,
-                            "audio_codec": au.get("codec_name") if au else None,
-                        }
+                        media_info = build_media_info(ff)
+                        result["media_info"] = media_info
+                        result["video_info"] = media_info
                 except Exception:
                     pass
 

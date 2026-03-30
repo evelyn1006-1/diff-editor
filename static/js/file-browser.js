@@ -1250,6 +1250,69 @@ function showBatchFileModal({ paths, mode }) {
     setTimeout(() => dirInput.focus(), 50);
 }
 
+function appendInfoRow(tbody, label, valueHtml) {
+    tbody.insertAdjacentHTML('beforeend', `
+        <tr><td class="info-label">${escapeHtml(label)}</td><td class="info-value">${valueHtml}</td></tr>
+    `);
+}
+
+function formatDuration(seconds) {
+    if (seconds == null || !Number.isFinite(seconds)) return null;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const sec = Math.floor(seconds % 60);
+    return h > 0
+        ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+        : `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function formatBitrate(bitRate) {
+    if (bitRate == null || !Number.isFinite(bitRate)) return null;
+    if (bitRate >= 1_000_000_000) {
+        return `${(bitRate / 1_000_000_000).toLocaleString(undefined, { maximumFractionDigits: 2 })} Gbps`;
+    }
+    if (bitRate >= 1_000_000) {
+        return `${(bitRate / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 2 })} Mbps`;
+    }
+    if (bitRate >= 1_000) {
+        return `${(bitRate / 1_000).toLocaleString(undefined, { maximumFractionDigits: 1 })} kbps`;
+    }
+    return `${bitRate.toLocaleString()} bps`;
+}
+
+function formatSampleRate(sampleRate) {
+    if (sampleRate == null || !Number.isFinite(sampleRate)) return null;
+    if (sampleRate >= 1000) {
+        return `${(sampleRate / 1000).toLocaleString(undefined, { maximumFractionDigits: 2 })} kHz`;
+    }
+    return `${sampleRate.toLocaleString()} Hz`;
+}
+
+function formatFrameRate(frameRate) {
+    if (frameRate == null || !Number.isFinite(frameRate)) return null;
+    return `${frameRate.toLocaleString(undefined, { maximumFractionDigits: 2 })} fps`;
+}
+
+function formatChannels(channels, layout) {
+    if (layout && channels != null) {
+        return `<span class="info-mono">${escapeHtml(layout)}</span> <span class="info-secondary">(${channels} ch)</span>`;
+    }
+    if (layout) {
+        return `<span class="info-mono">${escapeHtml(layout)}</span>`;
+    }
+    if (channels != null) {
+        return `${channels.toLocaleString()} ch`;
+    }
+    return null;
+}
+
+function formatPdfPageSize(widthPt, heightPt) {
+    if (widthPt == null || heightPt == null) return null;
+    const widthIn = widthPt / 72;
+    const heightIn = heightPt / 72;
+    return `${widthIn.toLocaleString(undefined, { maximumFractionDigits: 2 })} x ${heightIn.toLocaleString(undefined, { maximumFractionDigits: 2 })} in`;
+}
+
 async function showInfoModal(path) {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -1364,47 +1427,84 @@ async function showInfoModal(path) {
 
         // File extended details
         if (ext.line_count != null) {
-            tbody.insertAdjacentHTML('beforeend', `
-                <tr><td class="info-label">${escapeHtml('Lines')}</td><td class="info-value">${ext.line_count.toLocaleString()}</td></tr>
-            `);
+            appendInfoRow(tbody, 'Lines', ext.line_count.toLocaleString());
         }
 
         if (ext.image_info) {
-            tbody.insertAdjacentHTML('beforeend', `
-                <tr><td class="info-label">Resolution</td><td class="info-value">${ext.image_info.width} × ${ext.image_info.height}</td></tr>
-                <tr><td class="info-label">Mode</td><td class="info-value"><span class="info-mono">${escapeHtml(ext.image_info.mode)}</span></td></tr>
-            `);
+            if (ext.image_info.format) {
+                appendInfoRow(tbody, 'Format', `<span class="info-mono">${escapeHtml(ext.image_info.format)}</span>`);
+            }
+            appendInfoRow(tbody, 'Resolution', `${ext.image_info.width} x ${ext.image_info.height}`);
+            appendInfoRow(tbody, 'Mode', `<span class="info-mono">${escapeHtml(ext.image_info.mode)}</span>`);
+            appendInfoRow(tbody, 'Transparency', ext.image_info.has_alpha ? 'Yes' : 'No');
+            if (ext.image_info.orientation) {
+                appendInfoRow(tbody, 'Orientation', escapeHtml(ext.image_info.orientation));
+            }
+            if (ext.image_info.frame_count > 1) {
+                appendInfoRow(tbody, 'Frames', ext.image_info.frame_count.toLocaleString());
+            }
         }
 
-        if (ext.pdf_pages != null) {
-            tbody.insertAdjacentHTML('beforeend', `
-                <tr><td class="info-label">Pages</td><td class="info-value">${ext.pdf_pages.toLocaleString()}</td></tr>
-            `);
+        const pdfInfo = ext.pdf_info;
+        if (pdfInfo) {
+            appendInfoRow(tbody, 'Encrypted', pdfInfo.encrypted ? 'Yes' : 'No');
+            if (pdfInfo.version) {
+                appendInfoRow(tbody, 'Version', `<span class="info-mono">PDF ${escapeHtml(pdfInfo.version)}</span>`);
+            }
+            if (ext.pdf_pages != null) {
+                appendInfoRow(tbody, 'Pages', ext.pdf_pages.toLocaleString());
+            }
+            const pageSize = formatPdfPageSize(pdfInfo.page_width_pt, pdfInfo.page_height_pt);
+            if (pageSize) {
+                appendInfoRow(tbody, 'First page', pageSize);
+            }
+            if (pdfInfo.title) {
+                appendInfoRow(tbody, 'Title', escapeHtml(pdfInfo.title));
+            }
+            if (pdfInfo.author) {
+                appendInfoRow(tbody, 'Author', escapeHtml(pdfInfo.author));
+            }
+        } else if (ext.pdf_pages != null) {
+            appendInfoRow(tbody, 'Pages', ext.pdf_pages.toLocaleString());
         }
 
-        if (ext.video_info) {
-            const vi = ext.video_info;
-            if (vi.width && vi.height) {
-                tbody.insertAdjacentHTML('beforeend', `
-                    <tr><td class="info-label">Resolution</td><td class="info-value">${vi.width} × ${vi.height}</td></tr>
-                `);
+        const mediaInfo = ext.media_info || ext.video_info;
+        if (mediaInfo) {
+            if (mediaInfo.container) {
+                appendInfoRow(tbody, 'Container', `<span class="info-mono">${escapeHtml(mediaInfo.container)}</span>`);
             }
-            if (vi.duration != null) {
-                const h = Math.floor(vi.duration / 3600);
-                const m = Math.floor((vi.duration % 3600) / 60);
-                const sec = Math.floor(vi.duration % 60);
-                const durStr = h > 0
-                    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
-                    : `${m}:${String(sec).padStart(2, '0')}`;
-                tbody.insertAdjacentHTML('beforeend', `
-                    <tr><td class="info-label">Duration</td><td class="info-value">${durStr}</td></tr>
-                `);
+            const bitrate = formatBitrate(mediaInfo.bit_rate);
+            if (bitrate) {
+                appendInfoRow(tbody, 'Bitrate', bitrate);
             }
-            const codecs = [vi.video_codec, vi.audio_codec].filter(Boolean).map(escapeHtml);
+            if (mediaInfo.width && mediaInfo.height) {
+                appendInfoRow(tbody, 'Resolution', `${mediaInfo.width} x ${mediaInfo.height}`);
+            }
+            const frameRate = formatFrameRate(mediaInfo.frame_rate);
+            if (frameRate) {
+                appendInfoRow(tbody, 'Frame rate', frameRate);
+            }
+            const duration = formatDuration(mediaInfo.duration);
+            if (duration) {
+                appendInfoRow(tbody, 'Duration', duration);
+            }
+            const codecs = [mediaInfo.video_codec, mediaInfo.audio_codec].filter(Boolean).map(escapeHtml);
             if (codecs.length > 0) {
-                tbody.insertAdjacentHTML('beforeend', `
-                    <tr><td class="info-label">Codec</td><td class="info-value"><span class="info-mono">${codecs.join(' / ')}</span></td></tr>
-                `);
+                appendInfoRow(tbody, 'Codec', `<span class="info-mono">${codecs.join(' / ')}</span>`);
+            }
+            const sampleRate = formatSampleRate(mediaInfo.sample_rate);
+            if (sampleRate) {
+                appendInfoRow(tbody, 'Sample rate', sampleRate);
+            }
+            const channels = formatChannels(mediaInfo.channels, mediaInfo.channel_layout);
+            if (channels) {
+                appendInfoRow(tbody, 'Channels', channels);
+            }
+            if (!mediaInfo.is_audio_only && mediaInfo.audio_tracks > 0) {
+                appendInfoRow(tbody, 'Audio tracks', mediaInfo.audio_tracks.toLocaleString());
+            }
+            if (!mediaInfo.is_audio_only && mediaInfo.subtitle_tracks > 0) {
+                appendInfoRow(tbody, 'Subtitle tracks', mediaInfo.subtitle_tracks.toLocaleString());
             }
         }
 
