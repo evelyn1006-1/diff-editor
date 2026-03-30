@@ -405,6 +405,13 @@ async function loadDirectory(path) {
             });
         });
 
+        fileList.querySelectorAll('.btn-info').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showInfoModal(btn.dataset.path);
+            });
+        });
+
         // Close mobile dropdown when any action inside it is tapped
         fileList.querySelectorAll('.actions-dropdown').forEach(dd => {
             dd.addEventListener('click', (e) => e.stopPropagation());
@@ -458,22 +465,26 @@ function createFileItem(item) {
     let actionButtons, dropdownItems;
     if (item.is_dir) {
         actionButtons = `
+            <button class="btn-action btn-info" title="Info" data-path="${escapeHtml(item.path)}">&#9432;</button>
             <button class="btn-action btn-copy-dir" title="Copy" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697;</button>
             <button class="btn-action btn-rename" title="${renameLabel}" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998;</button>
             <button class="btn-action btn-download-dir" title="Download as zip" data-path="${escapeHtml(item.path)}">&#11015;</button>
             <button class="btn-action btn-delete-dir" title="Delete directory" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005;</button>`;
         dropdownItems = `
+            <button class="dropdown-item btn-info" data-path="${escapeHtml(item.path)}">&#9432; Info</button>
             <button class="dropdown-item btn-copy-dir" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697; Copy</button>
             <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; ${renameLabel}</button>
             <button class="dropdown-item btn-download-dir" data-path="${escapeHtml(item.path)}">&#11015; Download</button>
             <button class="dropdown-item btn-delete-dir" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005; Delete</button>`;
     } else {
         actionButtons = `
+            <button class="btn-action btn-info" title="Info" data-path="${escapeHtml(item.path)}">&#9432;</button>
             <button class="btn-action btn-copy-file" title="Copy" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697;</button>
             <button class="btn-action btn-rename" title="${renameLabel}" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998;</button>
             <button class="btn-action btn-download" title="Download" data-path="${escapeHtml(item.path)}">&#11015;</button>
             <button class="btn-action btn-delete" title="Delete" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005;</button>`;
         dropdownItems = `
+            <button class="dropdown-item btn-info" data-path="${escapeHtml(item.path)}">&#9432; Info</button>
             <button class="dropdown-item btn-copy-file" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697; Copy</button>
             <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; ${renameLabel}</button>
             <button class="dropdown-item btn-download" data-path="${escapeHtml(item.path)}">&#11015; Download</button>
@@ -1237,6 +1248,178 @@ function showBatchFileModal({ paths, mode }) {
 
     updateActivateVisibility();
     setTimeout(() => dirInput.focus(), 50);
+}
+
+async function showInfoModal(path) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-title info-modal-title">&#9432; Info</div>
+            <div class="info-loading">Loading…</div>
+            <div class="modal-buttons">
+                <button class="btn-modal btn-modal-cancel">Close</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const dialog = overlay.querySelector('.modal-dialog');
+
+    function close() { overlay.remove(); }
+    function bindClose() {
+        overlay.querySelector('.btn-modal-cancel')?.addEventListener('click', close);
+    }
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    bindClose();
+
+    // Phase 1: fetch basic stat info (fast)
+    let data;
+    try {
+        const response = await fetch(`api/file/info?path=${encodeURIComponent(path)}`);
+        data = await response.json();
+        if (!response.ok) {
+            overlay.querySelector('.info-loading').textContent = data.error || 'Failed to load info';
+            return;
+        }
+    } catch (err) {
+        overlay.querySelector('.info-loading').textContent = `Error: ${err.message}`;
+        return;
+    }
+
+    // Build basic rows
+    const rows = [];
+
+    rows.push(['Path', `<span class="info-mono">${escapeHtml(data.path)}</span>`]);
+
+    if (data.is_symlink) {
+        rows.push(['Symlink →', `<span class="info-mono">${escapeHtml(data.symlink_target)}</span>`]);
+    }
+
+    if (data.is_dir) {
+        rows.push(['Size', '<span class="info-placeholder">calculating…</span>', 'info-size-value']);
+    } else {
+        rows.push(['Size', `${escapeHtml(data.size_human)} <span class="info-secondary">(${data.size.toLocaleString()} B)</span>`]);
+    }
+
+    if (data.mime_type) {
+        rows.push(['Type', `<span class="info-mono">${escapeHtml(data.mime_type)}</span>`]);
+    }
+
+    rows.push([
+        'Permissions',
+        `<span class="info-mono">${escapeHtml(data.permissions)}</span> <span class="info-secondary">${escapeHtml(data.permissions_octal)}</span>`,
+    ]);
+    rows.push(['Owner', `${escapeHtml(data.owner)} <span class="info-secondary">:</span> ${escapeHtml(data.group)}`]);
+    rows.push(['Modified', escapeHtml(data.modified)]);
+
+    // Render modal with basic info + loading placeholder for extended
+    dialog.innerHTML = `
+        <div class="modal-title info-modal-title">&#9432; ${escapeHtml(data.name)}</div>
+        <div class="info-table-wrap">
+            <table class="info-table">
+                <tbody id="info-tbody">
+                    ${rows.map(([label, value, id]) => `
+                        <tr>
+                            <td class="info-label">${escapeHtml(label)}</td>
+                            <td class="info-value"${id ? ` id="${id}"` : ''}>${value}</td>
+                        </tr>
+                    `).join('')}
+                    <tr class="info-extended-row">
+                        <td colspan="2" class="info-loading">Loading details…</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="modal-buttons">
+            <button class="btn-modal btn-modal-cancel">Close</button>
+        </div>
+    `;
+    bindClose();
+
+    // Phase 2: fetch extended info (may be slow)
+    try {
+        const response = await fetch(`api/file/info/extended?path=${encodeURIComponent(path)}`);
+        const ext = await response.json();
+
+        const placeholder = dialog.querySelector('.info-extended-row');
+        if (placeholder) placeholder.remove();
+
+        const tbody = dialog.querySelector('#info-tbody');
+
+        if (!response.ok) {
+            tbody.insertAdjacentHTML('beforeend', `
+                <tr><td colspan="2" class="info-loading" style="color: var(--error)">${escapeHtml(ext.error || 'Failed to load details')}</td></tr>
+            `);
+            return;
+        }
+
+        // Update dir size
+        if (data.is_dir && ext.size_recursive != null) {
+            const sizeCell = dialog.querySelector('#info-size-value');
+            if (sizeCell) {
+                sizeCell.innerHTML = `${escapeHtml(ext.size_recursive_human)} <span class="info-secondary">· ${ext.file_count.toLocaleString()} file${ext.file_count !== 1 ? 's' : ''}, ${ext.dir_count.toLocaleString()} dir${ext.dir_count !== 1 ? 's' : ''}</span>`;
+            }
+        }
+
+        // File extended details
+        if (ext.line_count != null) {
+            tbody.insertAdjacentHTML('beforeend', `
+                <tr><td class="info-label">${escapeHtml('Lines')}</td><td class="info-value">${ext.line_count.toLocaleString()}</td></tr>
+            `);
+        }
+
+        if (ext.image_info) {
+            tbody.insertAdjacentHTML('beforeend', `
+                <tr><td class="info-label">Resolution</td><td class="info-value">${ext.image_info.width} × ${ext.image_info.height}</td></tr>
+                <tr><td class="info-label">Mode</td><td class="info-value"><span class="info-mono">${escapeHtml(ext.image_info.mode)}</span></td></tr>
+            `);
+        }
+
+        if (ext.pdf_pages != null) {
+            tbody.insertAdjacentHTML('beforeend', `
+                <tr><td class="info-label">Pages</td><td class="info-value">${ext.pdf_pages.toLocaleString()}</td></tr>
+            `);
+        }
+
+        if (ext.video_info) {
+            const vi = ext.video_info;
+            if (vi.width && vi.height) {
+                tbody.insertAdjacentHTML('beforeend', `
+                    <tr><td class="info-label">Resolution</td><td class="info-value">${vi.width} × ${vi.height}</td></tr>
+                `);
+            }
+            if (vi.duration != null) {
+                const h = Math.floor(vi.duration / 3600);
+                const m = Math.floor((vi.duration % 3600) / 60);
+                const sec = Math.floor(vi.duration % 60);
+                const durStr = h > 0
+                    ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+                    : `${m}:${String(sec).padStart(2, '0')}`;
+                tbody.insertAdjacentHTML('beforeend', `
+                    <tr><td class="info-label">Duration</td><td class="info-value">${durStr}</td></tr>
+                `);
+            }
+            const codecs = [vi.video_codec, vi.audio_codec].filter(Boolean).map(escapeHtml);
+            if (codecs.length > 0) {
+                tbody.insertAdjacentHTML('beforeend', `
+                    <tr><td class="info-label">Codec</td><td class="info-value"><span class="info-mono">${codecs.join(' / ')}</span></td></tr>
+                `);
+            }
+        }
+
+        // Show error from extended endpoint (e.g. dir traversal failure)
+        if (ext.error) {
+            tbody.insertAdjacentHTML('beforeend', `
+                <tr><td colspan="2" class="info-loading" style="color: var(--error)">${escapeHtml(ext.error)}</td></tr>
+            `);
+        }
+    } catch (err) {
+        const placeholder = dialog.querySelector('.info-extended-row');
+        if (placeholder) {
+            placeholder.innerHTML = `<td colspan="2" class="info-loading" style="color: var(--error)">Failed to load details</td>`;
+        }
+    }
 }
 
 // --- Select mode (mobile long-press) ---

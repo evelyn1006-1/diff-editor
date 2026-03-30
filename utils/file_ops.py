@@ -541,3 +541,227 @@ def zip_directory(path: Path) -> tuple[bool, str]:
         return False, "Zip operation timed out"
     except Exception as e:
         return False, str(e)
+
+
+def human_size(n: int) -> str:
+    """Format a byte count as a human-readable string."""
+    if n < 1024:
+        return f"{n} B"
+    f = float(n)
+    for unit in ["KB", "MB", "GB", "TB"]:
+        f /= 1024
+        if f < 1024 or unit == "TB":
+            return f"{f:.1f} {unit}"
+    return f"{f:.1f} TB"
+
+
+def stat_path(path: Path) -> tuple[bool, dict | str]:
+    """
+    Stat a path without following symlinks. Uses sudo stat as fallback.
+    Returns (success, stat_dict_or_error).
+    """
+    import grp
+    import pwd
+    from stat import S_ISDIR, S_ISLNK, filemode
+
+    path = Path(os.path.abspath(path))
+
+    def _resolve_symlink() -> str | None:
+        try:
+            return os.readlink(path)
+        except OSError:
+            pass
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", "readlink", str(path)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
+            )
+            if r.returncode == 0:
+                return r.stdout.decode("utf-8", errors="replace").strip()
+        except Exception:
+            pass
+        return None
+
+    def _build(mode: int, size: int, mtime: float, owner: str, group: str) -> dict:
+        is_link = S_ISLNK(mode)
+        return {
+            "size": size,
+            "size_human": human_size(size),
+            "permissions": filemode(mode),
+            "permissions_octal": oct(mode & 0o7777)[2:].zfill(4),
+            "owner": owner,
+            "group": group,
+            "modified": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S UTC"
+            ),
+            "is_dir": S_ISDIR(mode),
+            "is_symlink": is_link,
+            "symlink_target": _resolve_symlink() if is_link else None,
+        }
+
+    # Try direct lstat
+    try:
+        s = path.lstat()
+        try:
+            owner = pwd.getpwuid(s.st_uid).pw_name
+        except KeyError:
+            owner = str(s.st_uid)
+        try:
+            group = grp.getgrgid(s.st_gid).gr_name
+        except KeyError:
+            group = str(s.st_gid)
+        return True, _build(s.st_mode, s.st_size, s.st_mtime, owner, group)
+    except PermissionError:
+        pass
+    except OSError as e:
+        return False, str(e)
+
+    # Sudo fallback
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "stat", "--printf", "%f\n%s\n%Y\n%U\n%G", str(path)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+        )
+        if result.returncode == 0:
+            lines = result.stdout.decode("utf-8", errors="replace").split("\n")
+            if len(lines) >= 5:
+                mode = int(lines[0], 16)
+                size = int(lines[1])
+                mtime = float(lines[2])
+                return True, _build(mode, size, mtime, lines[3], lines[4])
+        error = result.stderr.decode("utf-8", errors="replace")
+        return False, f"stat failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Stat operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def read_file_head(path: Path, max_bytes: int = 8192) -> tuple[bool, bytes | str]:
+    """Read up to max_bytes from the start of a file. Uses sudo if needed."""
+    path = Path(os.path.abspath(path))
+
+    if os.access(path, os.R_OK):
+        try:
+            with open(path, "rb") as f:
+                return True, f.read(max_bytes)
+        except Exception as e:
+            return False, str(e)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "head", "-c", str(max_bytes), str(path)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return True, result.stdout
+        return False, result.stderr.decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return False, "Read operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def count_lines(path: Path) -> tuple[bool, int | str]:
+    """Count lines in a file by streaming chunks. Uses sudo wc -l as fallback."""
+    path = Path(os.path.abspath(path))
+
+    if os.access(path, os.R_OK):
+        try:
+            count = 0
+            last_byte = b""
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    count += chunk.count(b"\n")
+                    last_byte = chunk[-1:]
+            if last_byte and last_byte != b"\n":
+                count += 1
+            return True, count
+        except Exception as e:
+            return False, str(e)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "wc", "-l", str(path)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+        )
+        if result.returncode == 0:
+            count = int(result.stdout.split()[0])
+            tail = subprocess.run(
+                ["sudo", "-n", "tail", "-c", "1", str(path)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
+            if tail.returncode == 0 and tail.stdout and tail.stdout != b"\n":
+                count += 1
+            return True, count
+        return False, result.stderr.decode("utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return False, "Line count timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def get_directory_info(path: Path) -> tuple[bool, dict | str]:
+    """
+    Get recursive directory info (total size, file count, dir count).
+    Falls back to sudo du + find if direct walk fails.
+    Returns (success, info_dict_or_error).
+    """
+    path = Path(os.path.abspath(path))
+
+    try:
+        walk_errors: list[OSError] = []
+        total_size = total_files = total_dirs = 0
+        for root, dirs, files in os.walk(path, onerror=walk_errors.append):
+            total_dirs += len(dirs)
+            total_files += len(files)
+            for f in files:
+                try:
+                    total_size += os.path.getsize(os.path.join(root, f))
+                except OSError as e:
+                    if e.errno in (errno.EACCES, errno.EPERM):
+                        walk_errors.append(e)
+                    pass
+        if any(err.errno in (errno.EACCES, errno.EPERM) for err in walk_errors):
+            raise PermissionError(str(walk_errors[0]))
+        return True, {
+            "size_recursive": total_size,
+            "size_recursive_human": human_size(total_size),
+            "file_count": total_files,
+            "dir_count": total_dirs,
+        }
+    except PermissionError:
+        pass
+    except OSError as e:
+        return False, str(e)
+
+    # Sudo fallback
+    info = {"size_recursive": 0, "size_recursive_human": "0 B", "file_count": 0, "dir_count": 0}
+
+    try:
+        du = subprocess.run(
+            ["sudo", "-n", "du", "-sb", str(path)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+        )
+        if du.returncode == 0:
+            info["size_recursive"] = int(du.stdout.decode().split()[0])
+            info["size_recursive_human"] = human_size(info["size_recursive"])
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+
+    try:
+        find = subprocess.run(
+            ["sudo", "-n", "find", str(path), "-printf", "%y\\n"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+        )
+        if find.returncode == 0:
+            types = find.stdout.decode("utf-8", errors="replace").strip().split("\n") if find.stdout.strip() else []
+            info["file_count"] = types.count("f")
+            info["dir_count"] = max(0, types.count("d") - 1)
+    except (subprocess.TimeoutExpired, Exception):
+        pass
+
+    return True, info

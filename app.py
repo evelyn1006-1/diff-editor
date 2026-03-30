@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -41,7 +42,7 @@ _access_handler.setFormatter(logging.Formatter(
 ))
 access_logger.addHandler(_access_handler)
 
-from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, create_symlink, ensure_directory, copy_directory, copy_file, make_executable, delete_path, delete_directory, rename_path, zip_directory
+from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, create_symlink, ensure_directory, copy_directory, copy_file, make_executable, delete_path, delete_directory, rename_path, zip_directory, human_size, stat_path, read_file_head, count_lines, get_directory_info
 from utils.git_ops import find_git_root, get_head_content_bytes, is_tracked_by_git, get_directory_git_status, get_tracked_files
 
 
@@ -594,7 +595,6 @@ def create_app() -> Flask:
         timeout: int,
     ):
         """Run codex review in background, writing output to cache file."""
-        import datetime
 
         output_file, _, _, pid_file = get_review_cache_paths(cache_key)
         # Note: status already set to "running" by try_start_review()
@@ -1914,6 +1914,120 @@ def create_app() -> Flask:
             _cleanup_temp_path(zip_path)
 
         return response
+
+    @app.get("/api/file/info")
+    def file_info():
+        raw_path = request.args.get("path", "")
+        path, error = resolve_request_path(raw_path)
+        if error:
+            return jsonify({"error": error}), 400
+        if not path.exists() and not path.is_symlink():
+            return jsonify({"error": "Not found"}), 404
+
+        success, info = stat_path(path)
+        if not success:
+            return jsonify({"error": info}), 500
+
+        result = {"name": path.name, "path": str(path), **info, "mime_type": None}
+        if not info["is_dir"]:
+            result["mime_type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+        return jsonify(result)
+
+    @app.get("/api/file/info/extended")
+    def file_info_extended():
+        raw_path = request.args.get("path", "")
+        path, error = resolve_request_path(raw_path)
+        if error:
+            return jsonify({"error": error}), 400
+        if not path.exists() and not path.is_symlink():
+            return jsonify({"error": "Not found"}), 404
+
+        result: dict = {
+            "is_binary": None,
+            "line_count": None,
+            "image_info": None,
+            "pdf_pages": None,
+            "video_info": None,
+            "size_recursive": None,
+            "size_recursive_human": None,
+            "file_count": None,
+            "dir_count": None,
+        }
+
+        if path.is_dir():
+            success, info = get_directory_info(path)
+            if success:
+                result.update(info)
+            else:
+                result["error"] = info
+        else:
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+            # Binary detection from file head only (not full read)
+            success, head = read_file_head(path)
+            if success and isinstance(head, bytes):
+                result["is_binary"] = is_likely_binary(head)
+
+            # Line count via streaming chunks (not full read)
+            if result["is_binary"] is False:
+                success, n = count_lines(path)
+                if success:
+                    result["line_count"] = n
+
+            # Image info (Pillow reads headers lazily from path)
+            if mime_type.startswith("image/"):
+                try:
+                    from PIL import Image
+                    if os.access(path, os.R_OK):
+                        with Image.open(path) as img:
+                            result["image_info"] = {"width": img.width, "height": img.height, "mode": img.mode}
+                    else:
+                        ok, data = read_file_bytes(path)
+                        if ok:
+                            with Image.open(io.BytesIO(data)) as img:
+                                result["image_info"] = {"width": img.width, "height": img.height, "mode": img.mode}
+                except Exception:
+                    pass
+
+            # PDF page count (pypdf reads from path)
+            elif mime_type == "application/pdf":
+                try:
+                    import pypdf
+                    if os.access(path, os.R_OK):
+                        with open(path, "rb") as f:
+                            result["pdf_pages"] = len(pypdf.PdfReader(f).pages)
+                    else:
+                        ok, data = read_file_bytes(path)
+                        if ok:
+                            result["pdf_pages"] = len(pypdf.PdfReader(io.BytesIO(data)).pages)
+                except Exception:
+                    pass
+
+            # Video/audio metadata via ffprobe
+            if mime_type.startswith("video/") or mime_type.startswith("audio/"):
+                try:
+                    proc = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-print_format", "json",
+                         "-show_streams", "-show_format", str(path)],
+                        stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
+                    )
+                    if proc.returncode == 0:
+                        ff = json.loads(proc.stdout)
+                        vs = next((st for st in ff.get("streams", []) if st.get("codec_type") == "video"), None)
+                        au = next((st for st in ff.get("streams", []) if st.get("codec_type") == "audio"), None)
+                        dur = ff.get("format", {}).get("duration")
+                        result["video_info"] = {
+                            "width": vs.get("width") if vs else None,
+                            "height": vs.get("height") if vs else None,
+                            "duration": float(dur) if dur else None,
+                            "video_codec": vs.get("codec_name") if vs else None,
+                            "audio_codec": au.get("codec_name") if au else None,
+                        }
+                except Exception:
+                    pass
+
+        return jsonify(result)
 
     @app.get("/api/file/zip-info")
     def zip_info():
