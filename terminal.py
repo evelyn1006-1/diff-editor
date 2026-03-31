@@ -1275,7 +1275,7 @@ def _get_service_properties(unit: str, *, use_sudo: bool = False) -> dict[str, s
         "show",
         unit,
         "--property=ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StatusText,Description,"
-        "MainPID,ExecMainStartTimestamp,ExecMainExitTimestamp,NRestarts",
+        "MainPID,ExecMainStartTimestamp,ExecMainExitTimestamp,NRestarts,FragmentPath",
     ]
     if use_sudo:
         cmd.insert(0, "sudo")
@@ -1500,6 +1500,7 @@ def _get_service_failure_details(unit: str, *, include_logs: bool = False) -> di
         data["started"] = props.get("ExecMainStartTimestamp") or ""
         data["finished"] = props.get("ExecMainExitTimestamp") or ""
         data["restart_count"] = props.get("NRestarts") or "0"
+        data["fragment_path"] = props.get("FragmentPath") or ""
     return data
 
 
@@ -1742,12 +1743,47 @@ def control_service():
     if action not in ALLOWED_SERVICE_ACTIONS:
         return jsonify({"error": f"Invalid action (allowed: {', '.join(ALLOWED_SERVICE_ACTIONS)})"}), 400
 
-    # All service control requires sudo
-    cmd = ["sudo", "systemctl", action, unit]
+    daemon_reload = bool(data.get("daemon_reload"))
 
+    # All service control requires sudo
     try:
+        if daemon_reload:
+            reload_required = False
+            try:
+                need_check = subprocess.run(
+                    ["systemctl", "show", unit, "--property=NeedDaemonReload"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                reload_required = (
+                    need_check.returncode == 0 and "NeedDaemonReload=yes" in need_check.stdout
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                reload_required = False
+
+            if daemon_reload_required:
+                try:
+                    reload_result = subprocess.run(
+                        ["sudo", "-n", "systemctl", "daemon-reload"],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                except subprocess.TimeoutExpired:
+                    return jsonify({"error": "systemctl daemon-reload timed out"}), 500
+                except OSError as e:
+                    return jsonify({"error": str(e)}), 500
+
+                if reload_result.returncode != 0:
+                    error = reload_result.stderr.strip() or "systemctl daemon-reload failed"
+                    return jsonify({
+                        "error": error,
+                        "service": _get_service_failure_details(unit, include_logs=True),
+                    }), 400
+
         result = subprocess.run(
-            cmd,
+            ["sudo", "systemctl", action, unit],
             capture_output=True,
             text=True,
             timeout=30,  # Longer timeout for service operations

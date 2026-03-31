@@ -1147,6 +1147,19 @@ function showServiceFailurePopup(title, details = {}, fallbackError = '') {
     // Store current unit for "Find more logs" button
     overlay.dataset.currentUnit = unit;
 
+    // Show/hide and wire "Edit service config" button
+    const editConfigBtn = document.getElementById('service-failure-edit-config');
+    if (editConfigBtn) {
+        const fragmentPath = details.fragment_path || '';
+        if (fragmentPath) {
+            const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+            editConfigBtn.onclick = () => handleEditorRedirect(`${basePath}/diff?file=${encodeURIComponent(fragmentPath)}`);
+            editConfigBtn.classList.remove('hidden');
+        } else {
+            editConfigBtn.classList.add('hidden');
+        }
+    }
+
     overlay.classList.remove('hidden');
 }
 
@@ -1333,6 +1346,7 @@ function renderStoppedServices() {
             e.stopPropagation();
             controlService(btn.dataset.unit, 'start', {
                 includeFailedRefresh: true,
+                daemonReload: true,
             });
         };
     });
@@ -1406,6 +1420,7 @@ function renderFailedServices() {
             controlService(btn.dataset.unit, 'restart', {
                 showFailurePopupOnError: true,
                 includeFailedRefresh: true,
+                daemonReload: true,
             });
         };
     });
@@ -2032,7 +2047,7 @@ async function controlService(unit, action, options = {}) {
                 'X-Terminal-Session': socket.id,
                 'X-Terminal-Token': terminalToken,
             },
-            body: JSON.stringify({ unit, action }),
+            body: JSON.stringify({ unit, action, daemon_reload: options.daemonReload || false }),
         });
 
         const data = await resp.json();
