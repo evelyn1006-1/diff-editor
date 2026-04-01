@@ -1762,7 +1762,7 @@ def control_service():
             except (subprocess.TimeoutExpired, OSError):
                 reload_required = False
 
-            if daemon_reload_required:
+            if reload_required:
                 try:
                     reload_result = subprocess.run(
                         ["sudo", "-n", "systemctl", "daemon-reload"],
