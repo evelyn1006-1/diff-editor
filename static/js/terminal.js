@@ -394,6 +394,13 @@ async function openTabCompletion() {
     // Parse shell words with quote and escape awareness.
     const parsed = parseShellWords(beforeCursor);
     const parts = parsed.tokens;
+    const rawWords = parts.map(part => part.raw);
+    const completionWordIndex = parsed.endedWithWhitespace ? parts.length : Math.max(0, parts.length - 1);
+    if (parsed.endedWithWhitespace) {
+        rawWords.push('');
+    } else if (rawWords.length === 0) {
+        rawWords.push('');
+    }
     const currentWord = parsed.current.value;
     const currentRawWord = parsed.current.raw;
     let replaceStart = parsed.current.start;
@@ -468,6 +475,11 @@ async function openTabCompletion() {
     if (socket && socket.id) {
         url += `&session_id=${encodeURIComponent(socket.id)}`;
     }
+    url += `&base_command=${encodeURIComponent(baseCommand || '')}`;
+    url += `&line=${encodeURIComponent(text)}`;
+    url += `&cursor=${encodeURIComponent(String(cursorPos))}`;
+    url += `&raw_words=${encodeURIComponent(JSON.stringify(rawWords))}`;
+    url += `&cword=${encodeURIComponent(String(completionWordIndex))}`;
 
     // Status indicator helpers
     const statusEl = document.getElementById('completion-status');

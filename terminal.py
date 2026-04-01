@@ -32,6 +32,14 @@ _ws_handler = logging.FileHandler(LOG_DIR / "access.log")
 _ws_handler.setFormatter(logging.Formatter('%(message)s'))
 ws_logger.addHandler(_ws_handler)
 
+completion_logger = logging.getLogger("diff_editor.completion")
+completion_logger.setLevel(logging.INFO)
+completion_logger.propagate = False
+
+_completion_handler = logging.FileHandler(LOG_DIR / "completion.log")
+_completion_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+completion_logger.addHandler(_completion_handler)
+
 terminal_bp = Blueprint("terminal", __name__)
 pty_manager = PTYManager()
 
@@ -43,6 +51,89 @@ CLOUD_COMMAND_REDIRECTS = {
 }
 # Commands that should open the task manager popup
 TASK_MANAGER_COMMANDS = {"top", "htop"}
+_MAX_COMPLETIONS = 50
+_BASH_COMPLETION_SCRIPTS = (
+    "/usr/share/bash-completion/bash_completion",
+    "/etc/bash_completion",
+)
+_PATH_COMPLETION_COMMANDS = {
+    "cd", "nano", "vim", "vi", "nvim", "emacs", "pico", "edit",
+    "cat", "less", "more", "head", "tail",
+}
+
+
+def _short_completion_value(value: str, max_len: int = 80) -> str:
+    """Trim potentially long completion context values for logging."""
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1] + "…"
+
+
+def _preview_completion_items(items: list[str], *, max_items: int = 8, max_len: int = 80) -> list[str]:
+    """Trim completion/debug arrays for log readability."""
+    return [_short_completion_value(item, max_len=max_len) for item in items[:max_items]]
+
+
+def _log_completion_event(
+    *,
+    method: str,
+    comp_type: str,
+    command: str,
+    prefix: str,
+    arg_index: int,
+    dirs_only: bool,
+    base_command: str,
+    session_id: str,
+    cwd: str,
+    line: str | None,
+    cursor_raw: str | None,
+    cword_raw: str | None,
+    raw_words_json: str,
+    bash_result: list[str] | None,
+    bash_meta: dict[str, object] | None,
+    completions: list[str],
+) -> None:
+    """Write a structured completion debug log entry."""
+    raw_words_preview: list[str] = []
+    raw_words_count = 0
+    if isinstance(bash_meta, dict):
+        raw_words_value = bash_meta.get("raw_words")
+        if isinstance(raw_words_value, list):
+            raw_words_count = len(raw_words_value)
+            raw_words_preview = _preview_completion_items(raw_words_value)
+
+    payload = {
+        "remote_addr": request.remote_addr or "-",
+        "session_id": session_id[:12],
+        "method": method,
+        "type": comp_type,
+        "command": _short_completion_value(command),
+        "prefix": _short_completion_value(prefix),
+        "arg_index": arg_index,
+        "dirs_only": dirs_only,
+        "base_command": _short_completion_value(base_command),
+        "cwd": _short_completion_value(cwd, 120),
+        "line": _short_completion_value(line or "", 160),
+        "cursor_raw": cursor_raw,
+        "cword_raw": cword_raw,
+        "raw_words_json_len": len(raw_words_json or ""),
+        "raw_words_count": raw_words_count,
+        "raw_words_preview": raw_words_preview,
+        "bash_result_count": None if bash_result is None else len(bash_result),
+        "bash_status": (bash_meta or {}).get("status"),
+        "bash_reason": (bash_meta or {}).get("reason"),
+        "bash_returncode": (bash_meta or {}).get("returncode"),
+        "bash_script": _short_completion_value(str((bash_meta or {}).get("script") or ""), 120),
+        "cursor": (bash_meta or {}).get("cursor"),
+        "cword": (bash_meta or {}).get("cword"),
+        "fallback_reason": (bash_meta or {}).get("fallback_reason"),
+        "result_count": len(completions),
+        "results_preview": _preview_completion_items(completions, max_items=5),
+    }
+    try:
+        completion_logger.info(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+    except Exception:
+        pass
 
 
 def init_terminal_socketio(socketio):
@@ -281,11 +372,83 @@ def complete():
     dirs_only = request.args.get("dirs_only", "false") == "true"
     session_id = request.args.get("session_id", "").strip()
     completion_cwd = _get_completion_cwd(session_id)
+    line = request.args.get("line")
+    cursor_raw = request.args.get("cursor")
+    raw_words = request.args.get("raw_words", "")
+    cword_raw = request.args.get("cword")
     # For argument completion
     command = request.args.get("command", "")
-    arg_index = int(request.args.get("arg_index", "0"))
+    base_command = request.args.get("base_command", "")
+    try:
+        arg_index = int(request.args.get("arg_index", "0"))
+    except (TypeError, ValueError):
+        arg_index = 0
 
     completions = []
+
+    bash_completions = None
+    bash_meta = {
+        "status": "skipped",
+        "reason": "builtin-command-preferred" if comp_type == "command" else "not-requested",
+        "cursor": None,
+        "cword": None,
+        "raw_words": [],
+        "script": "",
+        "returncode": None,
+        "fallback_reason": None,
+    }
+    if comp_type != "command":
+        bash_completions, bash_meta = _complete_bash_from_request(
+            line=line,
+            cursor_raw=cursor_raw,
+            cwd=completion_cwd,
+            raw_words_json=raw_words,
+            cword_raw=cword_raw,
+        )
+
+    path_like_prefix = (
+        prefix.startswith("/")
+        or prefix.startswith("~")
+        or prefix.startswith(".")
+        or "/" in prefix
+    )
+    keep_path_fallback = (
+        bash_completions == []
+        and comp_type == "path"
+        and (dirs_only or path_like_prefix or base_command in _PATH_COMPLETION_COMMANDS)
+    )
+    keep_builtin_fallback = (
+        bash_completions == []
+        and comp_type == "argument"
+        and command in {"pip", "pip3", "npm"}
+    )
+    if keep_path_fallback:
+        bash_meta["fallback_reason"] = (
+            "empty-bash-result-for-path-context"
+            if not base_command else f"empty-bash-result-for-path-command:{base_command}"
+        )
+    if keep_builtin_fallback:
+        bash_meta["fallback_reason"] = f"empty-bash-result-for-{command}"
+    if bash_completions is not None and not keep_builtin_fallback and not keep_path_fallback:
+        _log_completion_event(
+            method="bash",
+            comp_type=comp_type,
+            command=command,
+            prefix=prefix,
+            arg_index=arg_index,
+            dirs_only=dirs_only,
+            base_command=base_command,
+            session_id=session_id,
+            cwd=completion_cwd,
+            line=line,
+            cursor_raw=cursor_raw,
+            cword_raw=cword_raw,
+            raw_words_json=raw_words,
+            bash_result=bash_completions,
+            bash_meta=bash_meta,
+            completions=bash_completions,
+        )
+        return jsonify(bash_completions)
 
     if comp_type == "command":
         # Use compgen to get command completions
@@ -298,7 +461,7 @@ def complete():
             )
             if result.returncode == 0:
                 completions = [c for c in result.stdout.strip().split("\n") if c]
-                completions = sorted(set(completions))[:50]
+                completions = sorted(set(completions))[:_MAX_COMPLETIONS]
         except (subprocess.TimeoutExpired, OSError):
             pass
 
@@ -308,7 +471,219 @@ def complete():
     elif comp_type == "argument":
         completions = _complete_argument(command, prefix, arg_index, completion_cwd)
 
+    method = {
+        "command": "builtin-command",
+        "path": "builtin-path",
+        "argument": "builtin-argument",
+    }.get(comp_type, "builtin")
+    if keep_builtin_fallback or keep_path_fallback:
+        method += "-fallback-after-empty-bash"
+    _log_completion_event(
+        method=method,
+        comp_type=comp_type,
+        command=command,
+        prefix=prefix,
+        arg_index=arg_index,
+        dirs_only=dirs_only,
+        base_command=base_command,
+        session_id=session_id,
+        cwd=completion_cwd,
+        line=line,
+        cursor_raw=cursor_raw,
+        cword_raw=cword_raw,
+        raw_words_json=raw_words,
+        bash_result=bash_completions,
+        bash_meta=bash_meta,
+        completions=completions,
+    )
     return jsonify(completions)
+
+
+def _find_bash_completion_script() -> str | None:
+    """Return the first available bash-completion entrypoint."""
+    for candidate in _BASH_COMPLETION_SCRIPTS:
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _normalize_bash_completion_words(words: object, cword_raw: object) -> tuple[list[str], int] | None:
+    """Validate raw completion words sent by the frontend."""
+    if not isinstance(words, list):
+        return None
+    if not all(isinstance(word, str) for word in words):
+        return None
+
+    comp_words = list(words) or [""]
+    try:
+        cword = int(cword_raw)
+    except (TypeError, ValueError):
+        cword = len(comp_words) - 1
+
+    if cword < 0:
+        cword = 0
+    if cword >= len(comp_words):
+        if cword == len(comp_words):
+            comp_words.append("")
+        else:
+            cword = len(comp_words) - 1
+
+    return comp_words, cword
+
+
+def _dedupe_completions(items: list[str]) -> list[str]:
+    """Deduplicate completions while preserving order."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+        if len(ordered) >= _MAX_COMPLETIONS:
+            break
+    return ordered
+
+
+def _complete_bash_from_request(
+    *,
+    line: str | None,
+    cursor_raw: str | None,
+    cwd: str,
+    raw_words_json: str,
+    cword_raw: str | None,
+) -> tuple[list[str] | None, dict[str, object]]:
+    """Best-effort real Bash completion using a helper shell, or None on failure."""
+    meta: dict[str, object] = {
+        "status": "skipped",
+        "reason": "missing-line-or-cursor",
+        "cursor": None,
+        "cword": None,
+        "raw_words": [],
+        "script": "",
+        "returncode": None,
+        "fallback_reason": None,
+    }
+    if line is None or cursor_raw is None:
+        return None, meta
+
+    try:
+        cursor = int(cursor_raw)
+    except (TypeError, ValueError):
+        meta["status"] = "invalid-request"
+        meta["reason"] = "invalid-cursor"
+        return None, meta
+
+    if cursor < 0:
+        meta["status"] = "invalid-request"
+        meta["reason"] = "negative-cursor"
+        return None, meta
+
+    try:
+        parsed_words = json.loads(raw_words_json) if raw_words_json else [""]
+    except json.JSONDecodeError:
+        meta["status"] = "invalid-request"
+        meta["reason"] = "invalid-raw-words-json"
+        return None, meta
+
+    normalized = _normalize_bash_completion_words(parsed_words, cword_raw)
+    if normalized is None:
+        meta["status"] = "invalid-request"
+        meta["reason"] = "invalid-word-array"
+        return None, meta
+    comp_words, cword = normalized
+    meta["status"] = "requested"
+    meta["reason"] = "ready"
+    meta["cursor"] = cursor
+    meta["cword"] = cword
+    meta["raw_words"] = comp_words
+
+    return _complete_with_bash(
+        line=line,
+        cursor=cursor,
+        cwd=cwd,
+        comp_words=comp_words,
+        cword=cword,
+        meta=meta,
+    )
+
+
+def _complete_with_bash(
+    *,
+    line: str,
+    cursor: int,
+    cwd: str,
+    comp_words: list[str],
+    cword: int,
+    meta: dict[str, object],
+) -> tuple[list[str] | None, dict[str, object]]:
+    """Run bash-completion in a helper shell using the terminal session cwd."""
+    bash_completion_script = _find_bash_completion_script()
+    meta["script"] = bash_completion_script or ""
+    if not bash_completion_script:
+        meta["status"] = "unavailable"
+        meta["reason"] = "missing-bash-completion-script"
+        return None, meta
+
+    cursor = max(0, min(cursor, len(line)))
+    cwd = cwd or os.path.expanduser("~")
+    array_literal = " ".join(shlex.quote(word) for word in comp_words)
+    shell_script = f"""
+source {shlex.quote(bash_completion_script)} >/dev/null 2>&1 || exit 125
+compopt() {{
+    builtin compopt "$@" 2>/dev/null || return 0
+}}
+cd {shlex.quote(cwd)} >/dev/null 2>&1 || exit 126
+COMP_LINE={shlex.quote(line)}
+COMP_POINT={cursor}
+COMP_TYPE=9
+COMP_KEY=9
+COMP_WORDS=({array_literal})
+COMP_CWORD={cword}
+_command_offset 0 >/dev/null 2>&1 || true
+printf '%s\\0' "${{COMPREPLY[@]}}"
+"""
+
+    try:
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-c", shell_script],
+            capture_output=True,
+            timeout=3,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        meta["status"] = "error"
+        meta["reason"] = "helper-failed"
+        return None, meta
+
+    meta["returncode"] = result.returncode
+
+    if result.returncode == 125:
+        meta["status"] = "unavailable"
+        meta["reason"] = "source-bash-completion-failed"
+        return None, meta
+    if result.returncode == 126:
+        meta["status"] = "unavailable"
+        meta["reason"] = "cwd-unavailable"
+        return None, meta
+
+    if not result.stdout:
+        meta["status"] = "empty"
+        meta["reason"] = "no-matches"
+        return [], meta
+
+    completions = [
+        item.decode("utf-8", errors="replace")
+        for item in result.stdout.split(b"\0")
+        if item
+    ]
+    completions = _dedupe_completions(completions)
+    if not completions:
+        meta["status"] = "empty"
+        meta["reason"] = "no-matches"
+        return [], meta
+    meta["status"] = "success"
+    meta["reason"] = "matches"
+    return completions, meta
 
 
 def _get_completion_cwd(session_id: str) -> str:
