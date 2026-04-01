@@ -1,11 +1,13 @@
 from pathlib import Path
 
+from app_runtime import EDITOR_BIND
+
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-bind = "127.0.0.1:8005"
+bind = EDITOR_BIND
 workers = 2
 timeout = 600  # 10 minutes
 worker_class = "geventwebsocket.gunicorn.workers.GeventWebSocketWorker"

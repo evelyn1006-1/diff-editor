@@ -2840,6 +2840,135 @@ body.terminal-raised {
     background: rgba(230, 126, 34, 0.12);
 }
 
+/* Editor Modal */
+.editor-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(74, 25, 66, 0.4);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.editor-popup {
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(214, 51, 132, 0.25);
+    width: 95%;
+    max-width: 720px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    backdrop-filter: blur(12px);
+}
+
+.editor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.editor-title {
+    font-family: monospace;
+    font-size: 0.9rem;
+    color: var(--accent);
+}
+
+.editor-close-btn {
+    background: none;
+    border: none;
+    color: var(--text);
+    font-size: 1.4rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.2rem;
+    opacity: 0.7;
+}
+
+.editor-close-btn:hover {
+    opacity: 1;
+    color: var(--accent);
+}
+
+.editor-textarea {
+    flex: 1;
+    resize: none;
+    background: var(--panel-bg);
+    color: var(--text);
+    border: none;
+    outline: none;
+    font-family: monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    padding: 0.75rem 1rem;
+    min-height: 220px;
+}
+
+.editor-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    gap: 0.75rem;
+}
+
+.editor-hint {
+    font-size: 0.75rem;
+    color: var(--text-muted, #aaa);
+}
+
+.editor-hint.editor-hint-error {
+    color: var(--error);
+}
+
+.editor-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.editor-btn {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    padding: 0.3rem 0.8rem;
+}
+
+.editor-btn:disabled {
+    cursor: wait;
+    opacity: 0.7;
+}
+
+.editor-btn-cancel {
+    background: none;
+    color: var(--text);
+}
+
+.editor-btn-cancel:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.editor-btn-save {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+
+.editor-btn-save:hover {
+    opacity: 0.85;
+}
+
 /* Pager Modal */
 .pager-overlay {
     position: fixed;

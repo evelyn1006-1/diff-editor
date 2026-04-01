@@ -1,11 +1,13 @@
 from pathlib import Path
 
+from app_runtime import TERMINAL_BIND
+
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-bind = "127.0.0.1:8006"
+bind = TERMINAL_BIND
 workers = 1  # Single worker required for PTY session state
 timeout = 600  # 10 minutes
 worker_class = "geventwebsocket.gunicorn.workers.GeventWebSocketWorker"

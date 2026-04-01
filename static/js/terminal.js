@@ -99,6 +99,10 @@ function connect() {
         openPagerModal(data.title, data.content);
     });
 
+    socket.on('editor_modal', (data) => {
+        openEditorModal(data.title, data.content);
+    });
+
     socket.on('disconnect', () => {
         statusEl.textContent = 'Disconnected';
         statusEl.className = 'status error';
@@ -959,6 +963,105 @@ function pagerSearchStep(delta) {
     current.scrollIntoView({ block: 'center' });
     document.getElementById('pager-search-count').textContent =
         `${pagerSearchIndex + 1} / ${pagerSearchMatches.length}`;
+}
+
+// ── Editor Modal ───────────────────────────────────────────────────────────
+
+function setEditorStatus(message, isError = false) {
+    const hint = document.getElementById('editor-hint');
+    if (!hint) return;
+    hint.textContent = message;
+    hint.classList.toggle('editor-hint-error', isError);
+}
+
+function setEditorBusy(isBusy) {
+    const textarea = document.getElementById('editor-content');
+    const saveBtn = document.getElementById('editor-save');
+    const cancelBtn = document.getElementById('editor-cancel');
+    const closeBtn = document.getElementById('editor-close');
+    if (textarea) textarea.readOnly = isBusy;
+    if (saveBtn) saveBtn.disabled = isBusy;
+    if (cancelBtn) cancelBtn.disabled = isBusy;
+    if (closeBtn) closeBtn.disabled = isBusy;
+}
+
+function openEditorModal(title, content) {
+    const overlay = document.getElementById('editor-overlay');
+    if (!overlay) return;
+
+    document.getElementById('editor-title').textContent = title;
+    const textarea = document.getElementById('editor-content');
+    textarea.value = content;
+    setEditorStatus('Ctrl+Enter to save · Esc to cancel');
+    setEditorBusy(false);
+    overlay.classList.remove('hidden');
+    textarea.focus();
+    textarea.setSelectionRange(0, 0);
+    textarea.scrollTop = 0;
+
+    document.getElementById('editor-save').onclick = () => submitEditorModal(true);
+    document.getElementById('editor-cancel').onclick = () => submitEditorModal(false);
+    document.getElementById('editor-close').onclick = () => submitEditorModal(false);
+    document.addEventListener('keydown', handleEditorKeydown);
+}
+
+function closeEditorModal() {
+    const overlay = document.getElementById('editor-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    setEditorBusy(false);
+    document.removeEventListener('keydown', handleEditorKeydown);
+    document.getElementById('terminal-input')?.focus();
+}
+
+function handleEditorKeydown(e) {
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        submitEditorModal(false);
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        submitEditorModal(true);
+    }
+}
+
+async function submitEditorModal(saved) {
+    if (!socket || !socket.id || !terminalToken) {
+        setEditorStatus('Connection lost. Reconnect before trying again.', true);
+        return;
+    }
+
+    const content = document.getElementById('editor-content').value;
+    setEditorBusy(true);
+    setEditorStatus(saved ? 'Saving...' : 'Cancelling...');
+
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+    const body = new URLSearchParams({
+        session_id: socket.id,
+        saved: saved ? 'true' : 'false',
+        content: saved ? content : '',
+    });
+
+    try {
+        const resp = await fetch(`${basePath}/terminal/editor_response`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Terminal-Token': terminalToken,
+            },
+            body: body.toString(),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data.ok) {
+            setEditorBusy(false);
+            setEditorStatus(data.error || 'Could not send the editor response. Try again.', true);
+            return;
+        }
+    } catch (_err) {
+        setEditorBusy(false);
+        setEditorStatus('Could not reach the server. Try again.', true);
+        return;
+    }
+
+    closeEditorModal();
 }
 
 async function refreshTaskManager(options = {}) {

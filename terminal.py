@@ -15,6 +15,7 @@ import pwd
 from pathlib import Path
 from urllib.parse import quote
 
+import gevent.event
 from flask import Blueprint, jsonify, render_template, request
 from flask_socketio import emit, join_room, leave_room
 
@@ -43,6 +44,9 @@ completion_logger.addHandler(_completion_handler)
 terminal_bp = Blueprint("terminal", __name__)
 pty_manager = PTYManager()
 _sudo_nopasswd_cache: dict[str, bool] = {}  # session_id → has passwordless sudo
+_socketio_ref = None  # set by init_terminal_socketio; used by HTTP routes that need to emit
+_editor_events: dict[str, gevent.event.Event] = {}   # session_id → blocking event
+_editor_results: dict[str, dict] = {}                # session_id → {saved, content}
 
 # Commands that should redirect to diff editor
 EDITOR_COMMANDS = {"nano", "vim", "vi", "nvim", "emacs", "pico", "edit"}
@@ -56,6 +60,9 @@ TASK_MANAGER_COMMANDS = {"top", "htop"}
 # this textbox-based terminal since there is no cursor positioning or
 # alternate screen buffer support).
 PAGER_COMMANDS = {"less", "more"}
+# Commands that spawn an editor internally and require sudo -E so our $SUDO_EDITOR
+# env var is preserved through the privilege escalation.
+_SUDO_E_COMMANDS = {"visudo"}
 _GIT_PAGER_SUBCOMMANDS = {"log", "diff", "show", "blame"}
 _SYSTEMCTL_PAGER_SUBCOMMANDS = {"status", "list-units", "list-timers", "list-sockets", "list-jobs"}
 _MAX_COMPLETIONS = 50
@@ -145,6 +152,8 @@ def _log_completion_event(
 
 def init_terminal_socketio(socketio):
     """Initialize SocketIO event handlers for terminal."""
+    global _socketio_ref
+    _socketio_ref = socketio
 
     @socketio.on("connect", namespace="/terminal")
     def handle_connect():
@@ -175,6 +184,10 @@ def init_terminal_socketio(socketio):
         remote_addr = request.remote_addr or "-"
         pty_manager.remove_session(session_id)
         _sudo_nopasswd_cache.pop(session_id, None)
+        ev = _editor_events.get(session_id)
+        if ev:
+            _editor_results[session_id] = {"saved": False, "content": ""}
+            ev.set()
         leave_room(session_id)
         ws_logger.info(
             '%s - - [%s] "WS DISCONNECT /terminal" - - "-" "-"',
@@ -228,6 +241,20 @@ def init_terminal_socketio(socketio):
             emit("pager_popup", {"title": title, "content": content})
             session.write("\n")
             return
+
+        # Rewrite visudo (and similar) to sudo -E so $SUDO_EDITOR is preserved.
+        parsed = parse_intercept_command(command)
+        if parsed:
+            parts, idx = parsed
+            if parts[idx] in _SUDO_E_COMMANDS:
+                # Ensure command runs under sudo -E regardless of how it was typed.
+                sudo_prefix = parts[:idx]  # may be ["sudo"] or []
+                rest = parts[idx:]
+                rewritten = " ".join(
+                    shlex.quote(p) for p in (sudo_prefix or ["sudo"]) + ["-E"] + rest
+                )
+                session.write(rewritten + "\n")
+                return
 
         session.write(text)
 
@@ -853,6 +880,76 @@ printf '%s\\0' "${{COMPREPLY[@]}}"
     meta["status"] = "success"
     meta["reason"] = "matches"
     return completions, meta
+
+
+def _editor_title(file_path: str) -> str:
+    """Derive a human-readable modal title from an editor temp file path."""
+    name = os.path.basename(file_path)
+    for key, label in (
+        ("COMMIT_EDITMSG",      "Commit message"),
+        ("MERGE_MSG",           "Merge message"),
+        ("SQUASH_MSG",          "Squash commit message"),
+        ("git-rebase-todo",     "Interactive rebase"),
+        ("TAG_EDITMSG",         "Tag message"),
+        ("addp-hunk-edit.diff", "Edit hunk"),
+    ):
+        if key in name:
+            return label
+    if "crontab" in name:
+        return "Crontab"
+    if "sudoers" in name:
+        return "Sudoers"
+    return name or "Edit"
+
+
+@terminal_bp.route("/terminal/editor_request", methods=["POST"])
+def editor_request():
+    """Called by editor_wrapper.py — blocks until the browser saves or cancels."""
+    session_id = request.form.get("session_id", "")
+    if not session_id or not pty_manager.get_session(session_id):
+        return jsonify({"error": "invalid session"}), 403
+
+    file_path = request.form.get("file", "")
+    content = request.form.get("content", "")
+    title = _editor_title(file_path)
+
+    ev = gevent.event.Event()
+    _editor_events[session_id] = ev
+    _editor_results.pop(session_id, None)
+
+    if _socketio_ref:
+        _socketio_ref.emit(
+            "editor_modal",
+            {"title": title, "content": content},
+            room=session_id,
+            namespace="/terminal",
+        )
+
+    ev.wait(timeout=600)
+
+    result = _editor_results.pop(session_id, {"saved": False, "content": content})
+    _editor_events.pop(session_id, None)
+    return jsonify(result)
+
+
+@terminal_bp.route("/terminal/editor_response", methods=["POST"])
+def editor_response():
+    """Called by the browser when the user saves or cancels the editor modal."""
+    session_id = request.form.get("session_id", "")
+    token = request.headers.get("X-Terminal-Token", "")
+    if not pty_manager.validate_token(session_id, token):
+        return jsonify({"error": "unauthorized"}), 403
+
+    saved = request.form.get("saved", "false") == "true"
+    content = request.form.get("content", "")
+
+    ev = _editor_events.get(session_id)
+    if not ev:
+        return jsonify({"error": "no pending editor"}), 404
+
+    _editor_results[session_id] = {"saved": saved, "content": content}
+    ev.set()
+    return jsonify({"ok": True})
 
 
 def _get_completion_cwd(session_id: str) -> str:

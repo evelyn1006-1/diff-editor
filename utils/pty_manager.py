@@ -8,20 +8,28 @@ import secrets
 import select
 import signal
 import struct
+import sys
 import time
 import fcntl
 import termios
+from pathlib import Path
 from threading import Lock
 from typing import Optional
+
+from app_runtime import TERMINAL_SERVER_URL
+
+_WRAPPER_PATH = str(Path(__file__).resolve().parent / "editor_wrapper.py")
+_EDITOR_CMD = f"{sys.executable} {_WRAPPER_PATH}"
 
 
 class PTYSession:
     """Manages a single PTY session."""
 
-    def __init__(self, shell: str = "/bin/bash", shell_args: list[str] = None, cwd: str = None):
+    def __init__(self, shell: str = "/bin/bash", shell_args: list[str] = None, cwd: str = None, session_id: str = ""):
         self.shell = shell
         self.shell_args = shell_args or []
         self.cwd = cwd or os.path.expanduser("~")
+        self.session_id = session_id
         self.master_fd: Optional[int] = None
         self.pid: Optional[int] = None
         self.alive = False
@@ -40,6 +48,13 @@ class PTYSession:
                 env["COLORTERM"] = "truecolor"
                 # Use classic Python REPL to avoid rich-line redraw artifacts in this minimal terminal UI.
                 env["PYTHON_BASIC_REPL"] = "1"
+                # Route editor invocations (git commit, crontab -e, etc.) to the browser modal.
+                env["TERMINAL_SESSION_ID"] = self.session_id
+                env["TERMINAL_SERVER_URL"] = TERMINAL_SERVER_URL
+                env["GIT_EDITOR"] = _EDITOR_CMD
+                env["SUDO_EDITOR"] = _EDITOR_CMD
+                env["VISUAL"] = _EDITOR_CMD
+                env["EDITOR"] = _EDITOR_CMD
                 argv = [self.shell] + self.shell_args
                 os.execvpe(self.shell, argv, env)
             else:
@@ -167,7 +182,7 @@ class PTYManager:
             if session_id in self.sessions:
                 self.sessions[session_id].terminate()
 
-            session = PTYSession(shell=shell, shell_args=shell_args, cwd=cwd)
+            session = PTYSession(shell=shell, shell_args=shell_args, cwd=cwd, session_id=session_id)
             if session.spawn():
                 self.sessions[session_id] = session
                 return True

@@ -139,6 +139,23 @@
                 </div>
             </div>
         </div>
+        <!-- Editor Modal -->
+        <div id="editor-overlay" class="editor-overlay hidden">
+            <div class="editor-popup">
+                <div class="editor-header">
+                    <span id="editor-title" class="editor-title"></span>
+                    <button id="editor-close" class="editor-close-btn" title="Cancel">&times;</button>
+                </div>
+                <textarea id="editor-content" class="editor-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+                <div class="editor-footer">
+                    <span id="editor-hint" class="editor-hint">Ctrl+Enter to save &nbsp;·&nbsp; Esc to cancel</span>
+                    <div class="editor-actions">
+                        <button id="editor-cancel" class="editor-btn editor-btn-cancel">Cancel</button>
+                        <button id="editor-save" class="editor-btn editor-btn-save">Save</button>
+                    </div>
+                </div>
+            </div>
+        </div>
         <!-- Pager Modal -->
         <div id="pager-overlay" class="pager-overlay hidden">
             <div class="pager-popup">
