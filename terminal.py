@@ -42,6 +42,7 @@ completion_logger.addHandler(_completion_handler)
 
 terminal_bp = Blueprint("terminal", __name__)
 pty_manager = PTYManager()
+_sudo_nopasswd_cache: dict[str, bool] = {}  # session_id → has passwordless sudo
 
 # Commands that should redirect to diff editor
 EDITOR_COMMANDS = {"nano", "vim", "vi", "nvim", "emacs", "pico", "edit"}
@@ -51,6 +52,12 @@ CLOUD_COMMAND_REDIRECTS = {
 }
 # Commands that should open the task manager popup
 TASK_MANAGER_COMMANDS = {"top", "htop"}
+# Pager commands that should be rewritten to cat (TUI pagers don't work in
+# this textbox-based terminal since there is no cursor positioning or
+# alternate screen buffer support).
+PAGER_COMMANDS = {"less", "more"}
+_GIT_PAGER_SUBCOMMANDS = {"log", "diff", "show", "blame"}
+_SYSTEMCTL_PAGER_SUBCOMMANDS = {"status", "list-units", "list-timers", "list-sockets", "list-jobs"}
 _MAX_COMPLETIONS = 50
 _BASH_COMPLETION_SCRIPTS = (
     "/usr/share/bash-completion/bash_completion",
@@ -167,6 +174,7 @@ def init_terminal_socketio(socketio):
         session_id = request.sid
         remote_addr = request.remote_addr or "-"
         pty_manager.remove_session(session_id)
+        _sudo_nopasswd_cache.pop(session_id, None)
         leave_room(session_id)
         ws_logger.info(
             '%s - - [%s] "WS DISCONNECT /terminal" - - "-" "-"',
@@ -209,6 +217,15 @@ def init_terminal_socketio(socketio):
         if check_task_manager_command(command):
             emit("output", {"data": f"{command}\nOpening task manager...\n"})
             emit("task_manager_popup", {})
+            session.write("\n")
+            return
+
+        # Intercept pager commands and open a scrollable modal instead
+        pager_result = get_pager_content(command, get_session_cwd(session), session_id)
+        if pager_result is not None:
+            title, content = pager_result
+            emit("output", {"data": f"{command}\nOpening in pager...\n"})
+            emit("pager_popup", {"title": title, "content": content})
             session.write("\n")
             return
 
@@ -297,6 +314,12 @@ def parse_intercept_command(command: str) -> tuple[list[str], int] | None:
     return parts, idx
 
 
+_CLOUD_NONINTERACTIVE_ARGS: dict[str, set[str]] = {
+    "codex": {"exec"},
+    "claude": {"-p", "--print"},
+}
+
+
 def check_cloud_redirect(command: str) -> tuple[str, str] | None:
     """Return (url, label) for commands that should open cloud UIs."""
     parsed = parse_intercept_command(command)
@@ -305,7 +328,17 @@ def check_cloud_redirect(command: str) -> tuple[str, str] | None:
 
     parts, idx = parsed
     cmd = parts[idx]
-    return CLOUD_COMMAND_REDIRECTS.get(cmd)
+    if cmd not in CLOUD_COMMAND_REDIRECTS:
+        return None
+
+    # Allow non-interactive subcommands/flags to run in the terminal.
+    non_interactive = _CLOUD_NONINTERACTIVE_ARGS.get(cmd, set())
+    remaining = parts[idx + 1:]
+    for arg in remaining:
+        if arg in non_interactive:
+            return None
+
+    return CLOUD_COMMAND_REDIRECTS[cmd]
 
 
 def check_editor_redirect(command: str, cwd: str | None = None) -> str | None:
@@ -354,6 +387,142 @@ def check_task_manager_command(command: str) -> bool:
         return False
     parts, idx = parsed
     return parts[idx] in TASK_MANAGER_COMMANDS
+
+
+def _run_no_pager(run_parts: list[str], cwd: str, timeout: int = 10) -> str | None:
+    """Run a command and return its combined output, or None on failure."""
+    try:
+        result = subprocess.run(
+            run_parts,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+        )
+        output = result.stdout or result.stderr
+        return output if output.strip() else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+_SHELL_OPERATOR_CHARS = frozenset("|&;<>")
+
+
+def _has_shell_operators(command: str) -> bool:
+    """Return True if the command contains unquoted shell operators.
+
+    Uses punctuation_chars so that operators like > are always their own
+    token even without surrounding spaces (e.g. >out.txt, >>log, 2>&1).
+    Operators inside quotes are absorbed into the surrounding token and
+    are not flagged.
+    """
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lex.whitespace_split = False
+    except ValueError:
+        return True  # Malformed quoting — treat conservatively
+
+    return any(
+        token and all(ch in _SHELL_OPERATOR_CHARS for ch in token)
+        for token in lex
+    )
+
+
+_PAGER_MAX_CHARS = 512 * 1024  # 512 KB
+
+
+def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str, str] | None:
+    """Return (title, content) if this is an interceptable pager command.
+
+    Returns None to let the command fall through to the PTY normally
+    (e.g. ``less`` with no file arg, piped commands, or unreadable files).
+    Content is capped at _PAGER_MAX_CHARS to avoid large Socket.IO payloads.
+    """
+    if _has_shell_operators(command):
+        return None
+    parsed = parse_intercept_command(command)
+    if not parsed:
+        return None
+    parts, idx = parsed
+    cmd = parts[idx]
+
+    # If the command is prefixed with sudo, only intercept when the user has
+    # non-interactive sudo (no password required). The result is cached per
+    # session so the check only runs once per connection.
+    if idx > 0:
+        if session_id not in _sudo_nopasswd_cache:
+            try:
+                check = subprocess.run(
+                    ["sudo", "-n", "true"],
+                    capture_output=True,
+                    timeout=2,
+                )
+                _sudo_nopasswd_cache[session_id] = check.returncode == 0
+            except (subprocess.TimeoutExpired, OSError):
+                _sudo_nopasswd_cache[session_id] = False
+        if not _sudo_nopasswd_cache.get(session_id):
+            return None
+
+    out: tuple[str, str] | None = None
+
+    if cmd == "man":
+        args = parts[idx + 1:]
+        if args:
+            try:
+                result = subprocess.run(
+                    ["man", "-P", "cat"] + args,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env={**os.environ, "MANWIDTH": "80"},
+                )
+                if result.returncode == 0 and result.stdout:
+                    out = (f"man {' '.join(args)}", result.stdout)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+    elif cmd in PAGER_COMMANDS:
+        args = parts[idx + 1:]
+        file_arg = next((a for a in reversed(args) if not a.startswith("-")), None)
+        if file_arg:
+            path = Path(os.path.expanduser(file_arg))
+            if not path.is_absolute():
+                path = Path(cwd) / path
+            try:
+                out = (file_arg, path.read_text(errors="replace"))
+            except OSError:
+                pass
+
+    elif cmd == "git":
+        args = parts[idx + 1:]
+        if args and args[0] in _GIT_PAGER_SUBCOMMANDS:
+            run_parts = parts[:idx + 1] + ["--no-pager"] + args
+            content = _run_no_pager(run_parts, cwd)
+            if content is not None:
+                out = (f"git {args[0]}", content)
+
+    elif cmd == "systemctl":
+        args = parts[idx + 1:]
+        subcmd = next((a for a in args if not a.startswith("-")), None)
+        if subcmd in _SYSTEMCTL_PAGER_SUBCOMMANDS:
+            run_parts = parts[:idx + 1] + ["--no-pager"] + args
+            content = _run_no_pager(run_parts, cwd)
+            if content is not None:
+                out = (f"systemctl {subcmd}", content)
+
+    elif cmd == "journalctl":
+        args = parts[idx + 1:]
+        run_parts = parts[:idx + 1] + ["--no-pager"] + args
+        content = _run_no_pager(run_parts, cwd)
+        if content is not None:
+            out = ("journalctl", content)
+
+    if out is None:
+        return None
+    title, content = out
+    if len(content) > _PAGER_MAX_CHARS:
+        content = content[:_PAGER_MAX_CHARS] + "\n\n[… output truncated at 512 KB …]"
+    return title, content
 
 
 @terminal_bp.route("/terminal")

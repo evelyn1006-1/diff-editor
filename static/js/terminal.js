@@ -95,6 +95,10 @@ function connect() {
         openTaskManager();
     });
 
+    socket.on('pager_popup', (data) => {
+        openPagerModal(data.title, data.content);
+    });
+
     socket.on('disconnect', () => {
         statusEl.textContent = 'Disconnected';
         statusEl.className = 'status error';
@@ -854,6 +858,109 @@ function handleTaskManagerKeydown(e) {
     }
 }
 
+// ── Pager Modal ────────────────────────────────────────────────────────────
+
+let pagerSearchMatches = [];
+let pagerSearchIndex = 0;
+
+function openPagerModal(title, content) {
+    const overlay = document.getElementById('pager-overlay');
+    const titleEl = document.getElementById('pager-title');
+    const contentEl = document.getElementById('pager-content');
+    const searchEl = document.getElementById('pager-search');
+    const countEl = document.getElementById('pager-search-count');
+    const closeBtn = document.getElementById('pager-close');
+    if (!overlay) return;
+
+    titleEl.textContent = title;
+    contentEl.textContent = content;
+    pagerSearchMatches = [];
+    pagerSearchIndex = 0;
+    searchEl.value = '';
+    countEl.textContent = '';
+
+    overlay.classList.remove('hidden');
+    searchEl.focus();
+
+    closeBtn.onclick = closePagerModal;
+    searchEl.oninput = () => pagerSearch(content);
+    searchEl.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            pagerSearchStep(e.shiftKey ? -1 : 1);
+        }
+    };
+    document.addEventListener('keydown', handlePagerKeydown);
+}
+
+function closePagerModal() {
+    const overlay = document.getElementById('pager-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    document.removeEventListener('keydown', handlePagerKeydown);
+    pagerSearchMatches = [];
+    document.getElementById('terminal-input')?.focus();
+}
+
+function handlePagerKeydown(e) {
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        closePagerModal();
+    }
+}
+
+function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function pagerSearch(rawContent) {
+    const contentEl = document.getElementById('pager-content');
+    const countEl = document.getElementById('pager-search-count');
+    const query = document.getElementById('pager-search').value;
+    pagerSearchMatches = [];
+    pagerSearchIndex = 0;
+
+    if (!query) {
+        contentEl.textContent = rawContent;
+        countEl.textContent = '';
+        return;
+    }
+
+    // Run regex on raw content so <, >, & in the visible text are matched
+    // correctly. Then build HTML by escaping segments around each match.
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(escaped, 'gi');
+    let html = '';
+    let lastIndex = 0;
+    let matchIndex = 0;
+    let match;
+    while ((match = re.exec(rawContent)) !== null) {
+        html += escapeHtml(rawContent.slice(lastIndex, match.index));
+        const cls = matchIndex === 0 ? ' class="pager-mark-current"' : '';
+        html += `<mark${cls}>${escapeHtml(match[0])}</mark>`;
+        lastIndex = match.index + match[0].length;
+        matchIndex++;
+    }
+    html += escapeHtml(rawContent.slice(lastIndex));
+    contentEl.innerHTML = html;
+
+    pagerSearchMatches = Array.from(contentEl.querySelectorAll('mark'));
+    countEl.textContent = pagerSearchMatches.length ? `1 / ${pagerSearchMatches.length}` : '0';
+    if (pagerSearchMatches.length) {
+        pagerSearchMatches[0].scrollIntoView({ block: 'center' });
+    }
+}
+
+function pagerSearchStep(delta) {
+    if (!pagerSearchMatches.length) return;
+    pagerSearchMatches[pagerSearchIndex].classList.remove('pager-mark-current');
+    pagerSearchIndex = (pagerSearchIndex + delta + pagerSearchMatches.length) % pagerSearchMatches.length;
+    const current = pagerSearchMatches[pagerSearchIndex];
+    current.classList.add('pager-mark-current');
+    current.scrollIntoView({ block: 'center' });
+    document.getElementById('pager-search-count').textContent =
+        `${pagerSearchIndex + 1} / ${pagerSearchMatches.length}`;
+}
+
 async function refreshTaskManager(options = {}) {
     const { includeFailed = false } = options;
     if (includeFailed) {
@@ -1071,7 +1178,7 @@ async function fetchServiceFailureDetails(unit) {
     return data;
 }
 
-function showServiceFailurePopup(title, details = {}, fallbackError = '') {
+function showServiceFailurePopup(title, details = {}) {
     const overlay = document.getElementById('service-failure-overlay');
     if (!overlay) return;
 
