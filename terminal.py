@@ -19,6 +19,7 @@ import gevent.event
 from flask import Blueprint, jsonify, render_template, request
 from flask_socketio import emit, join_room, leave_room
 
+from utils.pack_autocomp import find_npm_packages, find_pypi_packages
 from utils.pty_manager import PTYManager
 
 # Set up WebSocket access logging (same file as HTTP, rotation handled by rotatelog)
@@ -74,6 +75,7 @@ _PATH_COMPLETION_COMMANDS = {
     "cd", "nano", "vim", "vi", "nvim", "emacs", "pico", "edit",
     "cat", "less", "more", "head", "tail",
 }
+NO_PACKAGE_LOOKUP = os.environ.get("NO_PACKAGE_LOOKUP", "").lower() in {"1", "true", "yes", "on"} 
 
 
 def _short_completion_value(value: str, max_len: int = 80) -> str:
@@ -1326,6 +1328,14 @@ def _complete_pip(pip_cmd: str, subcommand: str, prefix: str, arg_index: int, cw
         if req_file.startswith(prefix) and (base_cwd / req_file).exists():
             completions.add(req_file)
 
+    # Remote PyPI lookup for install commands when the prefix is long enough.
+    if not NO_PACKAGE_LOOKUP: 
+        if subcommand in ("install", "download", "wheel") and len(prefix) >= 2:
+            try:
+                completions.update(find_pypi_packages(prefix))
+            except Exception:
+                pass
+
     return sorted(completions)[:50]
 
 
@@ -1387,6 +1397,14 @@ def _complete_npm(subcommand: str, prefix: str, arg_index: int, cwd: str | None 
     # Global fallback for package-targeting npm commands (useful outside project dirs).
     if subcommand in ("install", "i", "uninstall", "remove", "rm", "update", "up", "exec"):
         completions.update(_complete_npm_global_packages(prefix, cwd))
+
+    # Remote npm registry lookup for install commands when the prefix is long enough.
+    if not NO_PACKAGE_LOOKUP: 
+        if subcommand in ("install", "i") and len(prefix) >= 2:
+            try:
+                completions.update(find_npm_packages(prefix))
+            except Exception:
+                pass
 
     return sorted(completions)[:50]
 
