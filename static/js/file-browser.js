@@ -18,6 +18,18 @@ const BATCH_SHORTCUTS = [
     { label: 'nginx', dir: '/etc/nginx/sites-available' },
 ];
 
+const COMPILABLE_SUFFIXES = new Map([
+    ['.c', 'c'],
+    ['.cc', 'cpp'],
+    ['.cpp', 'cpp'],
+    ['.cxx', 'cpp'],
+    ['.c++', 'cpp'],
+    ['.go', 'go'],
+    ['.java', 'java'],
+    ['.rs', 'rust'],
+    ['.cs', 'csharp'],
+]);
+
 function normalizeDirectoryPath(path) {
     return path.trim().replace(/\/+/g, '/').replace(/\/\.$/, '').replace(/\/+$/, '') || '/';
 }
@@ -139,6 +151,20 @@ function bindShortcutButtons(overlay, shortcuts, onSelect) {
     });
 }
 
+function getCompilableLanguageHint(name) {
+    const lowerName = String(name || '').toLowerCase();
+    for (const [suffix, language] of COMPILABLE_SUFFIXES.entries()) {
+        if (lowerName.endsWith(suffix)) {
+            return language;
+        }
+    }
+    return null;
+}
+
+function isCompilableFileName(name) {
+    return Boolean(getCompilableLanguageHint(name));
+}
+
 function buildOperationRequest({ mode, path, name, isDir, directory, overwrite, createDirs, activate, isSymlink }) {
     const isCopy = mode === 'copy';
     const body = {
@@ -174,6 +200,17 @@ async function postJson(endpoint, body) {
         response,
         data: await response.json(),
     };
+}
+
+async function fetchCompileInfo(path) {
+    const response = await fetch(`api/file/compile-info?path=${encodeURIComponent(path)}`);
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(data.error || 'Failed to load compile options');
+    }
+
+    return data;
 }
 
 function initFileBrowser(defaultRoot) {
@@ -405,6 +442,13 @@ async function loadDirectory(path) {
             });
         });
 
+        fileList.querySelectorAll('.btn-compile').forEach(btn => {
+            btn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await compileFile(btn.dataset.path, btn.dataset.name);
+            });
+        });
+
         fileList.querySelectorAll('.btn-info').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -444,6 +488,9 @@ async function loadDirectory(path) {
 function createFileItem(item) {
     const icon = item.is_dir ? '<span class="icon folder">&#128193;</span>' : '<span class="icon">&#128196;</span>';
     const renameLabel = 'Rename/move';
+    const compileItem = !item.is_dir && isCompilableFileName(item.name)
+        ? `<button class="dropdown-item btn-compile" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9881; Compile</button>`
+        : '';
 
     let badges = '';
     if (!item.is_dir) {
@@ -487,6 +534,7 @@ function createFileItem(item) {
             <button class="dropdown-item btn-info" data-path="${escapeHtml(item.path)}">&#9432; Info</button>
             <button class="dropdown-item btn-copy-file" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697; Copy</button>
             <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; ${renameLabel}</button>
+            ${compileItem}
             <button class="dropdown-item btn-download" data-path="${escapeHtml(item.path)}">&#11015; Download</button>
             <button class="dropdown-item btn-delete" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005; Delete</button>`;
     }
@@ -922,6 +970,155 @@ function copyDir(path, name) {
 
 function copyFile(path, name) {
     showFileModal({ path, name, isDir: false, mode: 'copy' });
+}
+
+async function compileFile(path, name) {
+    let compileInfo;
+    try {
+        compileInfo = await fetchCompileInfo(path);
+    } catch (err) {
+        window.alert(`Error: ${err.message}`);
+        return;
+    }
+
+    const supportsOptimization = Boolean(compileInfo.supports_optimization);
+    const supportsWarnings = Boolean(compileInfo.supports_warnings);
+    const optionHtml = `
+        ${supportsOptimization ? `<label class="copy-option"><input type="checkbox" class="chk-optimize"> ${escapeHtml(compileInfo.optimization_label || 'Optimize')}</label>` : ''}
+        ${supportsWarnings ? `<label class="copy-option"><input type="checkbox" class="chk-warnings" checked> ${escapeHtml(compileInfo.warning_label || 'Warnings')}</label>` : ''}
+    `;
+    const summaryHtml = [
+        `<span class="modal-verb-ing">Compiling</span> "${escapeHtml(name)}"`,
+        compileInfo.artifact_note ? escapeHtml(compileInfo.artifact_note) : '',
+    ].filter(Boolean).join('<br>');
+
+    const overlay = createCopyModal({
+        titleHtml: `<span class="modal-verb">Compile</span> ${escapeHtml(compileInfo.label || 'program')}`,
+        summaryHtml,
+        fieldsHtml: `
+            <label class="copy-label">Output directory</label>
+            <input type="text" class="copy-input copy-dir-input" autocomplete="off">
+            <label class="copy-label">Output name</label>
+            <input type="text" class="copy-input copy-name-input" autocomplete="off">
+        `,
+        symlinkOptionHtml: optionHtml,
+        actionLabel: 'Compile',
+    });
+
+    const {
+        dirInput,
+        errorEl,
+        actionBtn,
+        chkOverwrite,
+        chkCreateDirs,
+    } = getCopyModalControls(overlay);
+    const nameInput = overlay.querySelector('.copy-name-input');
+    const chkOptimize = overlay.querySelector('.chk-optimize');
+    const chkWarnings = overlay.querySelector('.chk-warnings');
+
+    dirInput.value = compileInfo.default_directory || currentPath;
+    nameInput.value = compileInfo.default_name || name.replace(/\.[^.]+$/, '');
+
+    let submitting = false;
+
+    function close() {
+        if (!submitting) overlay.remove();
+    }
+
+    function resetActionButton() {
+        actionBtn.disabled = false;
+        actionBtn.textContent = 'Compile';
+    }
+
+    if (!compileInfo.available) {
+        const installSuffix = compileInfo.install_command ? ` Install with: ${compileInfo.install_command}` : '';
+        showModalError(errorEl, `${compileInfo.error || 'Compiler unavailable.'}${installSuffix}`);
+        actionBtn.disabled = true;
+    }
+
+    async function submit() {
+        if (submitting || actionBtn.disabled) return;
+
+        const trimmedDir = dirInput.value.trim();
+        const trimmedName = nameInput.value.trim();
+        hideModalError(errorEl);
+
+        if (!trimmedDir) {
+            showModalError(errorEl, 'Output directory cannot be empty.');
+            return;
+        }
+        if (!trimmedName) {
+            showModalError(errorEl, 'Output name cannot be empty.');
+            return;
+        }
+
+        submitting = true;
+        actionBtn.disabled = true;
+        actionBtn.textContent = 'Compiling...';
+
+        try {
+            const { response, data } = await postJson('api/file/compile', {
+                path,
+                directory: trimmedDir,
+                name: trimmedName,
+                optimize: Boolean(chkOptimize?.checked),
+                warnings: Boolean(chkWarnings?.checked),
+                overwrite: chkOverwrite.checked,
+                create_dirs: chkCreateDirs.checked,
+            });
+            if (!response.ok) {
+                const errorLines = String(data.error || 'Compile failed.').split('\n');
+                showModalError(errorEl, errorLines);
+                submitting = false;
+                resetActionButton();
+                return;
+            }
+
+            submitting = false;
+            close();
+            loadDirectory(currentPath);
+
+            const successLines = [
+                data.message || 'Compilation finished.',
+                `Output: ${data.output_path}`,
+            ];
+            if (data.artifact_note) {
+                successLines.push(data.artifact_note);
+            }
+            if (data.compiler_output) {
+                successLines.push('', data.compiler_output);
+            }
+            window.alert(successLines.join('\n'));
+        } catch (err) {
+            showModalError(errorEl, `Error: ${err.message}`);
+            submitting = false;
+            resetActionButton();
+        }
+    }
+
+    overlay.querySelector('.btn-modal-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    actionBtn.addEventListener('click', submit);
+    dirInput.addEventListener('input', () => {
+        if (compileInfo.available) hideModalError(errorEl);
+    });
+    nameInput.addEventListener('input', () => {
+        if (compileInfo.available) hideModalError(errorEl);
+    });
+    dirInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            nameInput.focus();
+        }
+    });
+    nameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            submit();
+        }
+    });
+
+    setTimeout(() => nameInput.focus(), 50);
 }
 
 function showFileModal({ path, name, isDir, mode }) {

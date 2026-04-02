@@ -102,3 +102,55 @@ CLOUD_COMMAND_RULES: dict[str, dict[str, set[str]]] = {
         },
     },
 }
+
+
+COMPILE_LANGUAGE_CONFIGS: dict[str, dict[str, object]] = {
+    "c": {
+        "label": "C",
+        "default_extension": "",
+        "supports_optimization": True,
+        "optimization_label": "Optimize (-O2)",
+        "supports_warnings": True,
+        "warning_label": "Extra warnings (-Wall -Wextra)",
+    },
+    "cpp": {
+        "label": "C++",
+        "default_extension": "",
+        "supports_optimization": True,
+        "optimization_label": "Optimize (-O2)",
+        "supports_warnings": True,
+        "warning_label": "Extra warnings (-Wall -Wextra)",
+    },
+    "go": {
+        "label": "Go",
+        "default_extension": "",
+        "supports_optimization": False,
+        "optimization_label": None,
+        "supports_warnings": False,
+        "warning_label": None,
+    },
+    "java": {
+        "label": "Java",
+        "default_extension": ".jar",
+        "supports_optimization": False,
+        "optimization_label": None,
+        "supports_warnings": True,
+        "warning_label": "Lint warnings (-Xlint)",
+    },
+    "rust": {
+        "label": "Rust",
+        "default_extension": "",
+        "supports_optimization": True,
+        "optimization_label": "Optimize (-O)",
+        "supports_warnings": False,
+        "warning_label": None,
+    },
+    "csharp": {
+        "label": "C#",
+        "default_extension": ".exe",
+        "supports_optimization": True,
+        "optimization_label": "Optimize (-optimize+)",
+        "supports_warnings": True,
+        "warning_label": "Higher warning level (-warn:4)",
+    },
+}
