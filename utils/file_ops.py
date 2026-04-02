@@ -1,10 +1,13 @@
 """
-File operations with sudo support for reading/writing files outside home directory.
+Filesystem helpers and file operations with sudo support.
 """
 
 import errno
+import io
 import json
+import mimetypes
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -765,3 +768,630 @@ def get_directory_info(path: Path) -> tuple[bool, dict | str]:
         pass
 
     return True, info
+
+
+TEXT_CONTROL_WHITESPACE_BYTES = {7, 8, 9, 10, 11, 12, 13, 27}
+
+IMAGE_EXIF_ORIENTATION_LABELS = {
+    1: "Normal",
+    2: "Mirrored horizontally",
+    3: "Rotated 180 deg",
+    4: "Mirrored vertically",
+    5: "Mirrored horizontally, rotated 90 deg CW",
+    6: "Rotated 90 deg CW",
+    7: "Mirrored horizontally, rotated 90 deg CCW",
+    8: "Rotated 90 deg CCW",
+}
+
+EDITOR_LANGUAGE_BY_SUFFIX = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript",
+    ".jsx": "javascript", ".tsx": "typescript", ".html": "html",
+    ".css": "css", ".scss": "scss", ".json": "json", ".md": "markdown",
+    ".yaml": "yaml", ".yml": "yaml", ".xml": "xml", ".sql": "sql",
+    ".sh": "shell", ".bash": "shell", ".zsh": "shell",
+    ".rs": "rust", ".go": "go", ".java": "java", ".c": "c",
+    ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".c++": "cpp",
+    ".h": "c", ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+    ".rb": "ruby", ".pl": "perl", ".pm": "perl", ".t": "perl",
+    ".cs": "csharp", ".csx": "csharp",
+    ".php": "php", ".swift": "swift", ".kt": "kotlin",
+    ".nginx": "nginx", ".conf": "ini", ".ini": "ini",
+    ".toml": "toml", ".env": "dotenv", ".txt": "plaintext",
+    ".bf": "brainfuck", ".mag": "magma",
+}
+
+SHEBANG_LANGUAGE_MAP = {
+    "python": "python", "python3": "python", "python2": "python",
+    "bash": "shell", "sh": "shell", "zsh": "shell", "fish": "shell",
+    "node": "javascript", "nodejs": "javascript",
+    "ruby": "ruby", "perl": "perl", "perl5": "perl", "php": "php",
+    "lua": "lua", "awk": "shell", "sed": "shell",
+    "bf": "brainfuck", "magma": "magma",
+}
+
+
+def resolve_request_path(raw_path: str, field_name: str = "path") -> tuple[Path | None, str | None]:
+    """Resolve a user-provided path while handling invalid inputs safely."""
+    if raw_path is None:
+        return None, f"No {field_name} specified"
+
+    raw_path = str(raw_path)
+    if not raw_path:
+        return None, f"No {field_name} specified"
+    if "\x00" in raw_path:
+        return None, f"Invalid {field_name}"
+
+    try:
+        return Path(os.path.abspath(raw_path)), None
+    except (OSError, RuntimeError, ValueError):
+        return None, f"Invalid {field_name}"
+
+
+def is_likely_binary(data: bytes) -> bool:
+    """Best-effort binary detection for editor and metadata rendering."""
+    if not data:
+        return False
+
+    if b"\x00" in data:
+        return True
+
+    try:
+        data.decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        pass
+
+    control_count = sum(1 for b in data if b < 32 and b not in TEXT_CONTROL_WHITESPACE_BYTES)
+    return (control_count / len(data)) > 0.30
+
+
+def bytes_to_hex_view(data: bytes, bytes_per_line: int = 16) -> str:
+    """Render bytes as a readable hex dump grouped by bytes."""
+    if not data:
+        return ""
+
+    lines: list[str] = []
+    hex_width = (bytes_per_line * 3) - 1
+
+    for offset in range(0, len(data), bytes_per_line):
+        chunk = data[offset:offset + bytes_per_line]
+        hex_bytes = " ".join(f"{b:02x}" for b in chunk)
+        ascii_preview = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+        lines.append(f"{offset:08x}  {hex_bytes.ljust(hex_width)}  |{ascii_preview}|")
+
+    return "\n".join(lines)
+
+
+def parse_hex_view(content: str) -> tuple[bool, bytes | str]:
+    """
+    Parse hex dump text back into bytes.
+    Accepts lines like:
+    00000000  aa bb cc dd ...  |....|
+    and also plain whitespace-separated byte pairs.
+    """
+    if not content.strip():
+        return True, b""
+
+    parsed = bytearray()
+    hex_chars = set("0123456789abcdefABCDEF")
+
+    for line_no, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if "|" in line:
+            line = line.split("|", 1)[0].rstrip()
+
+        parts = line.split()
+        if not parts:
+            continue
+
+        if len(parts[0]) == 8 and all(ch in hex_chars for ch in parts[0]):
+            parts = parts[1:]
+
+        for part in parts:
+            if len(part) != 2 or any(ch not in hex_chars for ch in part):
+                return False, f"Invalid hex byte '{part}' on line {line_no}"
+            parsed.append(int(part, 16))
+
+    return True, bytes(parsed)
+
+
+def detect_image_mime(path: Path, data: bytes) -> str | None:
+    """Detect common image types from bytes with extension fallback."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data.startswith(b"BM"):
+        return "image/bmp"
+    if data.startswith(b"\x00\x00\x01\x00"):
+        return "image/x-icon"
+    if data.startswith(b"II*\x00") or data.startswith(b"MM\x00*"):
+        return "image/tiff"
+
+    head = data[:2048].decode("utf-8", errors="ignore").lstrip("\ufeff \t\r\n").lower()
+    if head.startswith("<svg") or ("<svg" in head and head.startswith("<?xml")):
+        return "image/svg+xml"
+    if path.suffix.lower() == ".svg":
+        return "image/svg+xml"
+
+    guessed, _ = mimetypes.guess_type(path.name)
+    if guessed and guessed.startswith("image/"):
+        return guessed
+
+    return None
+
+
+def detect_language_for_path(
+    path: Path,
+    *,
+    content: str | None = None,
+    is_binary: bool = False,
+) -> str:
+    """Best-effort language detection shared by editor and compile helpers."""
+    language = EDITOR_LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
+
+    if not is_binary and not language and content:
+        first_line = content.split("\n", 1)[0]
+        if first_line.startswith("#!"):
+            parts = first_line[2:].strip().split()
+            if parts:
+                interpreter = parts[-1] if parts[0].endswith("env") and len(parts) > 1 else parts[0]
+                interpreter = interpreter.split("/")[-1]
+                language = SHEBANG_LANGUAGE_MAP.get(interpreter)
+
+    return "plaintext" if is_binary else (language or "plaintext")
+
+
+def parse_optional_float(value: object) -> float | None:
+    """Parse a numeric value, returning None for empty or invalid inputs."""
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_optional_int(value: object) -> int | None:
+    """Parse an integer-like value, returning None for empty or invalid inputs."""
+    parsed = parse_optional_float(value)
+    if parsed is None:
+        return None
+    try:
+        return int(parsed)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def parse_ffprobe_rate(value: object) -> float | None:
+    """Parse ffprobe rate values like 30000/1001 or 24."""
+    if value in (None, "", "N/A", "0/0"):
+        return None
+    if isinstance(value, str) and "/" in value:
+        num, den = value.split("/", 1)
+        numerator = parse_optional_float(num)
+        denominator = parse_optional_float(den)
+        if numerator is None or denominator in (None, 0):
+            return None
+        return numerator / denominator
+    return parse_optional_float(value)
+
+
+def parse_pdf_version(data: bytes | None) -> str | None:
+    """Extract a PDF version like 1.7 from the file header."""
+    if not data:
+        return None
+    match = re.search(rb"%PDF-(\d+(?:\.\d+)?)", data[:32])
+    if not match:
+        return None
+    return match.group(1).decode("ascii", errors="ignore")
+
+
+def normalize_metadata_text(value: object) -> str | None:
+    """Return a JSON-safe metadata string, dropping empty values."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    text = text.strip()
+    return text or None
+
+
+def get_image_orientation_label(img) -> str | None:
+    """Return a human-readable EXIF orientation label when available."""
+    try:
+        exif = img.getexif()
+    except Exception:
+        return None
+    if not exif:
+        return None
+    return IMAGE_EXIF_ORIENTATION_LABELS.get(exif.get(274))
+
+
+def build_image_info(img) -> dict:
+    """Collect compact, high-value metadata from a Pillow image object."""
+    try:
+        bands = tuple(img.getbands() or ())
+    except Exception:
+        bands = ()
+
+    return {
+        "width": img.width,
+        "height": img.height,
+        "mode": img.mode,
+        "format": img.format,
+        "has_alpha": ("A" in bands) or ("transparency" in getattr(img, "info", {})),
+        "orientation": get_image_orientation_label(img),
+        "frame_count": max(1, int(getattr(img, "n_frames", 1) or 1)),
+    }
+
+
+def build_pdf_info(reader, head: bytes | None) -> dict:
+    """Collect compact PDF metadata from a pypdf reader."""
+    pdf_info: dict = {
+        "encrypted": bool(reader.is_encrypted),
+        "version": parse_pdf_version(head),
+        "title": None,
+        "author": None,
+        "page_width_pt": None,
+        "page_height_pt": None,
+    }
+
+    try:
+        metadata = reader.metadata or {}
+        if metadata:
+            title = getattr(metadata, "title", None)
+            author = getattr(metadata, "author", None)
+            if title is None and hasattr(metadata, "get"):
+                title = metadata.get("/Title")
+            if author is None and hasattr(metadata, "get"):
+                author = metadata.get("/Author")
+            pdf_info["title"] = normalize_metadata_text(title)
+            pdf_info["author"] = normalize_metadata_text(author)
+    except Exception:
+        pass
+
+    if pdf_info["encrypted"]:
+        return pdf_info
+
+    try:
+        if reader.pages:
+            first_page = reader.pages[0]
+            pdf_info["page_width_pt"] = parse_optional_float(first_page.mediabox.width)
+            pdf_info["page_height_pt"] = parse_optional_float(first_page.mediabox.height)
+    except Exception:
+        pass
+
+    return pdf_info
+
+
+def build_media_info(ffprobe_data: dict) -> dict:
+    """Collect compact media metadata from ffprobe output."""
+    streams = ffprobe_data.get("streams", [])
+    format_info = ffprobe_data.get("format", {})
+    video_streams = [
+        stream
+        for stream in streams
+        if stream.get("codec_type") == "video"
+        and (stream.get("disposition") or {}).get("attached_pic") not in (1, "1", True)
+    ]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+
+    video_stream = video_streams[0] if video_streams else None
+    audio_stream = audio_streams[0] if audio_streams else None
+
+    bit_rate = (
+        parse_optional_int(format_info.get("bit_rate"))
+        or parse_optional_int(video_stream.get("bit_rate") if video_stream else None)
+        or parse_optional_int(audio_stream.get("bit_rate") if audio_stream else None)
+    )
+
+    return {
+        "is_audio_only": video_stream is None and audio_stream is not None,
+        "width": parse_optional_int(video_stream.get("width") if video_stream else None),
+        "height": parse_optional_int(video_stream.get("height") if video_stream else None),
+        "duration": parse_optional_float(format_info.get("duration")),
+        "video_codec": video_stream.get("codec_name") if video_stream else None,
+        "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
+        "container": format_info.get("format_long_name") or format_info.get("format_name"),
+        "bit_rate": bit_rate,
+        "frame_rate": parse_ffprobe_rate(
+            video_stream.get("avg_frame_rate") if video_stream else None
+        ) or parse_ffprobe_rate(video_stream.get("r_frame_rate") if video_stream else None),
+        "sample_rate": parse_optional_int(audio_stream.get("sample_rate") if audio_stream else None),
+        "channels": parse_optional_int(audio_stream.get("channels") if audio_stream else None),
+        "channel_layout": audio_stream.get("channel_layout") if audio_stream else None,
+        "audio_tracks": len(audio_streams),
+        "subtitle_tracks": len(subtitle_streams),
+    }
+
+
+def cleanup_temp_path(path: Path | str | None, *, recursive: bool = False) -> None:
+    """Best-effort cleanup for temporary files or directories, with sudo fallback."""
+    if not path:
+        return
+
+    temp_path = Path(path)
+
+    try:
+        if recursive:
+            shutil.rmtree(temp_path)
+        else:
+            temp_path.unlink()
+        return
+    except FileNotFoundError:
+        return
+    except OSError:
+        pass
+
+    try:
+        subprocess.run(
+            ["sudo", "-n", "rm", "-rf", str(temp_path)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def get_extended_file_info(path: Path) -> dict[str, object]:
+    """Collect best-effort extended metadata for a file or directory."""
+    path = Path(os.path.abspath(path))
+    result: dict[str, object] = {
+        "is_binary": None,
+        "line_count": None,
+        "image_info": None,
+        "pdf_pages": None,
+        "pdf_info": None,
+        "media_info": None,
+        "video_info": None,
+        "size_recursive": None,
+        "size_recursive_human": None,
+        "file_count": None,
+        "dir_count": None,
+    }
+
+    if path.is_dir():
+        success, info = get_directory_info(path)
+        if success:
+            result.update(info)
+        else:
+            result["error"] = info
+        return result
+
+    mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+    success, head = read_file_head(path)
+    if success and isinstance(head, bytes):
+        result["is_binary"] = is_likely_binary(head)
+
+    if result["is_binary"] is False:
+        success, n = count_lines(path)
+        if success:
+            result["line_count"] = n
+
+    if mime_type.startswith("image/"):
+        try:
+            from PIL import Image
+
+            if os.access(path, os.R_OK):
+                with Image.open(path) as img:
+                    result["image_info"] = build_image_info(img)
+            else:
+                ok, data = read_file_bytes(path)
+                if ok:
+                    with Image.open(io.BytesIO(data)) as img:
+                        result["image_info"] = build_image_info(img)
+        except Exception:
+            pass
+    elif mime_type == "application/pdf":
+        try:
+            import pypdf
+
+            if os.access(path, os.R_OK):
+                with open(path, "rb") as f:
+                    reader = pypdf.PdfReader(f)
+                    result["pdf_info"] = build_pdf_info(
+                        reader,
+                        head if isinstance(head, bytes) else None,
+                    )
+                    if not reader.is_encrypted:
+                        result["pdf_pages"] = len(reader.pages)
+            else:
+                ok, data = read_file_bytes(path)
+                if ok:
+                    reader = pypdf.PdfReader(io.BytesIO(data))
+                    result["pdf_info"] = build_pdf_info(
+                        reader,
+                        head if isinstance(head, bytes) else data[:32],
+                    )
+                    if not reader.is_encrypted:
+                        result["pdf_pages"] = len(reader.pages)
+        except Exception:
+            pass
+
+    if mime_type.startswith("video/") or mime_type.startswith("audio/"):
+        try:
+            proc = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json",
+                 "-show_streams", "-show_format", str(path)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
+            )
+            if proc.returncode == 0:
+                media_info = build_media_info(json.loads(proc.stdout))
+                result["media_info"] = media_info
+                result["video_info"] = media_info
+        except Exception:
+            pass
+
+    return result
+
+
+def get_zip_info(path: Path) -> tuple[bool, dict[str, int] | str]:
+    """Return basic zip metadata for an existing zip file."""
+    path = Path(os.path.abspath(path))
+    try:
+        size = path.stat().st_size
+        with zipfile.ZipFile(path, "r") as zf:
+            file_count = sum(1 for info in zf.infolist() if not info.is_dir())
+        return True, {"size": size, "file_count": file_count}
+    except (OSError, zipfile.BadZipFile):
+        return False, "Cannot read zip file"
+
+
+def _dedupe_path(path: Path) -> Path:
+    """Find a unique path by appending (2), (3), etc."""
+    if not path.exists() and not path.is_symlink():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    n = 2
+    while True:
+        candidate = parent / f"{stem} ({n}){suffix}"
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+        n += 1
+
+
+def extract_zip_archive(
+    path: Path,
+    *,
+    mode: str = "directory",
+) -> tuple[bool, dict[str, object] | str, int]:
+    """
+    Extract a zip file with the app's current safety and sudo fallback behavior.
+    Returns (success, payload_or_error, http_status).
+    """
+    path = Path(os.path.abspath(path))
+    if mode not in {"directory", "here"}:
+        return False, "Invalid extraction mode", 400
+
+    dest = _dedupe_path(path.parent / path.stem) if mode == "directory" else path.parent
+
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            infos = zf.infolist()
+            file_count = sum(1 for info in infos if not info.is_dir())
+            dest_resolved = str(dest.resolve()).rstrip("/") + "/"
+
+            if mode == "directory":
+                for name in zf.namelist():
+                    resolved = str((dest / name).resolve())
+                    if resolved != dest_resolved.rstrip("/") and not resolved.startswith(dest_resolved):
+                        return False, f"Zip contains unsafe path: {name}", 400
+                dest.mkdir()
+                zf.extractall(dest)
+            else:
+                rename_map: dict[str, str] = {}
+                for info in infos:
+                    parts = info.filename.rstrip("/").split("/")
+                    top = parts[0]
+                    if top not in rename_map:
+                        rename_map[top] = _dedupe_path(dest / top).name
+
+                for name in zf.namelist():
+                    parts = name.rstrip("/").split("/")
+                    parts[0] = rename_map.get(parts[0], parts[0])
+                    mapped = "/".join(parts)
+                    resolved = str(Path(os.path.abspath(dest / mapped)))
+                    if resolved != dest_resolved.rstrip("/") and not resolved.startswith(dest_resolved):
+                        return False, f"Zip contains unsafe path: {name}", 400
+
+                for info in infos:
+                    parts = info.filename.rstrip("/").split("/")
+                    parts[0] = rename_map.get(parts[0], parts[0])
+                    target = dest / "/".join(parts)
+
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(info) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+
+        return True, {"count": file_count, "dest": str(dest)}, 200
+    except PermissionError:
+        pass
+    except (OSError, zipfile.BadZipFile) as e:
+        return False, str(e), 400
+
+    try:
+        if mode == "directory":
+            subprocess.run(
+                ["sudo", "-n", "mkdir", "-p", str(dest)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
+        result = subprocess.run(
+            ["sudo", "-n", "unzip", "-n", str(path), "-d", str(dest)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+        )
+        if result.returncode in (0, 1):
+            warning = None
+            if result.returncode == 1:
+                stdout = result.stdout.decode("utf-8", errors="replace")
+                skipped = [
+                    line.split("exists")[0].strip().split()[-1]
+                    for line in stdout.splitlines()
+                    if "already exists" in line.lower()
+                ]
+                if skipped:
+                    warning = f"{len(skipped)} file(s) skipped (already exist)"
+            return True, {"dest": str(dest), "warning": warning}, 200
+
+        error_msg = result.stderr.decode("utf-8", errors="replace")
+        return False, f"unzip failed: {error_msg}", 500
+    except subprocess.TimeoutExpired:
+        return False, "Extract operation timed out", 500
+    except Exception as e:
+        return False, str(e), 500
+
+
+def zip_paths(paths: list[Path]) -> tuple[bool, str]:
+    """Stage multiple paths into a temporary directory and zip the result."""
+    def _allocate_archive_name(source: Path, seen_names: dict[str, int]) -> str:
+        base = source.name or "item"
+        if base not in seen_names:
+            seen_names[base] = 1
+            return base
+
+        seen_names[base] += 1
+        n = seen_names[base]
+        return f"{source.stem} ({n}){source.suffix}" if not source.is_dir() else f"{base} ({n})"
+
+    staging_root: Path | None = None
+    try:
+        staging_root = Path(tempfile.mkdtemp(prefix="diff-editor-batch-"))
+        seen_names: dict[str, int] = {}
+
+        for source in paths:
+            target = staging_root / _allocate_archive_name(source, seen_names)
+            if source.is_dir():
+                success, message = copy_directory(source, target)
+            else:
+                success, message = copy_file(source, target)
+
+            if not success:
+                return False, f"Failed to add {source.name} to archive: {message}"
+
+        success, result = zip_directory(staging_root)
+        if not success:
+            return False, str(result)
+        return True, str(result)
+    except OSError as e:
+        return False, str(e)
+    finally:
+        cleanup_temp_path(staging_root, recursive=True)

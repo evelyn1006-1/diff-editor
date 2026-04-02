@@ -13,9 +13,7 @@ import mimetypes
 import os
 import re
 import secrets
-import shutil
 import subprocess
-import tempfile
 import threading
 import time
 import datetime
@@ -42,533 +40,44 @@ _access_handler.setFormatter(logging.Formatter(
 ))
 access_logger.addHandler(_access_handler)
 
-from utils.file_ops import read_file_bytes, write_file, write_file_bytes, is_writable_by_user, create_dir, create_symlink, ensure_directory, copy_directory, copy_file, make_executable, delete_path, delete_directory, rename_path, zip_directory, human_size, stat_path, read_file_head, count_lines, get_directory_info
-from utils.git_ops import find_git_root, get_head_content_bytes, is_tracked_by_git, get_directory_git_status, get_tracked_files
-from utils.constants import COMPILE_LANGUAGE_CONFIGS
-
-
-TEXT_CONTROL_WHITESPACE_BYTES = {7, 8, 9, 10, 11, 12, 13, 27}
-
-EDITOR_LANGUAGE_BY_SUFFIX = {
-    ".py": "python", ".js": "javascript", ".ts": "typescript",
-    ".jsx": "javascript", ".tsx": "typescript", ".html": "html",
-    ".css": "css", ".scss": "scss", ".json": "json", ".md": "markdown",
-    ".yaml": "yaml", ".yml": "yaml", ".xml": "xml", ".sql": "sql",
-    ".sh": "shell", ".bash": "shell", ".zsh": "shell",
-    ".rs": "rust", ".go": "go", ".java": "java", ".c": "c",
-    ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".c++": "cpp",
-    ".h": "c", ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
-    ".rb": "ruby", ".pl": "perl", ".pm": "perl", ".t": "perl",
-    ".cs": "csharp", ".csx": "csharp",
-    ".php": "php", ".swift": "swift", ".kt": "kotlin",
-    ".nginx": "nginx", ".conf": "ini", ".ini": "ini",
-    ".toml": "toml", ".env": "dotenv", ".txt": "plaintext",
-    ".bf": "brainfuck", ".mag": "magma",
-}
-
-COMPILE_LANGUAGE_BY_SUFFIX = {
-    ".c": "c",
-    ".cc": "cpp",
-    ".cpp": "cpp",
-    ".cxx": "cpp",
-    ".c++": "cpp",
-    ".go": "go",
-    ".java": "java",
-    ".rs": "rust",
-    ".cs": "csharp",
-}
-
-SHEBANG_LANGUAGE_MAP = {
-    "python": "python", "python3": "python", "python2": "python",
-    "bash": "shell", "sh": "shell", "zsh": "shell", "fish": "shell",
-    "node": "javascript", "nodejs": "javascript",
-    "ruby": "ruby", "perl": "perl", "perl5": "perl", "php": "php",
-    "lua": "lua", "awk": "shell", "sed": "shell",
-    "bf": "brainfuck", "magma": "magma",
-}
-
-GO_PACKAGE_PATTERN = re.compile(r"^\s*package\s+([A-Za-z_]\w*)\b", re.MULTILINE)
-JAVA_PACKAGE_PATTERN = re.compile(
-    r"^\s*package\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;",
-    re.MULTILINE,
+from utils.file_ops import (
+    bytes_to_hex_view,
+    cleanup_temp_path,
+    copy_directory,
+    copy_file,
+    create_dir,
+    create_symlink,
+    delete_directory,
+    delete_path,
+    detect_image_mime,
+    detect_language_for_path,
+    ensure_directory,
+    extract_zip_archive,
+    get_extended_file_info,
+    get_zip_info,
+    is_likely_binary,
+    is_writable_by_user,
+    make_executable,
+    parse_hex_view,
+    read_file_bytes,
+    rename_path,
+    resolve_request_path,
+    stat_path,
+    write_file,
+    write_file_bytes,
+    zip_directory,
+    zip_paths,
 )
-JAVA_MAIN_METHOD_PATTERN = re.compile(r"\bstatic\s+void\s+main\s*\(")
-
-
-def resolve_request_path(raw_path: str, field_name: str = "path") -> tuple[Path | None, str | None]:
-    """Resolve a user-provided path while handling invalid inputs safely."""
-    if raw_path is None:
-        return None, f"No {field_name} specified"
-
-    raw_path = str(raw_path)
-    if not raw_path:
-        return None, f"No {field_name} specified"
-    if "\x00" in raw_path:
-        return None, f"Invalid {field_name}"
-
-    try:
-        # Use abspath instead of resolve() to avoid following symlinks.
-        # This still normalizes ".." for path traversal prevention.
-        return Path(os.path.abspath(raw_path)), None
-    except (OSError, RuntimeError, ValueError):
-        return None, f"Invalid {field_name}"
-
-
-def is_likely_binary(data: bytes) -> bool:
-    """Best-effort binary detection for editor rendering."""
-    if not data:
-        return False
-
-    if b"\x00" in data:
-        return True
-
-    try:
-        data.decode("utf-8")
-        return False
-    except UnicodeDecodeError:
-        # Not valid UTF-8. Keep checking for control-byte density so non-UTF text
-        # doesn't get mislabeled as binary too aggressively.
-        pass
-
-    control_count = sum(1 for b in data if b < 32 and b not in TEXT_CONTROL_WHITESPACE_BYTES)
-    return (control_count / len(data)) > 0.30
-
-
-IMAGE_EXIF_ORIENTATION_LABELS = {
-    1: "Normal",
-    2: "Mirrored horizontally",
-    3: "Rotated 180 deg",
-    4: "Mirrored vertically",
-    5: "Mirrored horizontally, rotated 90 deg CW",
-    6: "Rotated 90 deg CW",
-    7: "Mirrored horizontally, rotated 90 deg CCW",
-    8: "Rotated 90 deg CCW",
-}
-
-
-def parse_optional_float(value: object) -> float | None:
-    """Parse a numeric value, returning None for empty or invalid inputs."""
-    if value in (None, "", "N/A"):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_optional_int(value: object) -> int | None:
-    """Parse an integer-like value, returning None for empty or invalid inputs."""
-    parsed = parse_optional_float(value)
-    if parsed is None:
-        return None
-    try:
-        return int(parsed)
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
-def parse_ffprobe_rate(value: object) -> float | None:
-    """Parse ffprobe rate values like 30000/1001 or 24."""
-    if value in (None, "", "N/A", "0/0"):
-        return None
-    if isinstance(value, str) and "/" in value:
-        num, den = value.split("/", 1)
-        numerator = parse_optional_float(num)
-        denominator = parse_optional_float(den)
-        if numerator is None or denominator in (None, 0):
-            return None
-        return numerator / denominator
-    return parse_optional_float(value)
-
-
-def parse_pdf_version(data: bytes | None) -> str | None:
-    """Extract a PDF version like 1.7 from the file header."""
-    if not data:
-        return None
-    match = re.search(rb"%PDF-(\d+(?:\.\d+)?)", data[:32])
-    if not match:
-        return None
-    return match.group(1).decode("ascii", errors="ignore")
-
-
-def normalize_metadata_text(value: object) -> str | None:
-    """Return a JSON-safe metadata string, dropping empty values."""
-    if value in (None, ""):
-        return None
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", errors="replace")
-    else:
-        text = str(value)
-    text = text.strip()
-    return text or None
-
-
-def get_image_orientation_label(img) -> str | None:
-    """Return a human-readable EXIF orientation label when available."""
-    try:
-        exif = img.getexif()
-    except Exception:
-        return None
-    if not exif:
-        return None
-    return IMAGE_EXIF_ORIENTATION_LABELS.get(exif.get(274))
-
-
-def build_image_info(img) -> dict:
-    """Collect compact, high-value metadata from a Pillow image object."""
-    try:
-        bands = tuple(img.getbands() or ())
-    except Exception:
-        bands = ()
-
-    return {
-        "width": img.width,
-        "height": img.height,
-        "mode": img.mode,
-        "format": img.format,
-        "has_alpha": ("A" in bands) or ("transparency" in getattr(img, "info", {})),
-        "orientation": get_image_orientation_label(img),
-        "frame_count": max(1, int(getattr(img, "n_frames", 1) or 1)),
-    }
-
-
-def build_pdf_info(reader, head: bytes | None) -> dict:
-    """Collect compact PDF metadata from a pypdf reader."""
-    pdf_info: dict = {
-        "encrypted": bool(reader.is_encrypted),
-        "version": parse_pdf_version(head),
-        "title": None,
-        "author": None,
-        "page_width_pt": None,
-        "page_height_pt": None,
-    }
-
-    try:
-        metadata = reader.metadata or {}
-        if metadata:
-            title = getattr(metadata, "title", None)
-            author = getattr(metadata, "author", None)
-            if title is None and hasattr(metadata, "get"):
-                title = metadata.get("/Title")
-            if author is None and hasattr(metadata, "get"):
-                author = metadata.get("/Author")
-            pdf_info["title"] = normalize_metadata_text(title)
-            pdf_info["author"] = normalize_metadata_text(author)
-    except Exception:
-        pass
-
-    if pdf_info["encrypted"]:
-        return pdf_info
-
-    try:
-        if reader.pages:
-            first_page = reader.pages[0]
-            pdf_info["page_width_pt"] = parse_optional_float(first_page.mediabox.width)
-            pdf_info["page_height_pt"] = parse_optional_float(first_page.mediabox.height)
-    except Exception:
-        pass
-
-    return pdf_info
-
-
-def build_media_info(ffprobe_data: dict) -> dict:
-    """Collect compact media metadata from ffprobe output."""
-    streams = ffprobe_data.get("streams", [])
-    format_info = ffprobe_data.get("format", {})
-    video_streams = [
-        stream
-        for stream in streams
-        if stream.get("codec_type") == "video"
-        and (stream.get("disposition") or {}).get("attached_pic") not in (1, "1", True)
-    ]
-    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
-    subtitle_streams = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
-
-    video_stream = video_streams[0] if video_streams else None
-    audio_stream = audio_streams[0] if audio_streams else None
-
-    bit_rate = (
-        parse_optional_int(format_info.get("bit_rate"))
-        or parse_optional_int(video_stream.get("bit_rate") if video_stream else None)
-        or parse_optional_int(audio_stream.get("bit_rate") if audio_stream else None)
-    )
-
-    return {
-        "is_audio_only": video_stream is None and audio_stream is not None,
-        "width": parse_optional_int(video_stream.get("width") if video_stream else None),
-        "height": parse_optional_int(video_stream.get("height") if video_stream else None),
-        "duration": parse_optional_float(format_info.get("duration")),
-        "video_codec": video_stream.get("codec_name") if video_stream else None,
-        "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
-        "container": format_info.get("format_long_name") or format_info.get("format_name"),
-        "bit_rate": bit_rate,
-        "frame_rate": parse_ffprobe_rate(
-            video_stream.get("avg_frame_rate") if video_stream else None
-        ) or parse_ffprobe_rate(video_stream.get("r_frame_rate") if video_stream else None),
-        "sample_rate": parse_optional_int(audio_stream.get("sample_rate") if audio_stream else None),
-        "channels": parse_optional_int(audio_stream.get("channels") if audio_stream else None),
-        "channel_layout": audio_stream.get("channel_layout") if audio_stream else None,
-        "audio_tracks": len(audio_streams),
-        "subtitle_tracks": len(subtitle_streams),
-    }
-
-
-def bytes_to_hex_view(data: bytes, bytes_per_line: int = 16) -> str:
-    """Render bytes as a readable hex dump grouped by bytes."""
-    if not data:
-        return ""
-
-    lines: list[str] = []
-    hex_width = (bytes_per_line * 3) - 1
-
-    for offset in range(0, len(data), bytes_per_line):
-        chunk = data[offset:offset + bytes_per_line]
-        hex_bytes = " ".join(f"{b:02x}" for b in chunk)
-        ascii_preview = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
-        lines.append(f"{offset:08x}  {hex_bytes.ljust(hex_width)}  |{ascii_preview}|")
-
-    return "\n".join(lines)
-
-
-def detect_image_mime(path: Path, data: bytes) -> str | None:
-    """Detect common image types from bytes with extension fallback."""
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
-        return "image/gif"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    if data.startswith(b"BM"):
-        return "image/bmp"
-    if data.startswith(b"\x00\x00\x01\x00"):
-        return "image/x-icon"
-    if data.startswith(b"II*\x00") or data.startswith(b"MM\x00*"):
-        return "image/tiff"
-
-    # SVG can be text-based.
-    head = data[:2048].decode("utf-8", errors="ignore").lstrip("\ufeff \t\r\n").lower()
-    if head.startswith("<svg") or ("<svg" in head and head.startswith("<?xml")):
-        return "image/svg+xml"
-    if path.suffix.lower() == ".svg":
-        return "image/svg+xml"
-
-    guessed, _ = mimetypes.guess_type(path.name)
-    if guessed and guessed.startswith("image/"):
-        return guessed
-
-    return None
-
-
-def parse_hex_view(content: str) -> tuple[bool, bytes | str]:
-    """
-    Parse hex dump text back into bytes.
-    Accepts lines like:
-    00000000  aa bb cc dd ...  |....|
-    and also plain whitespace-separated byte pairs.
-    """
-    if not content.strip():
-        return True, b""
-
-    parsed = bytearray()
-    hex_chars = set("0123456789abcdefABCDEF")
-
-    for line_no, raw_line in enumerate(content.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        # Drop ASCII preview column if present.
-        if "|" in line:
-            line = line.split("|", 1)[0].rstrip()
-
-        parts = line.split()
-        if not parts:
-            continue
-
-        # Optional 8-digit hex offset at start of line.
-        if len(parts[0]) == 8 and all(ch in hex_chars for ch in parts[0]):
-            parts = parts[1:]
-
-        for part in parts:
-            if len(part) != 2 or any(ch not in hex_chars for ch in part):
-                return False, f"Invalid hex byte '{part}' on line {line_no}"
-            parsed.append(int(part, 16))
-
-    return True, bytes(parsed)
-
-
-def detect_language_for_path(
-    path: Path,
-    *,
-    content: str | None = None,
-    is_binary: bool = False,
-) -> str:
-    """Best-effort language detection shared by editor and compile helpers."""
-    language = EDITOR_LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
-
-    if not is_binary and not language and content:
-        first_line = content.split("\n", 1)[0]
-        if first_line.startswith("#!"):
-            parts = first_line[2:].strip().split()
-            if parts:
-                interpreter = parts[-1] if parts[0].endswith("env") and len(parts) > 1 else parts[0]
-                interpreter = interpreter.split("/")[-1]
-                language = SHEBANG_LANGUAGE_MAP.get(interpreter)
-
-    return "plaintext" if is_binary else (language or "plaintext")
-
-
-def _default_output_basename(path: Path) -> str:
-    stem = path.stem.strip()
-    if stem:
-        return stem
-    name = path.name.lstrip(".").strip()
-    return name or "output"
-
-
-def get_compile_config_for_path(path: Path) -> dict[str, object] | None:
-    """Return compile metadata for source files supported by the browser compiler."""
-    language = COMPILE_LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
-    if not language:
-        return None
-
-    language_config = COMPILE_LANGUAGE_CONFIGS.get(language)
-    if not language_config:
-        return None
-
-    default_extension = str(language_config.get("default_extension") or "")
-    default_name = _default_output_basename(path) + default_extension
-
-    return {
-        "language": language,
-        "label": language_config["label"],
-        "default_directory": str(path.parent),
-        "default_name": default_name,
-        "supports_optimization": bool(language_config.get("supports_optimization")),
-        "optimization_label": language_config.get("optimization_label"),
-        "supports_warnings": bool(language_config.get("supports_warnings")),
-        "warning_label": language_config.get("warning_label"),
-    }
-
-
-def _read_compile_source_text(path: Path, *, max_bytes: int | None = None) -> tuple[str | None, str | None]:
-    """Read compile-target source text with the same sudo-aware file access as the editor."""
-    if max_bytes is None:
-        success, data = read_file_bytes(path)
-    else:
-        success, data = read_file_head(path, max_bytes=max_bytes)
-
-    if not success:
-        return None, str(data)
-
-    content_bytes = data if isinstance(data, bytes) else str(data).encode("utf-8", errors="replace")
-    if is_likely_binary(content_bytes):
-        return None, "Source file does not look like text"
-
-    return content_bytes.decode("utf-8", errors="replace"), None
-
-
-def _extract_go_package_name(source_text: str) -> str | None:
-    match = GO_PACKAGE_PATTERN.search(source_text or "")
-    return match.group(1) if match else None
-
-
-def _extract_java_package_name(source_text: str) -> str | None:
-    match = JAVA_PACKAGE_PATTERN.search(source_text or "")
-    return match.group(1) if match else None
-
-
-def _build_go_compile_context(path: Path, source_text: str) -> tuple[dict[str, object] | None, str | None, int]:
-    package_name = _extract_go_package_name(source_text)
-    if not package_name:
-        return None, "Unable to detect the Go package declaration.", 400
-    if package_name != "main":
-        return None, "Go browser compilation currently supports only package main files.", 400
-
-    input_paths: list[str] = []
-    for sibling in sorted(path.parent.glob("*.go")):
-        if not sibling.is_file() or sibling.name.endswith("_test.go"):
-            continue
-
-        sibling_text, error = _read_compile_source_text(sibling, max_bytes=8192)
-        if error:
-            return None, f"Failed to inspect sibling Go file {sibling.name}: {error}", 500
-
-        if _extract_go_package_name(sibling_text or "") == package_name:
-            input_paths.append(str(sibling))
-
-    if not input_paths:
-        input_paths.append(str(path))
-
-    source_count = len(input_paths)
-    file_label = "file" if source_count == 1 else "files"
-    return {
-        "go_input_paths": input_paths,
-        "artifact_note": f"Builds package main using {source_count} Go {file_label} from this directory.",
-    }, None, 200
-
-
-def _build_java_compile_context(path: Path, source_text: str) -> dict[str, object]:
-    package_name = _extract_java_package_name(source_text)
-    has_main_method = bool(JAVA_MAIN_METHOD_PATTERN.search(source_text or ""))
-    main_class = None
-    artifact_note = "Produces a JAR of compiled classes without a Main-Class manifest."
-
-    if has_main_method:
-        main_class = f"{package_name}.{path.stem}" if package_name else path.stem
-        artifact_note = f"Produces a runnable JAR with Main-Class {main_class}."
-
-    return {
-        "java_package": package_name,
-        "java_main_class": main_class,
-        "artifact_note": artifact_note,
-    }
-
-
-def get_compile_context_for_path(path: Path) -> tuple[dict[str, object] | None, str | None, int]:
-    """Return compile metadata plus language-specific compile planning details."""
-    if path.suffix.lower() == ".csx":
-        return None, "C# script files (.csx) are not supported by browser compilation.", 400
-
-    compile_config = get_compile_config_for_path(path)
-    if not compile_config:
-        return None, "This file type is not compilable from the browser", 400
-
-    compile_context = dict(compile_config)
-    language = str(compile_context["language"])
-
-    if language == "go":
-        source_text, error = _read_compile_source_text(path)
-        if error:
-            return None, error, 500
-
-        go_context, go_error, go_status = _build_go_compile_context(path, source_text or "")
-        if go_error:
-            return None, go_error, go_status
-        compile_context.update(go_context or {})
-    elif language == "java":
-        source_text, error = _read_compile_source_text(path)
-        if error:
-            return None, error, 500
-        compile_context.update(_build_java_compile_context(path, source_text or ""))
-
-    return compile_context, None, 200
-
-
-def build_compile_success_message(
-    source_path: Path,
-    target_path: Path,
-    compile_context: dict[str, object],
-) -> str:
-    """Return a user-facing success message for a completed compile action."""
-    language = str(compile_context.get("language") or "")
-    if language == "java":
-        if compile_context.get("java_main_class"):
-            return f"Compiled {source_path.name} to runnable JAR {target_path.name}"
-        return f"Compiled {source_path.name} to JAR {target_path.name} (no Main-Class manifest)"
-    return f"Compiled {source_path.name} to {target_path.name}"
+from utils.compile_ops import (
+    build_compile_success_message,
+    command_exists,
+    compile_source_file,
+    find_first_command,
+    get_compile_context_for_path,
+    get_compile_tooling_status,
+    has_dotnet_sdk,
+)
+from utils.git_ops import find_git_root, get_head_content_bytes, is_tracked_by_git, get_directory_git_status, get_tracked_files
 
 
 def choose_ai_review_cwd(file_path: str) -> Path:
@@ -596,316 +105,8 @@ def choose_ai_review_cwd(file_path: str) -> Path:
 
         current = current.parent
 
-
-def command_exists(command: str) -> bool:
-    """Return whether a command is currently available on PATH."""
-    return shutil.which(command) is not None
-
-
-def find_first_command(*commands: str) -> str | None:
-    """Return the first command found on PATH from the provided candidates."""
-    for command in commands:
-        if command_exists(command):
-            return command
-    return None
-
-
-def has_dotnet_sdk() -> bool:
-    """Check for a usable dotnet SDK, not just the runtime host."""
-    if not command_exists("dotnet"):
-        return False
-
-    try:
-        result = subprocess.run(
-            ["dotnet", "--list-sdks"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-    return bool(result.stdout.strip())
-
-
-COMPILE_TOOLING_CACHE: dict[str, dict[str, object]] = {}
-COMPILE_TOOLING_CACHE_LOCK = threading.Lock()
 RUN_TOOLING_CACHE: dict[str, dict[str, object]] = {}
 RUN_TOOLING_CACHE_LOCK = threading.Lock()
-
-
-def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], int]:
-    """Return compile-tooling availability for browser-compilable languages."""
-    normalized = (language or "").strip().lower()
-    if not normalized:
-        return {"error": "No language specified"}, 400
-
-    if normalized == "c":
-        compiler = find_first_command("gcc", "cc")
-        if compiler:
-            return {"available": True, "compiler": compiler}, 200
-        return {
-            "available": False,
-            "error": "C compilation requires gcc.",
-            "install_command": "sudo apt update && sudo apt install gcc",
-        }, 200
-
-    if normalized == "cpp":
-        compiler = find_first_command("g++", "c++")
-        if compiler:
-            return {"available": True, "compiler": compiler}, 200
-        return {
-            "available": False,
-            "error": "C++ compilation requires g++.",
-            "install_command": "sudo apt update && sudo apt install g++",
-        }, 200
-
-    if normalized == "go":
-        if command_exists("go"):
-            return {"available": True, "compiler": "go"}, 200
-        return {
-            "available": False,
-            "error": "Go compilation requires the Go toolchain.",
-            "install_command": "sudo apt update && sudo apt install golang-go",
-        }, 200
-
-    if normalized == "java":
-        javac = find_first_command("javac")
-        jar = find_first_command("jar")
-        if javac and jar:
-            return {"available": True, "compiler": javac, "archiver": jar}, 200
-        return {
-            "available": False,
-            "error": "Java compilation requires javac and jar from a JDK.",
-            "install_command": "sudo apt update && sudo apt install default-jdk",
-        }, 200
-
-    if normalized == "rust":
-        if command_exists("rustc"):
-            return {"available": True, "compiler": "rustc"}, 200
-        return {
-            "available": False,
-            "error": "Rust compilation requires rustc.",
-            "install_command": "sudo apt update && sudo apt install rustc cargo",
-        }, 200
-
-    if normalized == "csharp":
-        compiler = find_first_command("csc", "mono-csc", "cli-csc", "mcs")
-        if compiler:
-            return {"available": True, "compiler": compiler}, 200
-        return {
-            "available": False,
-            "error": "C# compilation requires csc or Mono's mcs.",
-            "install_command": "sudo apt update && sudo apt install mono-mcs mono-devel",
-        }, 200
-
-    return {"error": "Unsupported language"}, 400
-
-
-def get_compile_tooling_status(language: str) -> tuple[dict[str, object], int]:
-    """
-    Return compile-tooling availability for browser-compilable languages.
-
-    Successful detections are cached in-process until app restart. Missing-tool
-    results are recomputed so newly installed compilers become visible without a
-    worker restart.
-    """
-    normalized = (language or "").strip().lower()
-    if not normalized:
-        return {"error": "No language specified"}, 400
-
-    with COMPILE_TOOLING_CACHE_LOCK:
-        cached = COMPILE_TOOLING_CACHE.get(normalized)
-    if cached is not None:
-        return dict(cached), 200
-
-    status, http_status = compute_compile_tooling_status(normalized)
-    if http_status == 200 and status.get("available") is True:
-        with COMPILE_TOOLING_CACHE_LOCK:
-            COMPILE_TOOLING_CACHE[normalized] = dict(status)
-    return status, http_status
-
-
-def _combine_subprocess_output(*chunks: str | None) -> str:
-    """Join stdout/stderr fragments into a single readable message."""
-    return "\n".join(chunk.strip() for chunk in chunks if chunk and chunk.strip())
-
-
-def _get_compile_input_paths(source_path: Path, compile_context: dict[str, object]) -> list[Path]:
-    """Return the source paths a compile action reads from disk."""
-    language = str(compile_context.get("language") or "")
-    if language == "go":
-        return [
-            Path(str(path))
-            for path in (compile_context.get("go_input_paths") or [])
-            if str(path).strip()
-        ] or [source_path]
-    return [source_path]
-
-
-def _compile_requires_sudo(
-    source_path: Path,
-    target_path: Path,
-    compile_context: dict[str, object],
-) -> bool:
-    """Use sudo when compile inputs or the output location need elevated access."""
-    input_paths = _get_compile_input_paths(source_path, compile_context)
-    if any(not os.access(path, os.R_OK) for path in input_paths):
-        return True
-    return not is_writable_by_user(target_path)
-
-
-def _run_compile_command(
-    cmd: list[str],
-    *,
-    cwd: Path,
-    timeout: int,
-    use_sudo: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    """Run a compile command, optionally through passwordless sudo."""
-    run_cmd = ["sudo", "-n", *cmd] if use_sudo else cmd
-    run_kwargs: dict[str, object] = {
-        "cwd": str(cwd),
-        "capture_output": True,
-        "text": True,
-        "timeout": timeout,
-    }
-    if use_sudo:
-        run_kwargs["stdin"] = subprocess.DEVNULL
-    return subprocess.run(run_cmd, **run_kwargs)
-
-
-def _prepare_sudo_tempdir_for_cleanup(path: Path) -> None:
-    """Relax sudo-created temp files so TemporaryDirectory cleanup can remove them."""
-    try:
-        subprocess.run(
-            ["sudo", "-n", "chmod", "-R", "a+rwX", str(path)],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
-
-
-def compile_source_file(
-    source_path: Path,
-    target_path: Path,
-    compile_context: dict[str, object],
-    tooling_status: dict[str, object],
-    *,
-    optimize: bool = False,
-    warnings: bool = False,
-) -> tuple[bool, str]:
-    """Compile a source file to the requested output path."""
-    language = str(compile_context.get("language") or "")
-    compiler = str(tooling_status.get("compiler") or "")
-    timeout = 300
-    use_sudo = _compile_requires_sudo(source_path, target_path, compile_context)
-
-    try:
-        if language == "java":
-            archiver = str(tooling_status.get("archiver") or "")
-            main_class = str(compile_context.get("java_main_class") or "")
-            if not compiler or not archiver:
-                return False, "Java compilation requires javac and jar."
-
-            temp_dir_obj = tempfile.TemporaryDirectory(prefix="diff-editor-java-")
-            temp_dir = Path(temp_dir_obj.name)
-            try:
-                classes_dir = temp_dir / "classes"
-                classes_dir.mkdir(parents=True, exist_ok=True)
-
-                javac_cmd = [compiler]
-                if warnings:
-                    javac_cmd.append("-Xlint")
-                javac_cmd.extend(["-d", str(classes_dir), str(source_path)])
-
-                javac_result = _run_compile_command(
-                    javac_cmd,
-                    cwd=source_path.parent,
-                    timeout=timeout,
-                    use_sudo=use_sudo,
-                )
-                javac_output = _combine_subprocess_output(javac_result.stdout, javac_result.stderr)
-                if javac_result.returncode != 0:
-                    return False, javac_output or "javac failed"
-
-                if not any(classes_dir.rglob("*.class")):
-                    return False, "javac completed without producing class files"
-
-                jar_cmd = [archiver, "--create", "--file", str(target_path)]
-                if main_class:
-                    jar_cmd.extend(["--main-class", main_class])
-                jar_cmd.extend(["-C", str(classes_dir), "."])
-                jar_result = _run_compile_command(
-                    jar_cmd,
-                    cwd=source_path.parent,
-                    timeout=timeout,
-                    use_sudo=use_sudo,
-                )
-                jar_output = _combine_subprocess_output(jar_result.stdout, jar_result.stderr)
-                combined_output = _combine_subprocess_output(javac_output, jar_output)
-                if jar_result.returncode != 0:
-                    return False, combined_output or "jar failed"
-                return True, combined_output
-            finally:
-                if use_sudo:
-                    _prepare_sudo_tempdir_for_cleanup(temp_dir)
-                temp_dir_obj.cleanup()
-
-        if language == "c":
-            cmd = [compiler or "gcc"]
-            if optimize:
-                cmd.append("-O2")
-            if warnings:
-                cmd.extend(["-Wall", "-Wextra"])
-            cmd.extend([str(source_path), "-o", str(target_path)])
-        elif language == "cpp":
-            cmd = [compiler or "g++"]
-            if optimize:
-                cmd.append("-O2")
-            if warnings:
-                cmd.extend(["-Wall", "-Wextra"])
-            cmd.extend([str(source_path), "-o", str(target_path)])
-        elif language == "go":
-            go_input_paths = [
-                str(p)
-                for p in (compile_context.get("go_input_paths") or [str(source_path)])
-                if str(p).strip()
-            ]
-            cmd = [compiler or "go", "build", "-o", str(target_path), *go_input_paths]
-        elif language == "rust":
-            cmd = [compiler or "rustc"]
-            if optimize:
-                cmd.append("-O")
-            cmd.extend([str(source_path), "-o", str(target_path)])
-        elif language == "csharp":
-            cmd = [compiler or "csc"]
-            if optimize:
-                cmd.append("-optimize+")
-            if warnings:
-                cmd.append("-warn:4")
-            cmd.extend([f"-out:{target_path}", str(source_path)])
-        else:
-            return False, "Unsupported language"
-
-        result = _run_compile_command(
-            cmd,
-            cwd=source_path.parent,
-            timeout=timeout,
-            use_sudo=use_sudo,
-        )
-        output = _combine_subprocess_output(result.stdout, result.stderr)
-        if result.returncode != 0:
-            return False, output or "Compilation failed"
-        return True, output
-    except subprocess.TimeoutExpired:
-        return False, "Compile operation timed out"
-    except OSError as e:
-        return False, str(e)
 
 
 def compute_run_tooling_status(language: str) -> tuple[dict[str, object], int]:
@@ -2243,39 +1444,6 @@ def create_app() -> Flask:
             "activate_error": activation["error"],
         }
 
-    def _cleanup_temp_path(path: Path | str | None, *, recursive: bool = False) -> None:
-        if not path:
-            return
-
-        temp_path = Path(path)
-
-        try:
-            if recursive:
-                shutil.rmtree(temp_path)
-            else:
-                temp_path.unlink()
-            return
-        except FileNotFoundError:
-            return
-        except OSError:
-            pass
-
-        try:
-            cleanup = subprocess.run(
-                ["sudo", "-n", "rm", "-rf", str(temp_path)],
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                timeout=15,
-            )
-            if cleanup.returncode != 0:
-                app.logger.warning(
-                    "Failed to clean up temporary path %s: %s",
-                    temp_path,
-                    cleanup.stderr.decode("utf-8", errors="replace").strip(),
-                )
-        except Exception as e:
-            app.logger.warning("Failed to clean up temporary path %s: %s", temp_path, e)
-
     @app.post("/api/file/copy")
     def copy_file_route():
         csrf = request.headers.get("X-CSRF-Token", "")
@@ -2618,7 +1786,7 @@ def create_app() -> Flask:
 
         @response.call_on_close
         def _cleanup():
-            _cleanup_temp_path(result)
+            cleanup_temp_path(result)
 
         return response
 
@@ -2637,40 +1805,9 @@ def create_app() -> Flask:
                 return jsonify({"error": f"Not found: {p.name}"}), 404
             paths.append(p)
 
-        def _allocate_archive_name(source: Path, seen_names: dict[str, int]) -> str:
-            base = source.name or "item"
-            if base not in seen_names:
-                seen_names[base] = 1
-                return base
-
-            seen_names[base] += 1
-            n = seen_names[base]
-            return f"{source.stem} ({n}){source.suffix}" if not source.is_dir() else f"{base} ({n})"
-
-        staging_root = None
-        zip_path = None
-        try:
-            staging_root = Path(tempfile.mkdtemp(prefix="diff-editor-batch-"))
-            seen_names: dict[str, int] = {}
-
-            for p in paths:
-                target = staging_root / _allocate_archive_name(p, seen_names)
-                if p.is_dir():
-                    success, message = copy_directory(p, target)
-                else:
-                    success, message = copy_file(p, target)
-
-                if not success:
-                    return jsonify({"error": f"Failed to add {p.name} to archive: {message}"}), 500
-
-            success, result = zip_directory(staging_root)
-            if not success:
-                return jsonify({"error": result}), 500
-            zip_path = result
-        except OSError as e:
-            return jsonify({"error": str(e)}), 500
-        finally:
-            _cleanup_temp_path(staging_root, recursive=True)
+        success, zip_path = zip_paths(paths)
+        if not success:
+            return jsonify({"error": zip_path}), 500
 
         response = send_file(
             zip_path,
@@ -2681,7 +1818,7 @@ def create_app() -> Flask:
 
         @response.call_on_close
         def _cleanup():
-            _cleanup_temp_path(zip_path)
+            cleanup_temp_path(zip_path)
 
         return response
 
@@ -2713,98 +1850,7 @@ def create_app() -> Flask:
         if not path.exists() and not path.is_symlink():
             return jsonify({"error": "Not found"}), 404
 
-        result: dict = {
-            "is_binary": None,
-            "line_count": None,
-            "image_info": None,
-            "pdf_pages": None,
-            "pdf_info": None,
-            "media_info": None,
-            "video_info": None,
-            "size_recursive": None,
-            "size_recursive_human": None,
-            "file_count": None,
-            "dir_count": None,
-        }
-
-        if path.is_dir():
-            success, info = get_directory_info(path)
-            if success:
-                result.update(info)
-            else:
-                result["error"] = info
-        else:
-            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-
-            # Binary detection from file head only (not full read)
-            success, head = read_file_head(path)
-            if success and isinstance(head, bytes):
-                result["is_binary"] = is_likely_binary(head)
-
-            # Line count via streaming chunks (not full read)
-            if result["is_binary"] is False:
-                success, n = count_lines(path)
-                if success:
-                    result["line_count"] = n
-
-            # Image info (Pillow reads headers lazily from path)
-            if mime_type.startswith("image/"):
-                try:
-                    from PIL import Image
-                    if os.access(path, os.R_OK):
-                        with Image.open(path) as img:
-                            result["image_info"] = build_image_info(img)
-                    else:
-                        ok, data = read_file_bytes(path)
-                        if ok:
-                            with Image.open(io.BytesIO(data)) as img:
-                                result["image_info"] = build_image_info(img)
-                except Exception:
-                    pass
-
-            # PDF metadata (pypdf reads from path)
-            elif mime_type == "application/pdf":
-                try:
-                    import pypdf
-                    if os.access(path, os.R_OK):
-                        with open(path, "rb") as f:
-                            reader = pypdf.PdfReader(f)
-                            result["pdf_info"] = build_pdf_info(
-                                reader,
-                                head if isinstance(head, bytes) else None,
-                            )
-                            if not reader.is_encrypted:
-                                result["pdf_pages"] = len(reader.pages)
-                    else:
-                        ok, data = read_file_bytes(path)
-                        if ok:
-                            reader = pypdf.PdfReader(io.BytesIO(data))
-                            result["pdf_info"] = build_pdf_info(
-                                reader,
-                                head if isinstance(head, bytes) else data[:32],
-                            )
-                            if not reader.is_encrypted:
-                                result["pdf_pages"] = len(reader.pages)
-                except Exception:
-                    pass
-
-            # Video/audio metadata via ffprobe
-            if mime_type.startswith("video/") or mime_type.startswith("audio/"):
-                try:
-                    proc = subprocess.run(
-                        ["ffprobe", "-v", "quiet", "-print_format", "json",
-                         "-show_streams", "-show_format", str(path)],
-                        stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
-                    )
-                    if proc.returncode == 0:
-                        ff = json.loads(proc.stdout)
-                        media_info = build_media_info(ff)
-                        result["media_info"] = media_info
-                        result["video_info"] = media_info
-                except Exception:
-                    pass
-
-        return jsonify(result)
+        return jsonify(get_extended_file_info(path))
 
     @app.get("/api/file/zip-info")
     def zip_info():
@@ -2819,14 +1865,10 @@ def create_app() -> Flask:
         if not zip_path.exists():
             return jsonify({"error": "File not found"}), 404
 
-        import zipfile as zf
-        try:
-            size = zip_path.stat().st_size
-            with zf.ZipFile(zip_path, "r") as z:
-                file_count = sum(1 for i in z.infolist() if not i.is_dir())
-            return jsonify({"size": size, "file_count": file_count})
-        except (OSError, zf.BadZipFile):
-            return jsonify({"error": "Cannot read zip file"}), 400
+        success, result = get_zip_info(zip_path)
+        if not success:
+            return jsonify({"error": result}), 400
+        return jsonify(result)
 
     @app.post("/api/file/extract")
     def extract_zip():
@@ -2851,106 +1893,12 @@ def create_app() -> Flask:
         if not zip_path.exists():
             return jsonify({"error": "File not found"}), 404
 
-        import zipfile as zf
-        import shutil as _shutil
-
-        def _dedupe(p: Path) -> Path:
-            """Find a unique name by appending (2), (3), etc."""
-            if not p.exists() and not p.is_symlink():
-                return p
-            stem = p.stem
-            suffix = p.suffix
-            parent = p.parent
-            n = 2
-            while True:
-                candidate = parent / f"{stem} ({n}){suffix}"
-                if not candidate.exists() and not candidate.is_symlink():
-                    return candidate
-                n += 1
-
-        if mode == "directory":
-            dest = _dedupe(zip_path.parent / zip_path.stem)
-        else:
-            dest = zip_path.parent
-
-        try:
-            with zf.ZipFile(zip_path, "r") as z:
-                dest_resolved = str(dest.resolve()).rstrip("/") + "/"
-
-                if mode == "directory":
-                    # dest is fresh — no symlinks to worry about
-                    for name in z.namelist():
-                        resolved = str((dest / name).resolve())
-                        if resolved != dest_resolved.rstrip("/") and not resolved.startswith(dest_resolved):
-                            return jsonify({"error": f"Zip contains unsafe path: {name}"}), 400
-                    dest.mkdir()
-                    z.extractall(dest)
-                else:
-                    # Build rename map for conflicting top-level entries
-                    rename_map = {}  # original top-level name -> deduped name
-                    for info in z.infolist():
-                        parts = info.filename.rstrip("/").split("/")
-                        top = parts[0]
-                        if top not in rename_map:
-                            deduped = _dedupe(dest / top)
-                            rename_map[top] = deduped.name
-
-                    # Security check against deduped paths (avoids symlink confusion)
-                    for name in z.namelist():
-                        parts = name.rstrip("/").split("/")
-                        parts[0] = rename_map.get(parts[0], parts[0])
-                        mapped = "/".join(parts)
-                        resolved = str(Path(os.path.abspath(dest / mapped)))
-                        if resolved != dest_resolved.rstrip("/") and not resolved.startswith(dest_resolved):
-                            return jsonify({"error": f"Zip contains unsafe path: {name}"}), 400
-
-                    # Extract with mapped paths
-                    for info in z.infolist():
-                        parts = info.filename.rstrip("/").split("/")
-                        parts[0] = rename_map.get(parts[0], parts[0])
-                        target = dest / "/".join(parts)
-
-                        if info.is_dir():
-                            target.mkdir(parents=True, exist_ok=True)
-                        else:
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            with z.open(info) as src, open(target, "wb") as dst:
-                                _shutil.copyfileobj(src, dst)
-
-            count = sum(1 for i in zf.ZipFile(zip_path, "r").infolist() if not i.is_dir())
-            return jsonify({"success": True, "count": count, "dest": str(dest)})
-        except PermissionError:
-            pass
-        except (OSError, zf.BadZipFile) as e:
-            return jsonify({"error": str(e)}), 400
-
-        # Fall back to sudo unzip (no dedup — best effort)
-        try:
-            if mode == "directory":
-                subprocess.run(
-                    ["sudo", "-n", "mkdir", "-p", str(dest)],
-                    stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
-                )
-            result = subprocess.run(
-                ["sudo", "-n", "unzip", "-n", str(zip_path), "-d", str(dest)],
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
-            )
-            if result.returncode in (0, 1):
-                warning = None
-                if result.returncode == 1:
-                    # Parse skipped files from unzip output
-                    stdout = result.stdout.decode("utf-8", errors="replace")
-                    skipped = [line.split("exists")[0].strip().split()[-1]
-                               for line in stdout.splitlines() if "already exists" in line.lower()]
-                    if skipped:
-                        warning = f"{len(skipped)} file(s) skipped (already exist)"
-                return jsonify({"success": True, "dest": str(dest), "warning": warning})
-            error_msg = result.stderr.decode("utf-8", errors="replace")
-            return jsonify({"error": f"unzip failed: {error_msg}"}), 500
-        except subprocess.TimeoutExpired:
-            return jsonify({"error": "Extract operation timed out"}), 500
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        success, result, http_status = extract_zip_archive(zip_path, mode=mode)
+        if not success:
+            return jsonify({"error": result}), http_status
+        payload = {"success": True}
+        payload.update(result)
+        return jsonify(payload)
 
     @app.post("/api/file")
     def save_file():
