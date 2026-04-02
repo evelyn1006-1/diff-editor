@@ -21,6 +21,7 @@ from flask_socketio import emit, join_room, leave_room
 
 from utils.pack_autocomp import find_npm_packages, find_pypi_packages
 from utils.pty_manager import PTYManager
+from utils.constants import CLOUD_COMMAND_RULES
 
 # Set up WebSocket access logging (same file as HTTP, rotation handled by rotatelog)
 LOG_DIR = Path(__file__).resolve().parent / "logs"
@@ -343,10 +344,23 @@ def parse_intercept_command(command: str) -> tuple[list[str], int] | None:
     return parts, idx
 
 
-_CLOUD_NONINTERACTIVE_ARGS: dict[str, set[str]] = {
-    "codex": {"exec"},
-    "claude": {"-p", "--print"},
-}
+def _match_command_arg(arg: str, candidates: set[str]) -> str | None:
+    """Return the matching option name for exact, --flag=value, or short attached forms."""
+    if arg in candidates:
+        return arg
+
+    if arg.startswith("--"):
+        key = arg.split("=", 1)[0]
+        if key in candidates:
+            return key
+        return None
+
+    if arg.startswith("-") and not arg.startswith("--") and len(arg) > 2:
+        key = arg[:2]
+        if key in candidates:
+            return key
+
+    return None
 
 
 def check_cloud_redirect(command: str) -> tuple[str, str] | None:
@@ -360,12 +374,40 @@ def check_cloud_redirect(command: str) -> tuple[str, str] | None:
     if cmd not in CLOUD_COMMAND_REDIRECTS:
         return None
 
-    # Allow non-interactive subcommands/flags to run in the terminal.
-    non_interactive = _CLOUD_NONINTERACTIVE_ARGS.get(cmd, set())
+    # Only redirect plain interactive launches. Local management, help, print,
+    # and other non-interactive commands should stay in the terminal.
+    rules = CLOUD_COMMAND_RULES.get(cmd, {})
+    subcommands = rules.get("subcommands", set())
+    flags = rules.get("flags", set())
+    terminal_value_flags = rules.get("terminal_value_flags", set())
+    value_flags = rules.get("value_flags", set()) | terminal_value_flags
     remaining = parts[idx + 1:]
+    skip_next = False
     for arg in remaining:
-        if arg in non_interactive:
+        if skip_next:
+            skip_next = False
+            continue
+
+        matched_flag = _match_command_arg(arg, flags | value_flags)
+        if matched_flag in flags | terminal_value_flags:
             return None
+        if matched_flag in value_flags:
+            skip_next = "=" not in arg and matched_flag == arg
+            continue
+
+        if arg == "--":
+            break
+
+        if arg in subcommands:
+            return None
+
+        if arg.startswith("-"):
+            continue
+
+        # The first non-option positional argument for these CLIs is either a
+        # subcommand or an interactive prompt, so later tokens do not change
+        # whether we should redirect.
+        break
 
     return CLOUD_COMMAND_REDIRECTS[cmd]
 
