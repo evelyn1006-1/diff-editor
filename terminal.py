@@ -5,6 +5,7 @@ Terminal routes and SocketIO handlers.
 import glob
 import json
 import logging
+import logging.handlers
 import os
 import re
 import shlex
@@ -31,7 +32,7 @@ ws_logger = logging.getLogger("diff_editor.ws")
 ws_logger.setLevel(logging.INFO)
 ws_logger.propagate = False
 
-_ws_handler = logging.FileHandler(LOG_DIR / "access.log")
+_ws_handler = logging.handlers.WatchedFileHandler(LOG_DIR / "access.log")
 _ws_handler.setFormatter(logging.Formatter('%(message)s'))
 ws_logger.addHandler(_ws_handler)
 
@@ -39,7 +40,7 @@ completion_logger = logging.getLogger("diff_editor.completion")
 completion_logger.setLevel(logging.INFO)
 completion_logger.propagate = False
 
-_completion_handler = logging.FileHandler(LOG_DIR / "completion.log")
+_completion_handler = logging.handlers.WatchedFileHandler(LOG_DIR / "completion.log")
 _completion_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
 completion_logger.addHandler(_completion_handler)
 

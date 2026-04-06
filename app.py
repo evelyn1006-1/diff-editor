@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import logging
+import logging.handlers
 import math
 import mimetypes
 import os
@@ -34,7 +35,7 @@ access_logger = logging.getLogger("diff_editor.access")
 access_logger.setLevel(logging.INFO)
 access_logger.propagate = False
 
-_access_handler = logging.FileHandler(LOG_DIR / "access.log")
+_access_handler = logging.handlers.WatchedFileHandler(LOG_DIR / "access.log")
 _access_handler.setFormatter(logging.Formatter(
     '%(message)s'  # We'll format the message ourselves for gunicorn-style output
 ))
