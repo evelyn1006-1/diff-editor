@@ -18,6 +18,21 @@
 
 {% block content %}
 <div id="editor-container"></div>
+<div id="run-terminal-overlay" class="run-terminal-overlay hidden">
+    <div class="run-terminal-popup">
+        <div id="run-terminal-resize-handle" class="run-terminal-resize-handle"></div>
+        <div class="run-terminal-header">
+            <span class="run-terminal-title">Run Output</span>
+            <div class="run-terminal-controls">
+                <button id="btn-run-terminal-popout" class="run-terminal-popout-btn" title="Open in new tab">↗</button>
+                <button id="btn-run-terminal-minimize" class="run-terminal-minimize-btn" title="Minimize">─</button>
+                <button id="btn-run-terminal-close" class="run-terminal-close-btn" title="Close">&times;</button>
+            </div>
+        </div>
+        <iframe id="run-terminal-frame" class="run-terminal-frame"></iframe>
+    </div>
+</div>
+<button id="btn-run-terminal-restore" class="run-terminal-restore hidden" title="Restore terminal">▶ Terminal</button>
 <div id="ai-review-panel" class="ai-review-panel hidden">
     <div class="ai-review-header">
         <span>AI Review</span>

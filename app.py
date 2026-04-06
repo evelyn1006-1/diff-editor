@@ -711,7 +711,7 @@ def create_app() -> Flask:
     @app.after_request
     def add_security_headers(response):
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         csp = (
             "default-src 'self'; "
@@ -719,7 +719,7 @@ def create_app() -> Flask:
             "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
             "font-src 'self' https://cdn.jsdelivr.net; "
             "img-src 'self' data:; "
-            "frame-ancestors 'none'"
+            "frame-ancestors 'self'"
         )
         response.headers["Content-Security-Policy"] = csp
         return response

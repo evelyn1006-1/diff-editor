@@ -3093,3 +3093,142 @@ body.terminal-raised {
 .pager-content mark.pager-mark-current {
     background: rgba(214, 51, 132, 0.75);
 }
+
+/* ── Run Terminal Modal ────────────────────────────────────── */
+
+.run-terminal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(74, 25, 66, 0.4);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 2000;
+}
+
+.run-terminal-popup {
+    background: var(--panel-bg);
+    border: 2px solid var(--border);
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -4px 32px rgba(214, 51, 132, 0.25);
+    width: 100%;
+    max-width: 1000px;
+    height: 55vh;
+    display: flex;
+    flex-direction: column;
+    overflow: visible;
+}
+
+.run-terminal-resize-handle {
+    height: 6px;
+    cursor: ns-resize;
+    flex-shrink: 0;
+    background: transparent;
+    position: relative;
+    touch-action: none;
+}
+
+/* Extended grab area above the visible handle */
+.run-terminal-resize-handle::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: -24px;
+    height: 36px;
+    cursor: ns-resize;
+}
+
+.run-terminal-resize-handle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 2px;
+    transform: translateX(-50%);
+    width: 40px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--text-secondary, #888);
+    opacity: 0.4;
+    transition: opacity 0.15s;
+}
+
+.run-terminal-resize-handle:hover::after {
+    opacity: 0.8;
+}
+
+.run-terminal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.run-terminal-title {
+    font-family: monospace;
+    font-size: 0.9rem;
+    color: var(--accent);
+}
+
+.run-terminal-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.run-terminal-popout-btn,
+.run-terminal-minimize-btn,
+.run-terminal-close-btn {
+    background: none;
+    border: none;
+    color: var(--text);
+    font-size: 1.3rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    opacity: 0.7;
+}
+
+.run-terminal-popout-btn:hover,
+.run-terminal-minimize-btn:hover {
+    opacity: 1;
+    color: var(--accent);
+}
+
+.run-terminal-close-btn:hover {
+    opacity: 1;
+    color: #e55;
+}
+
+.run-terminal-frame {
+    flex: 1;
+    width: 100%;
+    border: none;
+    overflow: hidden;
+    min-height: 0;
+}
+
+.run-terminal-restore {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    z-index: 1500;
+    background: var(--panel-bg);
+    border: 1.5px solid var(--accent);
+    border-radius: 8px;
+    color: var(--accent);
+    font-family: monospace;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(214, 51, 132, 0.3);
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.run-terminal-restore:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(214, 51, 132, 0.45);
+}

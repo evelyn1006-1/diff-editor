@@ -163,6 +163,75 @@ async function initDiffEditor() {
             runBtn.addEventListener('click', runFile);
         }
 
+        // Run terminal modal controls
+        const runTerminalOverlay = document.getElementById('run-terminal-overlay');
+        const runTerminalFrame = document.getElementById('run-terminal-frame');
+        const runTerminalRestore = document.getElementById('btn-run-terminal-restore');
+
+        function closeRunTerminal() {
+            runTerminalOverlay.classList.add('hidden');
+            runTerminalRestore.classList.add('hidden');
+            runTerminalFrame.src = 'about:blank';
+        }
+
+        function minimizeRunTerminal() {
+            runTerminalOverlay.classList.add('hidden');
+            runTerminalRestore.classList.remove('hidden');
+        }
+
+        function restoreRunTerminal() {
+            runTerminalRestore.classList.add('hidden');
+            runTerminalOverlay.classList.remove('hidden');
+        }
+
+        document.getElementById('btn-run-terminal-close').addEventListener('click', closeRunTerminal);
+        document.getElementById('btn-run-terminal-minimize').addEventListener('click', minimizeRunTerminal);
+        runTerminalRestore.addEventListener('click', restoreRunTerminal);
+        document.getElementById('btn-run-terminal-popout').addEventListener('click', () => {
+            const src = runTerminalFrame.src;
+            if (src) window.open(src, '_blank');
+            closeRunTerminal();
+        });
+        runTerminalOverlay.addEventListener('click', (e) => {
+            if (e.target === runTerminalOverlay) minimizeRunTerminal();
+        });
+
+        // Run terminal resize handle (mouse + touch)
+        const runTerminalPopup = runTerminalOverlay.querySelector('.run-terminal-popup');
+        const resizeHandle = document.getElementById('run-terminal-resize-handle');
+
+        function applyResizeHeight(clientY) {
+            const newHeight = window.innerHeight - clientY;
+            const clamped = Math.max(150, Math.min(newHeight, window.innerHeight - 40));
+            runTerminalPopup.style.height = clamped + 'px';
+        }
+
+        resizeHandle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            runTerminalFrame.style.pointerEvents = 'none';
+            const onMouseMove = (e) => applyResizeHeight(e.clientY);
+            const onMouseUp = () => {
+                runTerminalFrame.style.pointerEvents = '';
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+            };
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+        });
+
+        resizeHandle.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            runTerminalFrame.style.pointerEvents = 'none';
+            const onTouchMove = (e) => applyResizeHeight(e.touches[0].clientY);
+            const onTouchEnd = () => {
+                runTerminalFrame.style.pointerEvents = '';
+                document.removeEventListener('touchmove', onTouchMove);
+                document.removeEventListener('touchend', onTouchEnd);
+            };
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', onTouchEnd);
+        }, { passive: false });
+
         // Auto-refresh for log files
         if (isAutoRefreshLogFile(FILE_PATH)) {
             const models = diffEditor.getModel();
@@ -929,12 +998,22 @@ async function runFile() {
         }
     }
 
-    // Open terminal with the run command
+    // Close any existing run terminal session before starting a new one
+    const overlay = document.getElementById('run-terminal-overlay');
+    const frame = document.getElementById('run-terminal-frame');
+    const restoreBtn = document.getElementById('btn-run-terminal-restore');
+    if (frame.src && frame.src !== window.location.href) {
+        frame.src = 'about:blank';
+    }
+    restoreBtn.classList.add('hidden');
+
+    // Open inline terminal modal with the run command
     const terminalUrl = `/terminal?cmd=${encodeURIComponent(runCommand)}`;
-    window.open(terminalUrl, '_blank');
+    frame.src = terminalUrl;
+    overlay.classList.remove('hidden');
 
     runBtn.disabled = false;
-    statusEl.textContent = 'Opened in terminal';
+    statusEl.textContent = 'Running...';
     statusEl.className = 'status';
 }
 
