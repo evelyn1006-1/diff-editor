@@ -181,6 +181,17 @@ button:disabled {
     border-color: #9b7ac7;
 }
 
+#btn-empty-recycle-bin {
+    background: rgba(255, 77, 109, 0.12);
+    border-color: rgba(255, 77, 109, 0.35);
+    color: var(--error);
+}
+
+#btn-empty-recycle-bin:hover:not(:disabled) {
+    background: rgba(255, 77, 109, 0.18);
+    border-color: rgba(255, 77, 109, 0.5);
+}
+
 /* Main content */
 main {
     flex: 1;
@@ -510,7 +521,7 @@ main {
     display: block;
 }
 
-.collapsed-actions .file-actions > .btn-action:not(.btn-delete):not(.btn-delete-dir):not(.btn-actions-toggle) {
+.collapsed-actions .file-actions > .btn-action:not(.btn-rename):not(.btn-delete):not(.btn-delete-dir):not(.btn-actions-toggle) {
     display: none;
 }
 

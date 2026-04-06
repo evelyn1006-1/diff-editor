@@ -6,6 +6,9 @@ let currentPath = '';
 let selectedPaths = new Set();
 let lastClickedIndex = -1;
 let selectMode = false;
+let recycleBinRoot = '/var/tmp/RECYCLE_BIN'; // must match RECYCLE_BIN in file_ops.py
+let currentInRecycleBin = false;
+let currentAtRecycleBinRoot = false;
 
 const ACTIVATABLE_DIRS = {
     '/etc/systemd/system': 'Enable & start service',
@@ -32,6 +35,58 @@ const COMPILABLE_SUFFIXES = new Map([
 
 function normalizeDirectoryPath(path) {
     return path.trim().replace(/\/+/g, '/').replace(/\/\.$/, '').replace(/\/+$/, '') || '/';
+}
+
+function getParentDirectory(path) {
+    const normalized = normalizeDirectoryPath(String(path || ''));
+    if (normalized === '/') {
+        return '/';
+    }
+    const parts = normalized.split('/').filter(Boolean);
+    return parts.length > 1 ? `/${parts.slice(0, -1).join('/')}` : '/';
+}
+
+function isPathInRecycleBin(path) {
+    const normalized = normalizeDirectoryPath(String(path || ''));
+    return normalized === recycleBinRoot || normalized.startsWith(`${recycleBinRoot}/`);
+}
+
+function updateRecycleBinButton() {
+    const button = document.getElementById('btn-empty-recycle-bin');
+    if (!button) {
+        return;
+    }
+    button.classList.toggle('hidden', !currentAtRecycleBinRoot);
+}
+
+function setRecycleBinState(data = {}) {
+    recycleBinRoot = normalizeDirectoryPath(data.recycle_bin_root || recycleBinRoot);
+    currentInRecycleBin = Boolean(data.is_in_recycle_bin);
+    currentAtRecycleBinRoot = Boolean(data.is_recycle_bin_root);
+    updateRecycleBinButton();
+}
+
+function getDeleteIntent(path) {
+    const permanent = isPathInRecycleBin(path);
+    return {
+        permanent,
+        buttonLabel: permanent ? 'Delete Permanently' : 'Delete',
+        filePrompt(name) {
+            return permanent
+                ? `Permanently delete "${name}"?\n\nThis cannot be undone.`
+                : `Delete "${name}"?\n\nThis will move it to the recycle bin.`;
+        },
+        directorySummary(totalFiles, totalDirs) {
+            return permanent
+                ? `${totalFiles} file${totalFiles !== 1 ? 's' : ''} and ${totalDirs} subdirector${totalDirs !== 1 ? 'ies' : 'y'} will be permanently deleted.`
+                : `${totalFiles} file${totalFiles !== 1 ? 's' : ''} and ${totalDirs} subdirector${totalDirs !== 1 ? 'ies' : 'y'} will be moved to the recycle bin.`;
+        },
+        batchSummary(summaryParts) {
+            return summaryParts.join(', ') + (permanent
+                ? ' will be permanently deleted.'
+                : ' will be moved to the recycle bin.');
+        },
+    };
 }
 
 function getFileShortcuts(name) {
@@ -218,6 +273,7 @@ function initFileBrowser(defaultRoot) {
 
     document.getElementById('btn-up').addEventListener('click', goUp);
     document.getElementById('show-hidden').addEventListener('change', () => loadDirectory(currentPath));
+    document.getElementById('btn-empty-recycle-bin')?.addEventListener('click', emptyRecycleBin);
 
     // "New" dropdown
     const btnNew = document.getElementById('btn-new');
@@ -262,10 +318,12 @@ async function loadDirectory(path) {
         const data = await response.json();
 
         if (!response.ok) {
+            setRecycleBinState();
             fileList.innerHTML = `<div class="loading" style="color: var(--error)">${data.error || 'Failed to load directory'}</div>`;
             return;
         }
 
+        setRecycleBinState(data);
         currentPath = data.path;
         pathInput.value = data.path;
 
@@ -481,13 +539,51 @@ async function loadDirectory(path) {
         });
 
     } catch (err) {
+        setRecycleBinState();
         fileList.innerHTML = `<div class="loading" style="color: var(--error)">Error: ${err.message}</div>`;
+    }
+}
+
+async function emptyRecycleBin() {
+    if (!currentAtRecycleBinRoot) {
+        return;
+    }
+
+    if (!window.confirm('Permanently empty the recycle bin?\n\nThis cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch('api/recycle-bin/empty', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({}),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            const details = Array.isArray(data.details) && data.details.length > 0
+                ? `\n\n${data.details.join('\n')}`
+                : '';
+            window.alert((data.error || 'Failed to empty the recycle bin.') + details);
+            return;
+        }
+
+        if (data.message) {
+            window.alert(data.message);
+        }
+        loadDirectory(currentPath);
+    } catch (err) {
+        window.alert(`Error: ${err.message}`);
     }
 }
 
 function createFileItem(item) {
     const icon = item.is_dir ? '<span class="icon folder">&#128193;</span>' : '<span class="icon">&#128196;</span>';
     const renameLabel = 'Rename/move';
+    const isRecycleBinRootItem = item.is_dir && normalizeDirectoryPath(item.path) === recycleBinRoot;
     const compileItem = !item.is_dir && isCompilableFileName(item.name)
         ? `<button class="dropdown-item btn-compile" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9881; Compile</button>`
         : '';
@@ -511,18 +607,24 @@ function createFileItem(item) {
 
     let actionButtons, dropdownItems;
     if (item.is_dir) {
+        const deleteButton = isRecycleBinRootItem
+            ? ''
+            : `<button class="btn-action btn-delete-dir" title="Delete directory" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005;</button>`;
+        const deleteDropdownItem = isRecycleBinRootItem
+            ? ''
+            : `<button class="dropdown-item btn-delete-dir" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005; Delete</button>`;
         actionButtons = `
             <button class="btn-action btn-info" title="Info" data-path="${escapeHtml(item.path)}">&#9432;</button>
             <button class="btn-action btn-copy-dir" title="Copy" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697;</button>
             <button class="btn-action btn-rename" title="${renameLabel}" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998;</button>
             <button class="btn-action btn-download-dir" title="Download as zip" data-path="${escapeHtml(item.path)}">&#11015;</button>
-            <button class="btn-action btn-delete-dir" title="Delete directory" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005;</button>`;
+            ${deleteButton}`;
         dropdownItems = `
             <button class="dropdown-item btn-info" data-path="${escapeHtml(item.path)}">&#9432; Info</button>
             <button class="dropdown-item btn-copy-dir" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10697; Copy</button>
             <button class="dropdown-item btn-rename" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#9998; ${renameLabel}</button>
             <button class="dropdown-item btn-download-dir" data-path="${escapeHtml(item.path)}">&#11015; Download</button>
-            <button class="dropdown-item btn-delete-dir" data-path="${escapeHtml(item.path)}" data-name="${escapeHtml(item.name)}">&#10005; Delete</button>`;
+            ${deleteDropdownItem}`;
     } else {
         actionButtons = `
             <button class="btn-action btn-info" title="Info" data-path="${escapeHtml(item.path)}">&#9432;</button>
@@ -550,9 +652,12 @@ function createFileItem(item) {
     const symlinkTarget = item.is_symlink
         ? `<span class="symlink-target"> → ${escapeHtml(item.symlink_target)}</span>`
         : '';
+    const trashAttrs = item.trash_original_path
+        ? ` data-trash-original-path="${escapeHtml(item.trash_original_path)}" data-trash-original-name="${escapeHtml(item.trash_original_name || '')}"`
+        : '';
 
     return `
-        <div class="file-item" data-path="${escapeHtml(item.path)}" data-is-dir="${item.is_dir}" data-name="${escapeHtml(item.name)}" draggable="true">
+        <div class="file-item" data-path="${escapeHtml(item.path)}" data-is-dir="${item.is_dir}" data-name="${escapeHtml(item.name)}"${trashAttrs} draggable="true">
             ${icon}
             <span class="name">${escapeHtml(item.name)}</span>${symlinkTarget}
             ${badges}
@@ -744,7 +849,8 @@ function batchDownload() {
 }
 
 async function deleteFile(path, name) {
-    if (!window.confirm(`Delete "${name}"?\n\nThis action cannot be undone.`)) {
+    const intent = getDeleteIntent(path);
+    if (!window.confirm(intent.filePrompt(name))) {
         return;
     }
 
@@ -771,11 +877,20 @@ async function deleteFile(path, name) {
 }
 
 function renameItem(path, name) {
-    const isDir = path.endsWith('/') || document.querySelector(`.file-item[data-path="${CSS.escape(path)}"]`)?.dataset.isDir === 'true';
-    showFileModal({ path, name, isDir, mode: 'move' });
+    const itemEl = document.querySelector(`.file-item[data-path="${CSS.escape(path)}"]`);
+    const isDir = path.endsWith('/') || itemEl?.dataset.isDir === 'true';
+    showFileModal({
+        path,
+        name,
+        isDir,
+        mode: 'move',
+        trashOriginalPath: itemEl?.dataset.trashOriginalPath || '',
+        trashOriginalName: itemEl?.dataset.trashOriginalName || '',
+    });
 }
 
 async function deleteDirectory(path, name) {
+    const intent = getDeleteIntent(path);
     // First fetch a preview of what's inside
     try {
         const response = await fetch(`api/dir/preview?path=${encodeURIComponent(path)}`);
@@ -806,11 +921,11 @@ async function deleteDirectory(path, name) {
         overlay.innerHTML = `
             <div class="modal-dialog">
                 <div class="modal-title">Delete "${escapeHtml(name)}"?</div>
-                <div class="modal-summary">${data.total_files} file${data.total_files !== 1 ? 's' : ''} and ${data.total_dirs} subdirector${data.total_dirs !== 1 ? 'ies' : 'y'} will be moved to the recycle bin.</div>
+                <div class="modal-summary">${intent.directorySummary(data.total_files, data.total_dirs)}</div>
                 <div class="preview-list">${listHtml}</div>
                 <div class="modal-buttons">
                     <button class="btn-modal btn-modal-cancel">Cancel</button>
-                    <button class="btn-modal btn-modal-delete">Delete</button>
+                    <button class="btn-modal btn-modal-delete">${intent.buttonLabel}</button>
                 </div>
             </div>
         `;
@@ -1121,7 +1236,7 @@ async function compileFile(path, name) {
     setTimeout(() => nameInput.focus(), 50);
 }
 
-function showFileModal({ path, name, isDir, mode }) {
+function showFileModal({ path, name, isDir, mode, trashOriginalPath = '', trashOriginalName = '' }) {
     const isCopy = mode === 'copy';
     const verb = isCopy ? 'Copy' : 'Rename / Move';
     const verbLower = isCopy ? 'copy' : 'move';
@@ -1133,6 +1248,13 @@ function showFileModal({ path, name, isDir, mode }) {
         : name;
 
     const shortcuts = isDir ? [] : getFileShortcuts(name);
+    if (!isCopy && trashOriginalPath) {
+        shortcuts.unshift({
+            label: 'Original path',
+            dir: getParentDirectory(trashOriginalPath),
+            filename: trashOriginalName || trashOriginalPath.split('/').pop() || name,
+        });
+    }
     const overlay = createCopyModal({
         titleHtml: `<span class="modal-verb">${verb}</span> ${isDir ? 'directory' : 'file'}`,
         summaryHtml: `<span class="modal-verb-ing">${verbIng}</span> "${escapeHtml(name)}"`,
@@ -1922,6 +2044,7 @@ async function batchDelete() {
         const el = document.querySelector(`.file-item[data-path="${CSS.escape(p)}"]`);
         return { path: p, name: p.split('/').pop(), isDir: el?.dataset.isDir === 'true' };
     });
+    const intent = getDeleteIntent(items[0]?.path || currentPath);
 
     const files = items.filter(i => !i.isDir);
     const dirs = items.filter(i => i.isDir);
@@ -1965,7 +2088,7 @@ async function batchDelete() {
     if (totalFiles > 0) summaryParts.push(`${totalFiles} file${totalFiles !== 1 ? 's' : ''}`);
     if (totalDirs > 0) summaryParts.push(`${totalDirs} subdirector${totalDirs !== 1 ? 'ies' : 'y'}`);
     if (dirs.length > 0) summaryParts.push(`${dirs.length} director${dirs.length !== 1 ? 'ies' : 'y'}`);
-    const summary = summaryParts.join(', ') + ' will be moved to the recycle bin.';
+    const summary = intent.batchSummary(summaryParts);
 
     // Show modal
     const overlay = document.createElement('div');
@@ -1977,7 +2100,7 @@ async function batchDelete() {
             <div class="preview-list">${listHtml}</div>
             <div class="modal-buttons">
                 <button class="btn-modal btn-modal-cancel">Cancel</button>
-                <button class="btn-modal btn-modal-delete">Delete</button>
+                <button class="btn-modal btn-modal-delete">${intent.buttonLabel}</button>
             </div>
         </div>
     `;

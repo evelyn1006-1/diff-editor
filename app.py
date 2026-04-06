@@ -41,6 +41,8 @@ _access_handler.setFormatter(logging.Formatter(
 access_logger.addHandler(_access_handler)
 
 from utils.file_ops import (
+    RECYCLE_BIN,
+    RECYCLE_META_DIR,
     bytes_to_hex_view,
     cleanup_temp_path,
     copy_directory,
@@ -54,11 +56,15 @@ from utils.file_ops import (
     ensure_directory,
     extract_zip_archive,
     get_extended_file_info,
+    get_recycle_metadata,
     get_zip_info,
+    is_in_recycle_bin,
     is_likely_binary,
+    is_recycle_bin_root,
     is_writable_by_user,
     make_executable,
     parse_hex_view,
+    permanently_delete_path,
     read_file_bytes,
     rename_path,
     resolve_request_path,
@@ -811,6 +817,9 @@ def create_app() -> Flask:
         git_status = get_directory_git_status(path)
         tracked_files = get_tracked_files(path)
 
+        current_is_recycle_root = is_recycle_bin_root(path)
+        current_in_recycle_bin = is_in_recycle_bin(path)
+
         items = []
         try:
             for entry in sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
@@ -823,6 +832,8 @@ def create_app() -> Flask:
                     file_git_status = git_status.get(entry_path) if not is_dir else None
                     # Only mark as git-tracked if actually in git's index (not just in a repo folder)
                     is_tracked = entry_path in tracked_files if not is_dir else False
+                    recycle_meta = get_recycle_metadata(entry)
+                    original_path = recycle_meta.get("original_path") if isinstance(recycle_meta, dict) else None
 
                     is_link = entry.is_symlink()
                     items.append({
@@ -834,6 +845,8 @@ def create_app() -> Flask:
                         "is_git": is_tracked,
                         "git_status": file_git_status,
                         "writable": is_writable_by_user(entry) if not is_dir else None,
+                        "trash_original_path": original_path if isinstance(original_path, str) else None,
+                        "trash_original_name": Path(original_path).name if isinstance(original_path, str) else None,
                     })
                 except PermissionError:
                     items.append({
@@ -853,6 +866,9 @@ def create_app() -> Flask:
         return jsonify({
             "path": str(path),
             "parent": parent,
+            "recycle_bin_root": str(RECYCLE_BIN),
+            "is_recycle_bin_root": current_is_recycle_root,
+            "is_in_recycle_bin": current_in_recycle_bin,
             "items": items,
         })
 
@@ -1299,7 +1315,10 @@ def create_app() -> Flask:
         if _is_protected_path(path):
             return jsonify({"error": "Cannot delete files in a system directory"}), 403
 
-        success, message = delete_path(path)
+        if is_in_recycle_bin(path):
+            success, message = permanently_delete_path(path)
+        else:
+            success, message = delete_path(path)
         if not success:
             return jsonify({"error": message}), 500
 
@@ -1322,6 +1341,7 @@ def create_app() -> Flask:
     _PROTECTED_DIRS = {
         "/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64",
         "/etc/systemd", "/etc/ssh",
+        str(RECYCLE_BIN),
     }
     # Specific critical files
     _PROTECTED_FILES = {
@@ -1749,14 +1769,78 @@ def create_app() -> Flask:
             return jsonify({"error": "Directory not found"}), 404
         if not path.is_dir():
             return jsonify({"error": "Not a directory"}), 400
+        if is_recycle_bin_root(path):
+            return jsonify({"error": "Cannot delete the recycle bin itself"}), 403
         if _is_protected_path(path):
             return jsonify({"error": "Cannot delete a system directory"}), 403
 
-        success, message = delete_directory(path)
+        if is_in_recycle_bin(path):
+            success, message = permanently_delete_path(path)
+        else:
+            success, message = delete_directory(path)
         if not success:
             return jsonify({"error": message}), 500
 
         return jsonify({"success": True, "message": message})
+
+    @app.post("/api/recycle-bin/empty")
+    def empty_recycle_bin_route():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        deleted_items = 0
+        removed_metadata = 0
+        errors: list[str] = []
+
+        try:
+            entries = sorted(RECYCLE_BIN.iterdir(), key=lambda entry: entry.name.lower()) if RECYCLE_BIN.exists() else []
+        except PermissionError:
+            return jsonify({"error": "Permission denied"}), 403
+
+        for entry in entries:
+            success, message = permanently_delete_path(entry)
+            if success:
+                deleted_items += 1
+            else:
+                errors.append(f"{entry.name}: {message}")
+
+        surviving = {e.name for e in entries if (RECYCLE_BIN / e.name).exists()}
+
+        try:
+            meta_files = sorted(RECYCLE_META_DIR.glob("*.json")) if RECYCLE_META_DIR.exists() else []
+        except PermissionError:
+            meta_files = []
+            errors.append("Could not access recycle-bin metadata directory")
+
+        for meta_file in meta_files:
+            if meta_file.stem in surviving:
+                continue
+            success, message = permanently_delete_path(meta_file)
+            if success:
+                removed_metadata += 1
+            else:
+                errors.append(f"{meta_file.name}: {message}")
+
+        if errors:
+            return jsonify({
+                "error": "Failed to fully empty the recycle bin.",
+                "details": errors,
+                "deleted_items": deleted_items,
+                "removed_metadata": removed_metadata,
+            }), 500
+
+        parts = [f"Removed {deleted_items} item{'s' if deleted_items != 1 else ''}"]
+        if removed_metadata:
+            parts.append(
+                f"cleaned up {removed_metadata} stale metadata file{'s' if removed_metadata != 1 else ''}"
+            )
+        return jsonify({
+            "success": True,
+            "message": ", and ".join(parts) + ".",
+            "deleted_items": deleted_items,
+            "removed_metadata": removed_metadata,
+        })
 
     @app.get("/api/dir/download")
     def download_directory_zip():

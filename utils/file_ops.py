@@ -21,6 +21,195 @@ RECYCLE_BIN = Path("/var/tmp/RECYCLE_BIN")
 RECYCLE_META_DIR = Path("/var/lib/recycle-bin")
 
 
+def _normalize_path(path: Path | str) -> Path:
+    """Return an absolute Path for path-like input."""
+    return Path(os.path.abspath(path))
+
+
+def is_recycle_bin_root(path: Path | str) -> bool:
+    """Return True when path is the recycle-bin root."""
+    return _normalize_path(path) == RECYCLE_BIN
+
+
+def is_in_recycle_bin(path: Path | str) -> bool:
+    """Return True when path points at the recycle bin or one of its descendants."""
+    normalized = _normalize_path(path)
+    return normalized == RECYCLE_BIN or RECYCLE_BIN in normalized.parents
+
+
+def _is_recycle_bin_entry(path: Path | str) -> bool:
+    """Return True when path is a direct child of the recycle-bin root."""
+    return _normalize_path(path).parent == RECYCLE_BIN
+
+
+def _recycle_meta_file(trash_name: str) -> Path:
+    return RECYCLE_META_DIR / f"{trash_name}.json"
+
+
+def _ensure_recycle_dirs() -> None:
+    for directory in (RECYCLE_BIN, RECYCLE_META_DIR):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            subprocess.run(
+                ["sudo", "-n", "mkdir", "-p", str(directory)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
+    try:
+        if oct(RECYCLE_BIN.stat().st_mode)[-4:] != "1777":
+            subprocess.run(
+                ["sudo", "-n", "chmod", "1777", str(RECYCLE_BIN)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
+        if oct(RECYCLE_META_DIR.stat().st_mode)[-4:] != "1777":
+            subprocess.run(
+                ["sudo", "-n", "chmod", "1777", str(RECYCLE_META_DIR)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+            )
+    except OSError:
+        pass
+
+
+def _write_recycle_metadata(trash_name: str, meta: dict[str, object]) -> tuple[bool, str]:
+    """Write recycle-bin metadata for a trashed entry."""
+    _ensure_recycle_dirs()
+    meta_file = _recycle_meta_file(trash_name)
+    payload = json.dumps(meta)
+    try:
+        meta_file.write_text(payload, encoding="utf-8")
+        return True, ""
+    except PermissionError:
+        pass
+    except Exception as e:
+        return False, str(e)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "tee", str(meta_file)],
+            input=payload.encode("utf-8"),
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return True, ""
+        error = result.stderr.decode("utf-8", errors="replace")
+        return False, f"sudo tee failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Metadata write timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def _remove_recycle_metadata(trash_name: str) -> tuple[bool, str]:
+    """Delete recycle-bin metadata for a trashed entry."""
+    meta_file = _recycle_meta_file(trash_name)
+    if not meta_file.exists():
+        return True, ""
+
+    try:
+        meta_file.unlink()
+        return True, ""
+    except FileNotFoundError:
+        return True, ""
+    except PermissionError:
+        pass
+    except Exception as e:
+        return False, str(e)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "rm", "-f", str(meta_file)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return True, ""
+        error = result.stderr.decode("utf-8", errors="replace")
+        return False, f"sudo rm failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Metadata delete timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def get_recycle_metadata(path: Path | str) -> dict[str, object] | None:
+    """Return metadata for a top-level recycle-bin entry, if present."""
+    normalized = _normalize_path(path)
+    if not _is_recycle_bin_entry(normalized):
+        return None
+
+    meta_file = _recycle_meta_file(normalized.name)
+    try:
+        raw = meta_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+    try:
+        meta = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+    return meta if isinstance(meta, dict) else None
+
+
+def permanently_delete_path(path: Path | str) -> tuple[bool, str]:
+    """
+    Permanently remove a file, symlink, or directory.
+
+    When deleting a top-level recycle-bin entry, remove its metadata too.
+    """
+    normalized = _normalize_path(path)
+    was_recycle_entry = _is_recycle_bin_entry(normalized)
+    trash_name = normalized.name
+
+    try:
+        if normalized.is_dir() and not normalized.is_symlink():
+            shutil.rmtree(normalized)
+        else:
+            normalized.unlink()
+    except FileNotFoundError:
+        if was_recycle_entry:
+            _remove_recycle_metadata(trash_name)
+        return True, "Already deleted"
+    except PermissionError:
+        pass
+    except OSError as e:
+        return False, str(e)
+    else:
+        if was_recycle_entry:
+            _remove_recycle_metadata(trash_name)
+        return True, "Permanently deleted"
+
+    rm_args = ["sudo", "-n", "rm"]
+    if normalized.is_dir() and not normalized.is_symlink():
+        rm_args.append("-rf")
+    else:
+        rm_args.append("-f")
+    rm_args.append(str(normalized))
+
+    try:
+        result = subprocess.run(
+            rm_args,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            error = result.stderr.decode("utf-8", errors="replace")
+            return False, f"sudo rm failed: {error}"
+    except subprocess.TimeoutExpired:
+        return False, "Delete operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+    if was_recycle_entry:
+        _remove_recycle_metadata(trash_name)
+    return True, "Permanently deleted"
+
+
 def is_writable_by_user(path: Path) -> bool:
     """Check if the current user can write to this file directly."""
     if not path.exists():
@@ -178,52 +367,23 @@ def _move_to_trash(path: Path) -> tuple[bool, str]:
     Move a file, directory, or symlink to the recycle bin.
     Returns (success, message).
     """
-    path = Path(os.path.abspath(path))
+    path = _normalize_path(path)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
     hex_id = secrets.token_hex(4)
     trash_name = f"{path.name}__{timestamp}_{hex_id}"
     trash_dest = RECYCLE_BIN / trash_name
 
-    meta = json.dumps({
+    meta = {
         "original_path": str(path),
         "deleted_at": timestamp,
         "trash_name": trash_name,
-    })
+    }
 
-    # Ensure directories exist
-    for d in (RECYCLE_BIN, RECYCLE_META_DIR):
-        try:
-            d.mkdir(parents=True, exist_ok=True)
-        except PermissionError:
-            subprocess.run(
-                ["sudo", "-n", "mkdir", "-p", str(d)],
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
-            )
-    try:
-        if oct(RECYCLE_BIN.stat().st_mode)[-4:] != "1777":
-            subprocess.run(
-                ["sudo", "-n", "chmod", "1777", str(RECYCLE_BIN)],
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
-            )
-        if oct(RECYCLE_META_DIR.stat().st_mode)[-4:] != "1777":
-            subprocess.run(
-                ["sudo", "-n", "chmod", "1777", str(RECYCLE_META_DIR)],
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
-            )
-    except OSError:
-        pass
+    _ensure_recycle_dirs()
 
     def _write_meta():
-        try:
-            meta_file = RECYCLE_META_DIR / f"{trash_name}.json"
-            try:
-                meta_file.write_text(meta)
-            except PermissionError:
-                subprocess.run(
-                    ["sudo", "-n", "tee", str(meta_file)],
-                    input=meta.encode(), capture_output=True, timeout=10,
-                )
-        except Exception:
+        ok, _ = _write_recycle_metadata(trash_name, meta)
+        if not ok:
             pass  # metadata is best-effort; the move already succeeded
 
     # Try direct rename (fast, same filesystem)
@@ -454,12 +614,34 @@ def rename_path(path: Path, target: Path) -> tuple[bool, str]:
     Rename/move a file or directory. Uses sudo mv if not directly renameable.
     Returns (success, message).
     """
-    path = Path(os.path.abspath(path))
-    target = Path(os.path.abspath(target))
+    path = _normalize_path(path)
+    target = _normalize_path(target)
+    recycle_meta = get_recycle_metadata(path)
+
+    def _sync_recycle_metadata() -> tuple[bool, str]:
+        if recycle_meta is None:
+            return True, ""
+
+        if _is_recycle_bin_entry(target):
+            updated_meta = dict(recycle_meta)
+            updated_meta["trash_name"] = target.name
+            ok, error = _write_recycle_metadata(target.name, updated_meta)
+            if not ok:
+                return False, error
+        ok, error = _remove_recycle_metadata(path.name)
+        if not ok:
+            return False, error
+        return True, ""
+
+    def _finish_rename(msg: str) -> tuple[bool, str]:
+        ok, error = _sync_recycle_metadata()
+        if not ok:
+            return True, f"{msg} (warning: metadata sync failed: {error})"
+        return True, msg
 
     try:
         path.rename(target)
-        return True, "Renamed"
+        return _finish_rename("Renamed")
     except PermissionError:
         pass
     except OSError as e:
@@ -468,7 +650,7 @@ def rename_path(path: Path, target: Path) -> tuple[bool, str]:
         # Cross-filesystem — try shutil.move before sudo
         try:
             shutil.move(str(path), str(target))
-            return True, "Moved"
+            return _finish_rename("Moved")
         except (PermissionError, shutil.Error):
             pass
         except OSError:
@@ -483,7 +665,7 @@ def rename_path(path: Path, target: Path) -> tuple[bool, str]:
             timeout=10,
         )
         if result.returncode == 0:
-            return True, "Renamed (with sudo)"
+            return _finish_rename("Renamed (with sudo)")
         else:
             error = result.stderr.decode("utf-8", errors="replace")
             return False, f"sudo mv failed: {error}"
