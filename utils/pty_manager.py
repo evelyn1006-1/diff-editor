@@ -8,7 +8,6 @@ import secrets
 import select
 import signal
 import struct
-import sys
 import time
 import fcntl
 import termios
@@ -19,7 +18,18 @@ from typing import Optional
 from app_runtime import TERMINAL_SERVER_URL
 
 _WRAPPER_PATH = str(Path(__file__).resolve().parent / "editor_wrapper.py")
-_EDITOR_CMD = f"{sys.executable} {_WRAPPER_PATH}"
+_EDITOR_CMD = _WRAPPER_PATH
+_EDITOR_ENV_VARS = (
+    "EDITOR",
+    "VISUAL",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "SUDO_EDITOR",
+    "SYSTEMD_EDITOR",
+    "KUBE_EDITOR",
+    "HGEDITOR",
+    "SVN_EDITOR",
+)
 
 
 class PTYSession:
@@ -51,10 +61,8 @@ class PTYSession:
                 # Route editor invocations (git commit, crontab -e, etc.) to the browser modal.
                 env["TERMINAL_SESSION_ID"] = self.session_id
                 env["TERMINAL_SERVER_URL"] = TERMINAL_SERVER_URL
-                env["GIT_EDITOR"] = _EDITOR_CMD
-                env["SUDO_EDITOR"] = _EDITOR_CMD
-                env["VISUAL"] = _EDITOR_CMD
-                env["EDITOR"] = _EDITOR_CMD
+                for key in _EDITOR_ENV_VARS:
+                    env[key] = _EDITOR_CMD
                 argv = [self.shell] + self.shell_args
                 os.execvpe(self.shell, argv, env)
             else:

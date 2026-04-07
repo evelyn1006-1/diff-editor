@@ -66,8 +66,182 @@ PAGER_COMMANDS = {"less", "more"}
 # Commands that spawn an editor internally and require sudo -E so our $SUDO_EDITOR
 # env var is preserved through the privilege escalation.
 _SUDO_E_COMMANDS = {"visudo"}
-_GIT_PAGER_SUBCOMMANDS = {"log", "diff", "show", "blame"}
-_SYSTEMCTL_PAGER_SUBCOMMANDS = {"status", "list-units", "list-timers", "list-sockets", "list-jobs"}
+_SUDO_SHORT_FLAGS_WITH_VALUE = {"-C", "-D", "-R", "-T", "-U", "-g", "-h", "-p", "-r", "-t", "-u"}
+_SUDO_LONG_FLAGS_WITH_VALUE = {
+    "--chdir",
+    "--close-from",
+    "--group",
+    "--host",
+    "--other-user",
+    "--prompt",
+    "--role",
+    "--type",
+    "--user",
+}
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+_SUDO_PRESERVE_ENV_FLAGS = {"-E", "--preserve-env"}
+_GIT_GLOBAL_VALUE_FLAGS = {
+    "-C",
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+}
+_GIT_PAGER_SUBCOMMANDS = {"blame", "diff", "grep", "help", "log", "reflog", "shortlog", "show"}
+_GIT_STASH_PAGER_SUBCOMMANDS = {"list", "show"}
+_GIT_CONFIG_EDITOR_FLAGS = {"-e", "--edit"}
+_GIT_CONFIG_QUERY_FLAGS = {"-l", "--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list"}
+_GIT_REBASE_EDITOR_FLAGS = {"-i", "-p", "--edit-todo", "--interactive", "--preserve-merges", "--rebase-merges"}
+_GIT_TAG_EDITOR_FLAGS = {"-a", "-e", "-s", "--annotate", "--edit", "--sign"}
+_GIT_BRANCH_LIST_FLAGS = {"-l", "--list"}
+_GIT_BRANCH_MUTATING_FLAGS = {
+    "-C",
+    "-D",
+    "-M",
+    "-c",
+    "-d",
+    "-m",
+    "-u",
+    "--copy",
+    "--delete",
+    "--edit-description",
+    "--move",
+    "--set-upstream-to",
+    "--unset-upstream",
+}
+_GIT_TAG_LIST_FLAGS = {"-l", "--list"}
+_GIT_TAG_MUTATING_FLAGS = {
+    "-F",
+    "-a",
+    "-d",
+    "-e",
+    "-f",
+    "-m",
+    "-s",
+    "-u",
+    "--annotate",
+    "--cleanup",
+    "--delete",
+    "--edit",
+    "--file",
+    "--force",
+    "--local-user",
+    "--message",
+    "--sign",
+    "--trailer",
+}
+_CRONTAB_EDITOR_FLAGS = {"-e", "--edit"}
+_KUBECTL_GLOBAL_VALUE_FLAGS = {
+    "-f",
+    "-k",
+    "-l",
+    "-n",
+    "--as",
+    "--as-group",
+    "--cache-dir",
+    "--certificate-authority",
+    "--client-certificate",
+    "--client-key",
+    "--cluster",
+    "--context",
+    "--field-manager",
+    "--filename",
+    "--kubeconfig",
+    "--kustomize",
+    "--namespace",
+    "--password",
+    "--profile",
+    "--profile-output",
+    "--request-timeout",
+    "--selector",
+    "--server",
+    "--tls-server-name",
+    "--token",
+    "--user",
+    "--username",
+}
+_HG_GLOBAL_VALUE_FLAGS = {"-R", "--repository", "--cwd", "--config", "--encoding", "--encodingmode", "--pager"}
+_HG_EDITOR_SUBCOMMANDS = {"backout", "commit", "histedit", "import", "tag"}
+_SVN_GLOBAL_VALUE_FLAGS = {
+    "--config-dir",
+    "--config-option",
+    "--editor-cmd",
+    "--encoding",
+    "--password",
+    "--targets",
+    "--trust-server-cert-failures",
+    "--username",
+}
+_SVN_EDITOR_SUBCOMMANDS = {
+    "ci",
+    "commit",
+    "copy",
+    "cp",
+    "delete",
+    "del",
+    "import",
+    "lock",
+    "mkdir",
+    "move",
+    "mv",
+    "pedit",
+    "pe",
+    "propedit",
+    "remove",
+    "rm",
+}
+_SYSTEMCTL_GLOBAL_VALUE_FLAGS = {
+    "-H",
+    "-M",
+    "-P",
+    "-n",
+    "-o",
+    "-p",
+    "-s",
+    "-t",
+    "--boot-loader-entry",
+    "--boot-loader-menu",
+    "--check-inhibitors",
+    "--drop-in",
+    "--host",
+    "--image",
+    "--image-policy",
+    "--job-mode",
+    "--kill-value",
+    "--kill-whom",
+    "--legend",
+    "--lines",
+    "--machine",
+    "--output",
+    "--preset-mode",
+    "--property",
+    "--root",
+    "--signal",
+    "--state",
+    "--timestamp",
+    "--type",
+    "--what",
+    "--when",
+}
+_SYSTEMCTL_PAGER_SUBCOMMANDS = {
+    "cat",
+    "help",
+    "list-automounts",
+    "list-dependencies",
+    "list-jobs",
+    "list-machines",
+    "list-paths",
+    "list-sockets",
+    "list-timers",
+    "list-unit-files",
+    "list-units",
+    "show",
+    "show-environment",
+    "status",
+}
 _MAX_COMPLETIONS = 50
 _BASH_COMPLETION_SCRIPTS = (
     "/usr/share/bash-completion/bash_completion",
@@ -246,17 +420,15 @@ def init_terminal_socketio(socketio):
             session.write("\n")
             return
 
-        # Rewrite visudo (and similar) to sudo -E so $SUDO_EDITOR is preserved.
+        # Rewrite sudo editor-launching commands to sudo -E so the browser
+        # editor wrapper survives privilege escalation.
         parsed = parse_intercept_command(command)
         if parsed:
             parts, idx = parsed
-            if parts[idx] in _SUDO_E_COMMANDS:
-                # Ensure command runs under sudo -E regardless of how it was typed.
-                sudo_prefix = parts[:idx]  # may be ["sudo"] or []
-                rest = parts[idx:]
-                rewritten = " ".join(
-                    shlex.quote(p) for p in (sudo_prefix or ["sudo"]) + ["-E"] + rest
-                )
+            if parts[0] == "sudo" and _command_uses_browser_editor(parts, idx):
+                # Ensure command keeps the browser editor env without corrupting
+                # sudo option/env ordering.
+                rewritten = " ".join(shlex.quote(p) for p in _rewrite_sudo_preserve_env(parts, idx))
                 session.write(rewritten + "\n")
                 return
 
@@ -327,7 +499,7 @@ def get_session_cwd(session) -> str:
 
 
 def parse_intercept_command(command: str) -> tuple[list[str], int] | None:
-    """Parse command and return (parts, command-index), handling optional sudo."""
+    """Parse command and return (parts, command-index), handling sudo prefixes."""
     if not command:
         return None
 
@@ -338,11 +510,201 @@ def parse_intercept_command(command: str) -> tuple[list[str], int] | None:
     if not parts:
         return None
 
-    idx = 1 if parts[0] == "sudo" else 0
+    idx = 0
+    if parts[0] == "sudo":
+        idx = 1
+        while idx < len(parts):
+            arg = parts[idx]
+            if arg == "--":
+                idx += 1
+                break
+            if _ENV_ASSIGNMENT_RE.match(arg):
+                idx += 1
+                continue
+            if arg.startswith("--"):
+                key = arg.split("=", 1)[0]
+                idx += 1 if "=" in arg or key not in _SUDO_LONG_FLAGS_WITH_VALUE else 2
+                continue
+            if arg.startswith("-") and arg != "-":
+                if arg in _SUDO_SHORT_FLAGS_WITH_VALUE:
+                    idx += 2
+                    continue
+                short_key = arg[:2]
+                if short_key in _SUDO_SHORT_FLAGS_WITH_VALUE and len(arg) > 2:
+                    idx += 1
+                    continue
+                idx += 1
+                continue
+            break
+
     if len(parts) <= idx:
         return None
 
     return parts, idx
+
+
+def _find_subcommand_after_options(args: list[str], value_flags: set[str]) -> tuple[int, str] | None:
+    """Return the first non-option token after leading command-global options."""
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--":
+            return None
+        if not arg.startswith("-") or arg == "-":
+            return idx, arg
+        if arg.startswith("--"):
+            key = arg.split("=", 1)[0]
+            idx += 1 if "=" in arg or key not in value_flags else 2
+            continue
+        if arg in value_flags:
+            idx += 2
+            continue
+        short_key = arg[:2]
+        if short_key in value_flags and len(arg) > 2:
+            idx += 1
+            continue
+        idx += 1
+    return None
+
+
+def _git_branch_is_query(args: list[str]) -> bool:
+    """Return True for clearly read-only branch listings."""
+    if not args:
+        return True
+
+    for arg in args:
+        key = arg.split("=", 1)[0] if arg.startswith("--") else arg
+        if key in _GIT_BRANCH_MUTATING_FLAGS:
+            return False
+
+    if any(arg in _GIT_BRANCH_LIST_FLAGS for arg in args):
+        return True
+
+    return all(arg.startswith("-") for arg in args)
+
+
+def _git_tag_is_query(args: list[str]) -> bool:
+    """Return True for clearly read-only tag listings."""
+    if not args:
+        return True
+
+    for arg in args:
+        key = arg.split("=", 1)[0] if arg.startswith("--") else arg
+        if key in _GIT_TAG_MUTATING_FLAGS:
+            return False
+
+    if any(arg in _GIT_TAG_LIST_FLAGS for arg in args):
+        return True
+
+    return all(arg.startswith("-") for arg in args)
+
+
+def _git_config_is_query(args: list[str]) -> bool:
+    """Return True for explicitly query-only git config invocations."""
+    return any(arg.split("=", 1)[0] in _GIT_CONFIG_QUERY_FLAGS for arg in args)
+
+
+def _rewrite_sudo_preserve_env(parts: list[str], idx: int) -> list[str]:
+    """Insert sudo -E before env assignments/--, unless already present."""
+    if parts[0] != "sudo":
+        return parts
+
+    prefix = parts[1:idx]
+    if any(_match_command_arg(arg, _SUDO_PRESERVE_ENV_FLAGS) in _SUDO_PRESERVE_ENV_FLAGS for arg in prefix):
+        return parts
+
+    insert_at = idx
+    for pos in range(1, idx):
+        arg = parts[pos]
+        if arg == "--" or _ENV_ASSIGNMENT_RE.match(arg):
+            insert_at = pos
+            break
+
+    return parts[:insert_at] + ["-E"] + parts[insert_at:]
+
+
+def _git_command_uses_browser_editor(subcmd: str, subargs: list[str]) -> bool:
+    """Return True for git flows that commonly launch an editor."""
+    if subcmd == "config":
+        return any(
+            _match_command_arg(arg, _GIT_CONFIG_EDITOR_FLAGS) in _GIT_CONFIG_EDITOR_FLAGS
+            for arg in subargs
+        )
+    if subcmd in {"cherry-pick", "commit", "merge", "revert"}:
+        return True
+    if subcmd == "rebase":
+        return any(_match_command_arg(arg, _GIT_REBASE_EDITOR_FLAGS) in _GIT_REBASE_EDITOR_FLAGS for arg in subargs)
+    if subcmd == "tag":
+        return any(_match_command_arg(arg, _GIT_TAG_EDITOR_FLAGS) in _GIT_TAG_EDITOR_FLAGS for arg in subargs)
+    if subcmd == "add":
+        return any(_match_command_arg(arg, {"-e", "--edit"}) in {"-e", "--edit"} for arg in subargs)
+    if subcmd == "notes":
+        return next((arg for arg in subargs if not arg.startswith("-")), None) == "edit"
+    return False
+
+
+def _command_uses_browser_editor(parts: list[str], idx: int) -> bool:
+    """Return True for commands that should preserve editor env under sudo."""
+    cmd = parts[idx]
+    if cmd in _SUDO_E_COMMANDS:
+        return True
+
+    args = parts[idx + 1:]
+    if cmd == "systemctl":
+        parsed = _find_subcommand_after_options(args, _SYSTEMCTL_GLOBAL_VALUE_FLAGS)
+        return parsed is not None and parsed[1] == "edit"
+
+    if cmd == "crontab":
+        return any(_match_command_arg(arg, _CRONTAB_EDITOR_FLAGS) in _CRONTAB_EDITOR_FLAGS for arg in args)
+
+    if cmd == "git":
+        parsed = _find_subcommand_after_options(args, _GIT_GLOBAL_VALUE_FLAGS)
+        if not parsed:
+            return False
+        return _git_command_uses_browser_editor(parsed[1], args[parsed[0] + 1:])
+
+    if cmd == "kubectl":
+        parsed = _find_subcommand_after_options(args, _KUBECTL_GLOBAL_VALUE_FLAGS)
+        return parsed is not None and parsed[1] == "edit"
+
+    if cmd == "hg":
+        parsed = _find_subcommand_after_options(args, _HG_GLOBAL_VALUE_FLAGS)
+        return parsed is not None and parsed[1] in _HG_EDITOR_SUBCOMMANDS
+
+    if cmd == "svn":
+        parsed = _find_subcommand_after_options(args, _SVN_GLOBAL_VALUE_FLAGS)
+        return parsed is not None and parsed[1] in _SVN_EDITOR_SUBCOMMANDS
+
+    return False
+
+
+def _get_git_pager_request(parts: list[str], idx: int) -> tuple[str, list[str]] | None:
+    """Return the title and run parts for git commands that should use the GUI pager."""
+    args = parts[idx + 1:]
+    parsed = _find_subcommand_after_options(args, _GIT_GLOBAL_VALUE_FLAGS)
+    if not parsed:
+        return None
+
+    sub_idx, subcmd = parsed
+    subargs = args[sub_idx + 1:]
+    title: str | None = None
+    if subcmd in _GIT_PAGER_SUBCOMMANDS:
+        title = f"git {subcmd}"
+    elif subcmd == "stash":
+        nested = next((arg for arg in subargs if not arg.startswith("-")), None)
+        if nested in _GIT_STASH_PAGER_SUBCOMMANDS:
+            title = f"git stash {nested}"
+    elif subcmd == "branch" and _git_branch_is_query(subargs):
+        title = "git branch"
+    elif subcmd == "tag" and _git_tag_is_query(subargs):
+        title = "git tag"
+    elif subcmd == "config" and _git_config_is_query(subargs):
+        title = "git config"
+
+    if title is None:
+        return None
+
+    return title, parts[:idx + 1] + ["--no-pager"] + args
 
 
 def _match_command_arg(arg: str, candidates: set[str]) -> str | None:
@@ -566,16 +928,17 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
                 pass
 
     elif cmd == "git":
-        args = parts[idx + 1:]
-        if args and args[0] in _GIT_PAGER_SUBCOMMANDS:
-            run_parts = parts[:idx + 1] + ["--no-pager"] + args
+        request = _get_git_pager_request(parts, idx)
+        if request is not None:
+            title, run_parts = request
             content = _run_no_pager(run_parts, cwd)
             if content is not None:
-                out = (f"git {args[0]}", content)
+                out = (title, content)
 
     elif cmd == "systemctl":
         args = parts[idx + 1:]
-        subcmd = next((a for a in args if not a.startswith("-")), None)
+        parsed_subcmd = _find_subcommand_after_options(args, _SYSTEMCTL_GLOBAL_VALUE_FLAGS)
+        subcmd = parsed_subcmd[1] if parsed_subcmd else None
         if subcmd in _SYSTEMCTL_PAGER_SUBCOMMANDS:
             run_parts = parts[:idx + 1] + ["--no-pager"] + args
             content = _run_no_pager(run_parts, cwd)
