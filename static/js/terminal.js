@@ -1166,6 +1166,13 @@ function tokenizeCommand(command) {
     return command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
 }
 
+function shouldCollapsePathToken(token) {
+    if (!token.includes('/')) return false;
+    if (token.startsWith('[') && token.endsWith(']')) return false;
+
+    return /^(?:\/|\.\/|\.\.\/|~\/)/.test(token) || token.indexOf('/') !== token.lastIndexOf('/');
+}
+
 function reduceCommandToken(token) {
     const unquoted = token.replace(/^['"]|['"]$/g, '');
     // Preserve option keys: --config=/etc/app.yml → --config=app.yml
@@ -1173,10 +1180,10 @@ function reduceCommandToken(token) {
     if (eqIdx !== -1) {
         const key = unquoted.slice(0, eqIdx + 1);
         const val = unquoted.slice(eqIdx + 1);
-        const basename = val.includes('/') ? val.split('/').pop() : val;
+        const basename = shouldCollapsePathToken(val) ? val.split('/').pop() : val;
         return key + (basename || val);
     }
-    const basename = unquoted.includes('/') ? unquoted.split('/').pop() : unquoted;
+    const basename = shouldCollapsePathToken(unquoted) ? unquoted.split('/').pop() : unquoted;
     return basename || unquoted;
 }
 
