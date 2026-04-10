@@ -146,8 +146,44 @@
                     <span id="editor-title" class="editor-title"></span>
                     <button id="editor-close" class="editor-close-btn" title="Cancel">&times;</button>
                 </div>
-                <textarea id="editor-content" class="editor-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+                <div id="editor-search-panel" class="editor-search-panel hidden">
+                    <div class="editor-search-top">
+                        <div class="editor-search-mode">
+                            <button id="editor-find-toggle" class="editor-toolbar-btn" type="button">Find</button>
+                            <button id="editor-replace-toggle" class="editor-toolbar-btn" type="button">Replace</button>
+                        </div>
+                        <span id="editor-search-summary" class="editor-search-summary"></span>
+                    </div>
+                    <div class="editor-search-row">
+                        <label class="editor-search-group">
+                            <span>Find</span>
+                            <input id="editor-find-input" class="editor-search-input" type="text" autocomplete="off" spellcheck="false">
+                        </label>
+                        <label id="editor-replace-group" class="editor-search-group hidden">
+                            <span>Replace</span>
+                            <input id="editor-replace-input" class="editor-search-input" type="text" autocomplete="off" spellcheck="false">
+                        </label>
+                    </div>
+                    <div class="editor-search-actions">
+                        <button id="editor-case-toggle" class="editor-toolbar-btn" type="button">Aa</button>
+                        <button id="editor-word-toggle" class="editor-toolbar-btn" type="button">Whole</button>
+                        <button id="editor-regex-toggle" class="editor-toolbar-btn" type="button">Regex</button>
+                        <button id="editor-find-prev" class="editor-toolbar-btn" type="button">Prev</button>
+                        <button id="editor-find-next" class="editor-toolbar-btn" type="button">Next</button>
+                        <button id="editor-replace-one" class="editor-toolbar-btn hidden" type="button">Replace</button>
+                        <button id="editor-replace-all" class="editor-toolbar-btn hidden" type="button">Replace All</button>
+                        <button id="editor-search-close" class="editor-toolbar-btn" type="button">Done</button>
+                    </div>
+                </div>
+                <div class="editor-body">
+                    <textarea id="editor-content" class="editor-textarea" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+                    <div id="editor-diff-view" class="editor-diff-view hidden"></div>
+                </div>
                 <div class="editor-footer">
+                    <div class="editor-footer-left">
+                        <button id="editor-search-toggle" class="editor-toolbar-btn" type="button">Find / Replace</button>
+                        <button id="editor-diff-toggle" class="editor-toolbar-btn" type="button">View Changes</button>
+                    </div>
                     <span id="editor-hint" class="editor-hint">Ctrl+Enter to save &nbsp;·&nbsp; Esc to cancel</span>
                     <div class="editor-actions">
                         <button id="editor-cancel" class="editor-btn editor-btn-cancel">Cancel</button>

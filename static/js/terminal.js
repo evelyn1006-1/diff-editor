@@ -967,6 +967,21 @@ function pagerSearchStep(delta) {
 
 // ── Editor Modal ───────────────────────────────────────────────────────────
 
+const EDITOR_DIFF_CELL_LIMIT = 250000;
+const EDITOR_DIFF_CONTEXT_LINES = 2;
+
+let editorOriginalContent = '';
+let editorSearchMatches = [];
+let editorSearchIndex = -1;
+let editorPanelMode = 'hidden';
+let editorCaseSensitive = false;
+let editorWholeWord = false;
+let editorRegexMode = false;
+let editorSearchError = '';
+let editorDiffMode = false;
+let editorDiffStats = { added: 0, removed: 0 };
+let editorModalInitialized = false;
+
 function setEditorStatus(message, isError = false) {
     const hint = document.getElementById('editor-hint');
     if (!hint) return;
@@ -979,21 +994,749 @@ function setEditorBusy(isBusy) {
     const saveBtn = document.getElementById('editor-save');
     const cancelBtn = document.getElementById('editor-cancel');
     const closeBtn = document.getElementById('editor-close');
+    const controlIds = [
+        'editor-search-toggle',
+        'editor-find-toggle',
+        'editor-replace-toggle',
+        'editor-diff-toggle',
+        'editor-search-close',
+        'editor-find-prev',
+        'editor-find-next',
+        'editor-case-toggle',
+        'editor-word-toggle',
+        'editor-regex-toggle',
+        'editor-replace-one',
+        'editor-replace-all',
+        'editor-find-input',
+        'editor-replace-input',
+    ];
     if (textarea) textarea.readOnly = isBusy;
     if (saveBtn) saveBtn.disabled = isBusy;
     if (cancelBtn) cancelBtn.disabled = isBusy;
     if (closeBtn) closeBtn.disabled = isBusy;
+    controlIds.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = isBusy;
+    });
+}
+
+function getEditorTextarea() {
+    return document.getElementById('editor-content');
+}
+
+function getEditorFindQuery() {
+    return document.getElementById('editor-find-input')?.value || '';
+}
+
+function getEditorReplaceValue() {
+    return document.getElementById('editor-replace-input')?.value || '';
+}
+
+function setEditorSummary(message = '') {
+    const summary = document.getElementById('editor-search-summary');
+    if (summary) summary.textContent = message;
+}
+
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeEditorDiffText(text) {
+    return (text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function isEditorWordChar(char) {
+    return !!char && /\w/.test(char);
+}
+
+function isEditorWholeWordMatch(content, start, end) {
+    return !isEditorWordChar(content[start - 1]) && !isEditorWordChar(content[end]);
+}
+
+function buildEditorSearchRegExp(query, { global = true, sticky = false } = {}) {
+    if (!query) return { regex: null, error: '' };
+
+    const source = editorRegexMode ? query : escapeRegExp(query);
+    const flags = `${global ? 'g' : ''}${editorCaseSensitive ? '' : 'i'}${sticky ? 'y' : ''}`;
+
+    try {
+        return { regex: new RegExp(source, flags), error: '' };
+    } catch (error) {
+        return { regex: null, error: error.message || 'Invalid regular expression' };
+    }
+}
+
+function collectEditorMatches(content, query) {
+    const { regex, error } = buildEditorSearchRegExp(query);
+    if (!regex) {
+        return { matches: [], error };
+    }
+
+    const matches = [];
+    let match;
+
+    while ((match = regex.exec(content)) !== null) {
+        const text = match[0] || '';
+        if (!text) {
+            regex.lastIndex += 1;
+            continue;
+        }
+
+        const start = match.index;
+        const end = start + text.length;
+        if (editorWholeWord && !isEditorWholeWordMatch(content, start, end)) {
+            continue;
+        }
+
+        matches.push({
+            start,
+            end,
+            text,
+        });
+    }
+
+    return { matches, error: '' };
+}
+
+function resolveEditorReplacement(content, match, replacement) {
+    if (!editorRegexMode) {
+        return {
+            nextContent: content.slice(0, match.start) + replacement + content.slice(match.end),
+            cursor: match.start + replacement.length,
+        };
+    }
+
+    const query = getEditorFindQuery();
+    const { regex } = buildEditorSearchRegExp(query, { global: false, sticky: true });
+    if (!regex) {
+        return {
+            nextContent: content.slice(0, match.start) + replacement + content.slice(match.end),
+            cursor: match.start + replacement.length,
+        };
+    }
+
+    regex.lastIndex = match.start;
+    const nextContent = content.replace(regex, replacement);
+    const replacedLength = nextContent.length - content.length + (match.end - match.start);
+    return {
+        nextContent,
+        cursor: match.start + replacedLength,
+    };
+}
+
+function updateEditorToolbarState() {
+    const searchPanel = document.getElementById('editor-search-panel');
+    const replaceGroup = document.getElementById('editor-replace-group');
+    const replaceOneBtn = document.getElementById('editor-replace-one');
+    const replaceAllBtn = document.getElementById('editor-replace-all');
+    const searchToggleBtn = document.getElementById('editor-search-toggle');
+    const findBtn = document.getElementById('editor-find-toggle');
+    const replaceBtn = document.getElementById('editor-replace-toggle');
+    const diffBtn = document.getElementById('editor-diff-toggle');
+    const caseBtn = document.getElementById('editor-case-toggle');
+    const wordBtn = document.getElementById('editor-word-toggle');
+    const regexBtn = document.getElementById('editor-regex-toggle');
+    const textarea = getEditorTextarea();
+    const diffView = document.getElementById('editor-diff-view');
+
+    if (searchPanel) searchPanel.classList.toggle('hidden', editorPanelMode === 'hidden');
+    if (replaceGroup) replaceGroup.classList.toggle('hidden', editorPanelMode !== 'replace');
+    if (replaceOneBtn) replaceOneBtn.classList.toggle('hidden', editorPanelMode !== 'replace');
+    if (replaceAllBtn) replaceAllBtn.classList.toggle('hidden', editorPanelMode !== 'replace');
+    if (searchToggleBtn) {
+        searchToggleBtn.classList.toggle('active', editorPanelMode !== 'hidden');
+        searchToggleBtn.textContent = editorPanelMode === 'hidden' ? 'Find / Replace' : 'Hide Search';
+    }
+
+    if (findBtn) findBtn.classList.toggle('active', editorPanelMode === 'find');
+    if (replaceBtn) replaceBtn.classList.toggle('active', editorPanelMode === 'replace');
+    if (caseBtn) caseBtn.classList.toggle('active', editorCaseSensitive);
+    if (wordBtn) wordBtn.classList.toggle('active', editorWholeWord);
+    if (regexBtn) regexBtn.classList.toggle('active', editorRegexMode);
+    if (diffBtn) {
+        diffBtn.classList.toggle('active', editorDiffMode);
+        diffBtn.textContent = editorDiffMode ? 'Back to Edit' : 'View Changes';
+    }
+
+    if (textarea) textarea.classList.toggle('hidden', editorDiffMode);
+    if (diffView) diffView.classList.toggle('hidden', !editorDiffMode);
+}
+
+function updateEditorSummary() {
+    if (editorDiffMode) {
+        if (editorDiffStats.added === 0 && editorDiffStats.removed === 0) {
+            setEditorSummary('No changes yet');
+            return;
+        }
+        const parts = [];
+        if (editorDiffStats.added > 0) {
+            parts.push(`${editorDiffStats.added} addition${editorDiffStats.added === 1 ? '' : 's'}`);
+        }
+        if (editorDiffStats.removed > 0) {
+            parts.push(`${editorDiffStats.removed} deletion${editorDiffStats.removed === 1 ? '' : 's'}`);
+        }
+        setEditorSummary(parts.join(' · '));
+        return;
+    }
+
+    const query = getEditorFindQuery();
+    if (editorPanelMode === 'hidden') {
+        setEditorSummary('');
+    } else if (editorSearchError) {
+        setEditorSummary('Invalid regex');
+    } else if (!query) {
+        setEditorSummary(editorPanelMode === 'replace' ? 'Find text to replace' : 'Type to search');
+    } else if (editorSearchMatches.length === 0) {
+        setEditorSummary('No matches');
+    } else {
+        setEditorSummary(`${editorSearchIndex + 1} of ${editorSearchMatches.length}`);
+    }
+}
+
+function focusEditorMatch(index, { focus = true } = {}) {
+    const textarea = getEditorTextarea();
+    if (!textarea || editorSearchMatches.length === 0) return false;
+
+    editorSearchIndex = (index + editorSearchMatches.length) % editorSearchMatches.length;
+    const match = editorSearchMatches[editorSearchIndex];
+    if (!match) return false;
+
+    if (focus) textarea.focus();
+    textarea.setSelectionRange(match.start, match.end);
+    updateEditorSummary();
+    return true;
+}
+
+function syncEditorSelectionToSearch() {
+    const textarea = getEditorTextarea();
+    if (!textarea || editorSearchMatches.length === 0) return;
+    const idx = editorSearchMatches.findIndex(
+        match => match.start === textarea.selectionStart && match.end === textarea.selectionEnd
+    );
+    if (idx !== -1) {
+        editorSearchIndex = idx;
+        updateEditorSummary();
+    }
+}
+
+function refreshEditorSearch({ revealCurrent = false } = {}) {
+    const textarea = getEditorTextarea();
+    if (!textarea) return;
+
+    const query = getEditorFindQuery();
+    if (!query) {
+        editorSearchMatches = [];
+        editorSearchIndex = -1;
+        editorSearchError = '';
+        updateEditorSummary();
+        return;
+    }
+
+    const previousMatch = editorSearchMatches[editorSearchIndex] || null;
+    const { matches, error } = collectEditorMatches(textarea.value, query);
+    editorSearchMatches = matches;
+    editorSearchError = error;
+
+    if (editorSearchError) {
+        editorSearchIndex = -1;
+        updateEditorSummary();
+        return;
+    }
+
+    if (editorSearchMatches.length === 0) {
+        editorSearchIndex = -1;
+        updateEditorSummary();
+        return;
+    }
+
+    let nextIndex = editorSearchMatches.findIndex(
+        match => match.start === textarea.selectionStart && match.end === textarea.selectionEnd
+    );
+
+    if (nextIndex === -1 && previousMatch) {
+        nextIndex = editorSearchMatches.findIndex(
+            match => match.start === previousMatch.start && match.end === previousMatch.end
+        );
+    }
+
+    if (nextIndex === -1) {
+        nextIndex = editorSearchMatches.findIndex(match => match.start >= textarea.selectionStart);
+    }
+
+    if (nextIndex === -1) {
+        nextIndex = 0;
+    }
+
+    editorSearchIndex = nextIndex;
+
+    if (revealCurrent && !editorDiffMode) {
+        focusEditorMatch(editorSearchIndex, { focus: false });
+    } else {
+        updateEditorSummary();
+    }
+}
+
+function setEditorPanelMode(mode) {
+    editorPanelMode = mode;
+    if (mode !== 'hidden' && editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+    updateEditorToolbarState();
+    refreshEditorSearch();
+
+    const target = mode === 'replace'
+        ? document.getElementById('editor-replace-input')
+        : document.getElementById('editor-find-input');
+    if (mode !== 'hidden' && target) {
+        target.focus();
+        target.select?.();
+    }
+}
+
+function stepEditorSearch(delta) {
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+
+    refreshEditorSearch();
+    if (editorSearchError || editorSearchMatches.length === 0) return;
+
+    const baseIndex = editorSearchIndex === -1 ? (delta < 0 ? editorSearchMatches.length - 1 : 0) : editorSearchIndex;
+    focusEditorMatch(baseIndex + delta);
+}
+
+function replaceCurrentEditorMatch() {
+    const textarea = getEditorTextarea();
+    const query = getEditorFindQuery();
+    if (!textarea || !query) return;
+
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+
+    refreshEditorSearch();
+    if (editorSearchError || editorSearchMatches.length === 0) return;
+
+    const match = editorSearchMatches[editorSearchIndex === -1 ? 0 : editorSearchIndex];
+    if (!match) return;
+
+    const replacement = getEditorReplaceValue();
+    const { nextContent, cursor } = resolveEditorReplacement(textarea.value, match, replacement);
+    textarea.value = nextContent;
+    textarea.focus();
+    textarea.setSelectionRange(cursor, cursor);
+    editorSearchIndex = -1;
+    setEditorStatus('Ctrl+Enter to save · Esc to cancel');
+    refreshEditorSearch({ revealCurrent: true });
+}
+
+function replaceAllEditorMatches() {
+    const textarea = getEditorTextarea();
+    const query = getEditorFindQuery();
+    if (!textarea || !query) return;
+
+    refreshEditorSearch();
+    if (editorSearchError || editorSearchMatches.length === 0) return;
+
+    const replacement = getEditorReplaceValue();
+    const matchCount = editorSearchMatches.length;
+    let nextContent = textarea.value;
+
+    for (let index = editorSearchMatches.length - 1; index >= 0; index -= 1) {
+        const match = editorSearchMatches[index];
+        nextContent = resolveEditorReplacement(nextContent, match, replacement).nextContent;
+    }
+
+    textarea.value = nextContent;
+    textarea.focus();
+    textarea.setSelectionRange(0, 0);
+    setEditorStatus(
+        `Replaced ${matchCount} match${matchCount === 1 ? '' : 'es'} · Ctrl+Enter to save · Esc to cancel`
+    );
+    refreshEditorSearch();
+}
+
+function buildEditorFallbackDiff(originalLines, modifiedLines) {
+    const lines = [];
+    let added = 0;
+    let removed = 0;
+    let start = 0;
+    while (
+        start < originalLines.length &&
+        start < modifiedLines.length &&
+        originalLines[start] === modifiedLines[start]
+    ) {
+        lines.push({ type: 'context', text: originalLines[start] });
+        start += 1;
+    }
+
+    let originalEnd = originalLines.length - 1;
+    let modifiedEnd = modifiedLines.length - 1;
+    while (
+        originalEnd >= start &&
+        modifiedEnd >= start &&
+        originalLines[originalEnd] === modifiedLines[modifiedEnd]
+    ) {
+        originalEnd -= 1;
+        modifiedEnd -= 1;
+    }
+
+    const changedOriginal = originalLines.slice(start, originalEnd + 1);
+    const changedModified = modifiedLines.slice(start, modifiedEnd + 1);
+    const buildLineIndexMap = (entries) => {
+        const indexMap = new Map();
+        entries.forEach((entry, index) => {
+            const positions = indexMap.get(entry);
+            if (positions) {
+                positions.push(index);
+            } else {
+                indexMap.set(entry, [index]);
+            }
+        });
+        return indexMap;
+    };
+    const findNextLineIndex = (positions, fromIndex) => {
+        if (!positions) return -1;
+        let left = 0;
+        let right = positions.length;
+        while (left < right) {
+            const mid = (left + right) >> 1;
+            if (positions[mid] < fromIndex) {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        return left < positions.length ? positions[left] : -1;
+    };
+    const originalIndexMap = buildLineIndexMap(changedOriginal);
+    const modifiedIndexMap = buildLineIndexMap(changedModified);
+    let originalIndex = 0;
+    let modifiedIndex = 0;
+
+    while (originalIndex < changedOriginal.length && modifiedIndex < changedModified.length) {
+        const before = changedOriginal[originalIndex];
+        const after = changedModified[modifiedIndex];
+        if (before === after) {
+            lines.push({ type: 'context', text: before });
+            originalIndex += 1;
+            modifiedIndex += 1;
+            continue;
+        }
+
+        const nextOriginalIndex = findNextLineIndex(originalIndexMap.get(after), originalIndex + 1);
+        const nextModifiedIndex = findNextLineIndex(modifiedIndexMap.get(before), modifiedIndex + 1);
+
+        if (nextOriginalIndex === -1 && nextModifiedIndex === -1) {
+            removed += 1;
+            added += 1;
+            lines.push({ type: 'removed', text: before });
+            lines.push({ type: 'added', text: after });
+            originalIndex += 1;
+            modifiedIndex += 1;
+            continue;
+        }
+
+        const originalOffset = nextOriginalIndex === -1 ? Infinity : nextOriginalIndex - originalIndex;
+        const modifiedOffset = nextModifiedIndex === -1 ? Infinity : nextModifiedIndex - modifiedIndex;
+
+        if (originalOffset <= modifiedOffset) {
+            while (originalIndex < nextOriginalIndex) {
+                removed += 1;
+                lines.push({ type: 'removed', text: changedOriginal[originalIndex] });
+                originalIndex += 1;
+            }
+            continue;
+        }
+
+        while (modifiedIndex < nextModifiedIndex) {
+            added += 1;
+            lines.push({ type: 'added', text: changedModified[modifiedIndex] });
+            modifiedIndex += 1;
+        }
+    }
+
+    while (originalIndex < changedOriginal.length) {
+        removed += 1;
+        lines.push({ type: 'removed', text: changedOriginal[originalIndex] });
+        originalIndex += 1;
+    }
+
+    while (modifiedIndex < changedModified.length) {
+        added += 1;
+        lines.push({ type: 'added', text: changedModified[modifiedIndex] });
+        modifiedIndex += 1;
+    }
+
+    for (let i = originalEnd + 1; i < originalLines.length; i++) {
+        lines.push({ type: 'context', text: originalLines[i] });
+    }
+
+    return { lines, added, removed };
+}
+
+function buildEditorDiff(originalText, modifiedText) {
+    const originalLines = normalizeEditorDiffText(originalText).split('\n');
+    const modifiedLines = normalizeEditorDiffText(modifiedText).split('\n');
+
+    if (originalLines.length * modifiedLines.length > EDITOR_DIFF_CELL_LIMIT) {
+        return buildEditorFallbackDiff(originalLines, modifiedLines);
+    }
+
+    const dp = Array.from(
+        { length: originalLines.length + 1 },
+        () => new Array(modifiedLines.length + 1).fill(0)
+    );
+
+    for (let i = originalLines.length - 1; i >= 0; i--) {
+        for (let j = modifiedLines.length - 1; j >= 0; j--) {
+            if (originalLines[i] === modifiedLines[j]) {
+                dp[i][j] = dp[i + 1][j + 1] + 1;
+            } else {
+                dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+            }
+        }
+    }
+
+    const lines = [];
+    let added = 0;
+    let removed = 0;
+    let i = 0;
+    let j = 0;
+
+    while (i < originalLines.length && j < modifiedLines.length) {
+        if (originalLines[i] === modifiedLines[j]) {
+            lines.push({ type: 'context', text: originalLines[i] });
+            i += 1;
+            j += 1;
+        } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+            removed += 1;
+            lines.push({ type: 'removed', text: originalLines[i] });
+            i += 1;
+        } else {
+            added += 1;
+            lines.push({ type: 'added', text: modifiedLines[j] });
+            j += 1;
+        }
+    }
+
+    while (i < originalLines.length) {
+        removed += 1;
+        lines.push({ type: 'removed', text: originalLines[i] });
+        i += 1;
+    }
+
+    while (j < modifiedLines.length) {
+        added += 1;
+        lines.push({ type: 'added', text: modifiedLines[j] });
+        j += 1;
+    }
+
+    return { lines, added, removed };
+}
+
+function compressEditorDiffLines(lines) {
+    const changedIndices = [];
+    lines.forEach((line, index) => {
+        if (line.type !== 'context') {
+            changedIndices.push(index);
+        }
+    });
+
+    if (changedIndices.length === 0) {
+        return [];
+    }
+
+    const keep = new Array(lines.length).fill(false);
+    changedIndices.forEach(index => {
+        const start = Math.max(0, index - EDITOR_DIFF_CONTEXT_LINES);
+        const end = Math.min(lines.length - 1, index + EDITOR_DIFF_CONTEXT_LINES);
+        for (let pos = start; pos <= end; pos++) {
+            keep[pos] = true;
+        }
+    });
+
+    const compressed = [];
+    let index = 0;
+    while (index < lines.length) {
+        if (keep[index]) {
+            compressed.push(lines[index]);
+            index += 1;
+            continue;
+        }
+
+        const start = index;
+        while (index < lines.length && !keep[index]) {
+            index += 1;
+        }
+        const skipped = index - start;
+        if (skipped > 0) {
+            compressed.push({
+                type: 'separator',
+                text: `${skipped} unchanged line${skipped === 1 ? '' : 's'}`,
+            });
+        }
+    }
+
+    return compressed;
+}
+
+function renderEditorDiffView() {
+    const diffView = document.getElementById('editor-diff-view');
+    const textarea = getEditorTextarea();
+    if (!diffView || !textarea) return;
+
+    const diff = buildEditorDiff(editorOriginalContent, textarea.value);
+    editorDiffStats = { added: diff.added, removed: diff.removed };
+
+    if (diff.added === 0 && diff.removed === 0) {
+        diffView.innerHTML = '<div class="editor-diff-empty">No changes yet.</div>';
+        updateEditorSummary();
+        return;
+    }
+
+    const renderedLines = compressEditorDiffLines(diff.lines);
+    diffView.innerHTML = renderedLines.map(line => {
+        if (line.type === 'separator') {
+            return `
+                <div class="editor-diff-line editor-diff-line-separator">
+                    <span class="editor-diff-marker">…</span>
+                    <span class="editor-diff-code">${escapeHtml(line.text)}</span>
+                </div>
+            `;
+        }
+
+        const marker = line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' ';
+        return `
+            <div class="editor-diff-line editor-diff-line-${line.type}">
+                <span class="editor-diff-marker">${marker}</span>
+                <span class="editor-diff-code">${escapeHtml(line.text)}</span>
+            </div>
+        `;
+    }).join('');
+
+    updateEditorSummary();
+}
+
+function setEditorDiffMode(enabled) {
+    editorDiffMode = enabled;
+    if (enabled) {
+        editorPanelMode = 'hidden';
+        renderEditorDiffView();
+    }
+    updateEditorToolbarState();
+    updateEditorSummary();
+    if (!enabled) {
+        getEditorTextarea()?.focus();
+    }
+}
+
+function initializeEditorModal() {
+    if (editorModalInitialized) return;
+    editorModalInitialized = true;
+
+    const textarea = getEditorTextarea();
+    const findInput = document.getElementById('editor-find-input');
+    const replaceInput = document.getElementById('editor-replace-input');
+
+    textarea?.addEventListener('input', () => {
+        setEditorStatus('Ctrl+Enter to save · Esc to cancel');
+        refreshEditorSearch();
+        if (editorDiffMode) {
+            renderEditorDiffView();
+        }
+    });
+    textarea?.addEventListener('click', syncEditorSelectionToSearch);
+    textarea?.addEventListener('keyup', syncEditorSelectionToSearch);
+
+    findInput?.addEventListener('input', () => refreshEditorSearch({ revealCurrent: true }));
+    replaceInput?.addEventListener('input', () => updateEditorSummary());
+
+    findInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            stepEditorSearch(e.shiftKey ? -1 : 1);
+        }
+    });
+    replaceInput?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            replaceCurrentEditorMatch();
+        }
+    });
+
+    document.getElementById('editor-find-toggle')?.addEventListener('click', () => {
+        setEditorPanelMode(editorPanelMode === 'find' ? 'hidden' : 'find');
+    });
+    document.getElementById('editor-replace-toggle')?.addEventListener('click', () => {
+        setEditorPanelMode(editorPanelMode === 'replace' ? 'hidden' : 'replace');
+    });
+    document.getElementById('editor-search-toggle')?.addEventListener('click', () => {
+        setEditorPanelMode(editorPanelMode === 'hidden' ? 'find' : 'hidden');
+    });
+    document.getElementById('editor-diff-toggle')?.addEventListener('click', () => {
+        setEditorDiffMode(!editorDiffMode);
+    });
+    document.getElementById('editor-search-close')?.addEventListener('click', () => {
+        setEditorPanelMode('hidden');
+        getEditorTextarea()?.focus();
+    });
+    document.getElementById('editor-case-toggle')?.addEventListener('click', () => {
+        editorCaseSensitive = !editorCaseSensitive;
+        refreshEditorSearch({ revealCurrent: true });
+        updateEditorToolbarState();
+        updateEditorSummary();
+    });
+    document.getElementById('editor-word-toggle')?.addEventListener('click', () => {
+        editorWholeWord = !editorWholeWord;
+        refreshEditorSearch({ revealCurrent: true });
+        updateEditorToolbarState();
+        updateEditorSummary();
+    });
+    document.getElementById('editor-regex-toggle')?.addEventListener('click', () => {
+        editorRegexMode = !editorRegexMode;
+        refreshEditorSearch({ revealCurrent: true });
+        updateEditorToolbarState();
+        updateEditorSummary();
+    });
+    document.getElementById('editor-find-prev')?.addEventListener('click', () => stepEditorSearch(-1));
+    document.getElementById('editor-find-next')?.addEventListener('click', () => stepEditorSearch(1));
+    document.getElementById('editor-replace-one')?.addEventListener('click', replaceCurrentEditorMatch);
+    document.getElementById('editor-replace-all')?.addEventListener('click', replaceAllEditorMatches);
 }
 
 function openEditorModal(title, content) {
+    initializeEditorModal();
+
     const overlay = document.getElementById('editor-overlay');
     if (!overlay) return;
 
     document.getElementById('editor-title').textContent = title;
-    const textarea = document.getElementById('editor-content');
+    const textarea = getEditorTextarea();
+    const findInput = document.getElementById('editor-find-input');
+    const replaceInput = document.getElementById('editor-replace-input');
+    const diffView = document.getElementById('editor-diff-view');
+
+    editorOriginalContent = content;
+    editorSearchMatches = [];
+    editorSearchIndex = -1;
+    editorPanelMode = 'hidden';
+    editorCaseSensitive = false;
+    editorWholeWord = false;
+    editorRegexMode = false;
+    editorSearchError = '';
+    editorDiffMode = false;
+    editorDiffStats = { added: 0, removed: 0 };
+
     textarea.value = content;
+    if (findInput) findInput.value = '';
+    if (replaceInput) replaceInput.value = '';
+    if (diffView) diffView.innerHTML = '<div class="editor-diff-empty">No changes yet.</div>';
+
     setEditorStatus('Ctrl+Enter to save · Esc to cancel');
     setEditorBusy(false);
+    updateEditorToolbarState();
+    updateEditorSummary();
     overlay.classList.remove('hidden');
     textarea.focus();
     textarea.setSelectionRange(0, 0);
@@ -1008,6 +1751,16 @@ function openEditorModal(title, content) {
 function closeEditorModal() {
     const overlay = document.getElementById('editor-overlay');
     if (overlay) overlay.classList.add('hidden');
+    editorPanelMode = 'hidden';
+    editorWholeWord = false;
+    editorRegexMode = false;
+    editorDiffMode = false;
+    editorSearchMatches = [];
+    editorSearchIndex = -1;
+    editorSearchError = '';
+    editorDiffStats = { added: 0, removed: 0 };
+    updateEditorToolbarState();
+    updateEditorSummary();
     setEditorBusy(false);
     document.removeEventListener('keydown', handleEditorKeydown);
     document.getElementById('terminal-input')?.focus();
@@ -1015,6 +1768,17 @@ function closeEditorModal() {
 
 function handleEditorKeydown(e) {
     if (e.key === 'Escape') {
+        if (editorDiffMode) {
+            e.preventDefault();
+            setEditorDiffMode(false);
+            return;
+        }
+        if (editorPanelMode !== 'hidden') {
+            e.preventDefault();
+            setEditorPanelMode('hidden');
+            getEditorTextarea()?.focus();
+            return;
+        }
         e.preventDefault();
         submitEditorModal(false);
     } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -1029,7 +1793,7 @@ async function submitEditorModal(saved) {
         return;
     }
 
-    const content = document.getElementById('editor-content').value;
+    const content = getEditorTextarea().value;
     setEditorBusy(true);
     setEditorStatus(saved ? 'Saving...' : 'Cancelling...');
 
