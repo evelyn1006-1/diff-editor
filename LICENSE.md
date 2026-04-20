@@ -55,13 +55,21 @@ with the software. For example:
 
 If you distribute or deploy the software in a form that directly
 presents its user interface to end users, you must preserve all
-attribution notices contained in that interface, and may not remove,
-conceal, or materially alter them.
+attribution notices contained in that interface, and may not
+remove, conceal, or materially alter them.
 
-This requirement applies only where end users directly interact with
-the software itself, and not where they interact only with its output
-or with a separate product that uses the software as a library,
-backend service, processing pipeline, or other underlying utility.
+This requirement applies only where end users directly interact
+with the software itself, and not where they interact only with
+its output or with a separate product that uses the software as
+a library, backend service, processing pipeline, or other
+underlying utility.
+
+Attribution notices are indicated by either the `required-attribution`
+HTML class or lines containing `Required Attribution` as comments
+within the source code that the licensor provided with the software. 
+For example:
+
+print("Made with love by Princess Evelyn 🧡") # Required Attribution
 
 ## Changes and New Works License
 
