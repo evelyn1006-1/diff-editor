@@ -69,7 +69,7 @@ HTML class or lines containing `Required Attribution` as comments
 within the source code that the licensor provided with the software. 
 For example:
 
-print("Made with love by Princess Evelyn 🧡") # Required Attribution
+`print("Made with love by Princess Evelyn 🧡") # Required Attribution`
 
 ## Changes and New Works License
 
