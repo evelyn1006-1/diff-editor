@@ -1,6 +1,6 @@
-# Princess Evelyn's License 1.1.0
+# Princess Evelyn's License 1.1.0 (PEL-S1)
 
-<https://princessevelyn.com/license>
+<https://princessevelyn.com/license/pel-standard-1>
 
 ## Copyright License
 
