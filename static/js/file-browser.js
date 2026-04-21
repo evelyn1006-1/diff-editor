@@ -37,6 +37,45 @@ function normalizeDirectoryPath(path) {
     return path.trim().replace(/\/+/g, '/').replace(/\/\.$/, '').replace(/\/+$/, '') || '/';
 }
 
+const BACKDROP_CLOSE_SAFETY_ZONE_PX = 16;
+
+function getBackdropDialog(overlay) {
+    return overlay.querySelector('.modal-dialog, [role="dialog"]') || overlay.firstElementChild;
+}
+
+function isEventInSafetyZone(event, dialog, safetyZonePx) {
+    if (!dialog || typeof event.clientX !== 'number' || typeof event.clientY !== 'number') {
+        return false;
+    }
+
+    const rect = dialog.getBoundingClientRect();
+    return event.clientX >= rect.left - safetyZonePx
+        && event.clientX <= rect.right + safetyZonePx
+        && event.clientY >= rect.top - safetyZonePx
+        && event.clientY <= rect.bottom + safetyZonePx;
+}
+
+function bindBackdropClose(overlay, callback, { safetyZonePx = BACKDROP_CLOSE_SAFETY_ZONE_PX } = {}) {
+    let downOnBackdrop = false;
+    let downInSafetyZone = false;
+
+    overlay.addEventListener('mousedown', (e) => {
+        const dialog = getBackdropDialog(overlay);
+        downInSafetyZone = isEventInSafetyZone(e, dialog, safetyZonePx);
+        downOnBackdrop = e.target === overlay && !downInSafetyZone;
+    });
+
+    overlay.addEventListener('click', (e) => {
+        const dialog = getBackdropDialog(overlay);
+        const clickInSafetyZone = isEventInSafetyZone(e, dialog, safetyZonePx);
+        if (e.target === overlay && downOnBackdrop && !downInSafetyZone && !clickInSafetyZone) {
+            callback();
+        }
+        downOnBackdrop = false;
+        downInSafetyZone = false;
+    });
+}
+
 function getParentDirectory(path) {
     const normalized = normalizeDirectoryPath(String(path || ''));
     if (normalized === '/') {
@@ -770,7 +809,7 @@ function showZipModal(zipPath) {
 
     // Cancel
     overlay.querySelector('.btn-zip-cancel').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    bindBackdropClose(overlay, close);
 }
 
 function goUp() {
@@ -936,7 +975,7 @@ async function deleteDirectory(path, name) {
         const result = await new Promise(resolve => {
             overlay.querySelector('.btn-modal-delete').addEventListener('click', () => resolve(true));
             overlay.querySelector('.btn-modal-cancel').addEventListener('click', () => resolve(false));
-            overlay.addEventListener('click', (e) => { if (e.target === overlay) resolve(false); });
+            bindBackdropClose(overlay, () => resolve(false));
         });
 
         overlay.remove();
@@ -1212,7 +1251,7 @@ async function compileFile(path, name) {
     }
 
     overlay.querySelector('.btn-modal-cancel').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    bindBackdropClose(overlay, close);
     actionBtn.addEventListener('click', submit);
     dirInput.addEventListener('input', () => {
         if (compileInfo.available) hideModalError(errorEl);
@@ -1395,7 +1434,7 @@ function showFileModal({ path, name, isDir, mode, trashOriginalPath = '', trashO
     }
 
     overlay.querySelector('.btn-modal-cancel').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    bindBackdropClose(overlay, close);
     actionBtn.addEventListener('click', submit);
     nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
     dirInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nameInput.focus(); } });
@@ -1561,7 +1600,7 @@ function showBatchFileModal({ paths, mode }) {
     }
 
     overlay.querySelector('.btn-modal-cancel').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    bindBackdropClose(overlay, close);
     actionBtn.addEventListener('click', submit);
     dirInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
 
@@ -1652,7 +1691,7 @@ async function showInfoModal(path) {
     function bindClose() {
         overlay.querySelector('.btn-modal-cancel')?.addEventListener('click', close);
     }
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    bindBackdropClose(overlay, close);
     bindClose();
 
     // Phase 1: fetch basic stat info (fast)
@@ -2109,7 +2148,7 @@ async function batchDelete() {
     const confirmed = await new Promise(resolve => {
         overlay.querySelector('.btn-modal-delete').addEventListener('click', () => resolve(true));
         overlay.querySelector('.btn-modal-cancel').addEventListener('click', () => resolve(false));
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) resolve(false); });
+        bindBackdropClose(overlay, () => resolve(false));
     });
     overlay.remove();
     if (!confirmed) return;

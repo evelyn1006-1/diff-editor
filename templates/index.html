@@ -94,11 +94,7 @@
 
         aboutBtn.addEventListener('click', openAboutModal);
         aboutCloseBtn.addEventListener('click', closeAboutModal);
-        aboutModal.addEventListener('click', (event) => {
-            if (event.target === aboutModal) {
-                closeAboutModal();
-            }
-        });
+        bindBackdropClose(aboutModal, closeAboutModal);
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape' && !aboutModal.classList.contains('hidden')) {
                 closeAboutModal();
