@@ -2265,9 +2265,8 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
         # Build command based on review case
         cmd = [
             "codex", "exec", "review",
-            "-m", "gpt-5.4",
+            "-m", "gpt-5.3-codex",
             "-c", f'model_reasoning_effort="{reasoning_effort}"',
-            # "--enable", "fast_mode",
             "--json",
         ]
 

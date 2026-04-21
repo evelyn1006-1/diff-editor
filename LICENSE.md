@@ -1,37 +1,36 @@
-# Princess Evelyn's License 1.0.0
+# Princess Evelyn's License 1.1.0
 
 <https://princessevelyn.com/license>
 
 ## Copyright License
 
-The licensor grants you a copyright license for the
-software to do everything you might do with the software
-that would otherwise infringe the licensor's copyright
-in it for any lawful purpose.  However, you may only
-distribute the software according to [Distribution
-License](#distribution-license) and make changes or new works
-based on the software according to [Changes and New Works
-License](#changes-and-new-works-license).
+The licensor grants you a copyright license for the software
+to do everything you might do with the software that would
+otherwise infringe the licensor's copyright in it for any 
+lawful purpose.  However, you may only distribute the software
+according to [Distribution License](#distribution-license) and 
+make changes or new works based on the software according to 
+[Changes and New Works License](#changes-and-new-works-license).
 
 ## Distribution License
 
-The licensor grants you an additional copyright license
-to distribute copies of the software.  Your license
-to distribute covers distributing the software with
-changes and new works permitted by [Changes and New Works
-License](#changes-and-new-works-license).
+The licensor grants you an additional copyright license to 
+distribute copies of the software.  Your license to distribute
+covers distributing the software with changes and new works 
+permitted by [Changes and New Works License]
+(#changes-and-new-works-license).
 
-Each time you distribute the software, or a work based on
-the software, every recipient automatically receives a
-license from the licensor to use, modify, and distribute
-the software under these terms.
+Each time you distribute the software, or a work based on the 
+software, every recipient automatically receives a license from
+the licensor to use, modify, and distribute the software under 
+these terms.
 
 ## Source Code Availability
 
 If you distribute the software in any form that is not source
-code, you must also provide the corresponding source code
-under these same terms. The corresponding source code means
-the preferred form of the software for making changes to it,
+code, you must also provide the corresponding source code under
+these same terms. The corresponding source code means the
+preferred form of the software for making changes to it,
 together with any files, scripts, and interface definitions
 needed to build, install, run, and modify the software, but
 excluding general-purpose tools and standard system components
@@ -53,23 +52,57 @@ with the software. For example:
 
 ## Attribution Preservation
 
-If you distribute or deploy the software in a form that directly
-presents its user interface to end users, you must preserve all
-attribution notices contained in that interface, and may not
-remove, conceal, or materially alter them.
+If you distribute, host, deploy, or otherwise make available
+the software, or any modified or derivative version of it, and
+end users directly interact with its user interface, you must
+preserve each required attribution in that interface. You may
+not remove, conceal, materially alter, or place any required
+attribution where it is no longer reasonably visible.
 
-This requirement applies only where end users directly interact
-with the software itself, and not where they interact only with
-its output or with a separate product that uses the software as
-a library, backend service, processing pipeline, or other
-underlying utility.
+The same rule applies if you distribute, host, deploy, or
+otherwise make available a larger application whose user
+interface includes, adapts, or is based on any part of the
+software's user interface. In that case, each required
+attribution from the incorporated or adapted interface must
+appear in a reasonably visible place within the resulting
+interface.
 
-Attribution notices are indicated by either the `required-attribution`
-HTML class or lines containing `Required Attribution` as comments
-within the source code that the licensor provided with the software. 
-For example:
+This requirement does not apply where people do not directly
+interact with the software's user interface, or with an
+interface derived from it. In particular, it does not apply
+where the software is used only for its output, only as a
+library, backend service, processing pipeline, utility, or
+development tool, or only as part of an internal development
+workflow.
 
-`print("Made with love by Princess Evelyn 🧡") # Required Attribution`
+## Required Attributions
+
+A required attribution is any attribution notice indicated by
+either the `required-attribution` HTML class or a line
+containing `Required Attribution` as a comment within source
+code that the licensor provided with the software. In non-HTML
+or adapted interfaces, notices marked in either way remain
+required attributions.
+
+You may satisfy the attribution-preservation requirement either
+by preserving the original required attribution or by replacing
+it with a Creative Commons-compliant attribution for the same
+credited person or project. For these terms, a "Creative
+Commons-compliant attribution" means an attribution given in
+any reasonable manner appropriate to the medium, means, and
+context, that identifies the same credited person or project
+in substance, and does not state or imply that they endorse
+you or your use.
+
+Examples of required attributions include:
+
+```html
+<div class="required-attribution">Made with love by Princess Evelyn 🧡</div>
+```
+
+```python
+print("Made with love by Princess Evelyn 🧡") # Required Attribution
+```
 
 ## Changes and New Works License
 
@@ -94,15 +127,15 @@ software or works based on the software.
 
 ## Fair Use
 
-You may have "fair use" rights for the software under the
-law. These terms do not limit them.
+You may have "fair use" rights for the software under the law. 
+These terms do not limit them.
 
 ## No Other Rights
 
 These terms do not allow you to sublicense or transfer any of
 your licenses to anyone else, or prevent the licensor from
 granting licenses to anyone else. These terms do not imply
- any other licenses.
+any other licenses.
 
 ## Patent Defense
 
@@ -135,8 +168,7 @@ The **licensor** is the individual or entity offering these
 terms, and the **software** is the software the licensor makes
 available under these terms.
 
-A **product** can be a good or service, or a combination
-of them.
+A **product** can be a good or service, or a combination of them.
 
 **You** refers to the individual or entity agreeing to these
 terms.

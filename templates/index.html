@@ -3,6 +3,7 @@
 {% block title %}File Browser - Diff Editor{% endblock %}
 
 {% block nav %}
+<button id="btn-about" title="About this app">About</button>
 <button id="btn-terminal" class="btn-primary" title="Open terminal" onclick="location.href='/terminal'">Terminal</button>
 <button id="btn-empty-recycle-bin" class="hidden" title="Permanently empty the recycle bin">Empty Recycle Bin</button>
 {% endblock %}
@@ -37,6 +38,37 @@
         <div class="loading">Loading...</div>
     </div>
 </div>
+
+<div id="about-modal" class="modal-overlay hidden" aria-hidden="true">
+    <div class="modal-dialog about-modal" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="about-modal-hero">
+            <div class="about-kicker">Princess Evelyn</div>
+            <div class="modal-title about-modal-title" id="about-title">About</div>
+            <div class="modal-summary about-modal-summary">
+                Princess Evelyn's diff editor and terminal for browsing files, comparing changes, editing code, and working on the machine from one cozy place.
+            </div>
+        </div>
+        <div class="about-copy">
+            <div class="about-section">
+                <div class="about-section-title">What It Is</div>
+                <p>Built for a trusted, admin-style workflow: quick file access, Git-aware diffs, browser editing, and a terminal that stays close at hand.</p>
+            </div>
+            <div class="about-section">
+                <div class="about-section-title">What Makes It Special</div>
+                <div class="about-pill-row" aria-label="Highlights">
+                    <span class="about-pill">Git-aware diffs</span>
+                    <span class="about-pill">Browser terminal</span>
+                    <span class="about-pill">Cute by design</span>
+                </div>
+                <p>The vibe is intentionally cute. The tooling is intentionally powerful.</p>
+            </div>
+        </div>
+        <div class="about-attribution required-attribution">Made with love by Princess Evelyn 🧡</div>
+        <div class="modal-buttons">
+            <button id="btn-about-close" class="btn-modal btn-modal-copy">Close</button>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -44,6 +76,35 @@
 <script>
     document.addEventListener('DOMContentLoaded', () => {
         initFileBrowser({{ default_root | tojson }});
+
+        const aboutBtn = document.getElementById('btn-about');
+        const aboutModal = document.getElementById('about-modal');
+        const aboutCloseBtn = document.getElementById('btn-about-close');
+
+        function openAboutModal() {
+            aboutModal.classList.remove('hidden');
+            aboutModal.setAttribute('aria-hidden', 'false');
+            aboutCloseBtn.focus();
+        }
+
+        function closeAboutModal() {
+            aboutModal.classList.add('hidden');
+            aboutModal.setAttribute('aria-hidden', 'true');
+            aboutBtn.focus();
+        }
+
+        aboutBtn.addEventListener('click', openAboutModal);
+        aboutCloseBtn.addEventListener('click', closeAboutModal);
+        aboutModal.addEventListener('click', (event) => {
+            if (event.target === aboutModal) {
+                closeAboutModal();
+            }
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && !aboutModal.classList.contains('hidden')) {
+                closeAboutModal();
+            }
+        });
     });
 </script>
 {% endblock %}
