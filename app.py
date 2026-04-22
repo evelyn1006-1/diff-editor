@@ -5,6 +5,7 @@ Diff Editor - A web-based side-by-side file diff and editing tool.
 import difflib
 import fcntl
 import hashlib
+import ipaddress
 import io
 import json
 import logging
@@ -14,6 +15,7 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import subprocess
 import threading
 import time
@@ -1372,10 +1374,194 @@ def create_app() -> Flask:
             return True
         return False
 
-    def _activation_result(message: str | None = None, *, error: bool = False) -> dict[str, str | bool | None]:
+    def _normalize_absolute_pathname(path: Path | str) -> Path:
+        expanded = os.path.expandvars(os.path.expanduser(str(path)))
+        return Path(os.path.abspath(expanded))
+
+    def _iter_nginx_site_server_names(filename: str) -> list[str]:
+        """Return valid concrete server_name entries from an nginx site file."""
+        site_path = Path("/etc/nginx/sites-available") / filename
+        ok, content = read_file_bytes(site_path)
+        if not ok or isinstance(content, str):
+            return []
+
+        text = content.decode("utf-8", errors="replace")
+        names: list[str] = []
+        for match in re.finditer(r"^\s*server_name\s+([^;]+);", text, flags=re.MULTILINE):
+            for token in match.group(1).split():
+                token = token.strip().lower()
+                if token in {"_", "localhost"} or token.startswith("$") or "*" in token:
+                    continue
+                if re.fullmatch(r"(?!-)[a-z0-9-]{1,63}(?<!-)(?:\.(?!-)[a-z0-9-]{1,63}(?<!-))+", token):
+                    names.append(token)
+        return names
+
+    def _get_nginx_site_primary_domain(filename: str) -> str | None:
+        names = _iter_nginx_site_server_names(filename)
+        return names[0] if names else None
+
+    def _parse_missing_certificate_error(stderr: str) -> dict[str, str] | None:
+        """Extract missing-certificate details from an nginx config-test failure."""
+        cert_match = re.search(
+            r'cannot load certificate "([^"]+)".*?No such file or directory',
+            stderr,
+            flags=re.DOTALL,
+        )
+        if not cert_match:
+            return None
+
+        cert_path = cert_match.group(1)
+        domain_match = re.search(r"^/etc/letsencrypt/live/([^/]+)/", cert_path)
+        if not domain_match:
+            return None
+
+        return {
+            "kind": "missing_cert",
+            "domain": domain_match.group(1),
+            "cert_path": cert_path,
+        }
+
+    def _inspect_nginx_site_tls_status(filename: str) -> dict[str, str] | None:
+        """Detect whether an enabled nginx site appears to be HTTP-only."""
+        site_path = Path("/etc/nginx/sites-available") / filename
+        ok, content = read_file_bytes(site_path)
+        if not ok or isinstance(content, str):
+            return None
+
+        text = content.decode("utf-8", errors="replace")
+        has_tls = bool(re.search(r"^\s*ssl_certificate(?:_key)?\s+", text, flags=re.MULTILINE))
+        has_tls = has_tls or bool(re.search(r"^\s*listen\s+[^;]*\b443\b[^;]*\bssl\b", text, flags=re.MULTILINE))
+        if has_tls:
+            return None
+
+        domain = _get_nginx_site_primary_domain(filename)
+        if domain:
+            return {
+                "kind": "http_only",
+                "domain": domain,
+                "cert_path": f"/etc/letsencrypt/live/{domain}/fullchain.pem",
+            }
+
+        return None
+
+    def _configured_dns_reference(request_host: str) -> tuple[str, list[str]]:
+        """Choose expected public IPs from env vars, then fall back to the current host."""
+        configured_ips = [
+            ip.strip()
+            for ip in os.getenv("PUBLIC_DNS_EXPECTED_IPS", "").split(",")
+            if ip.strip()
+        ]
+        configured_host = os.getenv("PUBLIC_DNS_REFERENCE_HOST", "").strip().lower()
+        request_host = request_host.split(":", 1)[0].strip().lower()
+
+        if configured_ips:
+            reference_host = configured_host or "configured public IPs"
+            return reference_host, sorted(set(configured_ips))
+
+        if configured_host:
+            expected_ips = _resolve_host_ips(configured_host)
+            if expected_ips:
+                return configured_host, expected_ips
+
+        if request_host:
+            request_host_ips = _resolve_host_ips(request_host)
+            if _ips_are_public(request_host_ips):
+                return request_host, request_host_ips
+
+        return "", []
+
+    def _resolve_host_ips(hostname: str) -> list[str]:
+        """Resolve a hostname to a sorted list of unique IP addresses."""
+        try:
+            infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            return []
+        except OSError:
+            return []
+
+        ips = sorted({info[4][0] for info in infos if info[4] and info[4][0]})
+        return ips
+
+    def _ips_are_public(ips: list[str]) -> bool:
+        """Return True when every parsed IP is globally reachable."""
+        if not ips:
+            return False
+        try:
+            return all(ipaddress.ip_address(ip).is_global for ip in ips)
+        except ValueError:
+            return False
+
+    def _dns_sanity_check(domain: str, request_host: str) -> dict[str, object]:
+        """
+        Check whether `domain` appears to point to the same server as the configured reference.
+
+        This is a pragmatic sanity check for the UI flow before requesting a cert.
+        """
+        reference_host, expected_ips = _configured_dns_reference(request_host)
+        target_ips = _resolve_host_ips(domain)
+
+        if not expected_ips:
+            return {
+                "ok": None,
+                "status": "reference_unresolved",
+                "reference_host": reference_host,
+                "expected_ips": [],
+                "target_ips": target_ips,
+                "message": f"Could not resolve the current UI host ({reference_host}) for comparison.",
+            }
+
+        if not target_ips:
+            return {
+                "ok": False,
+                "status": "unresolved",
+                "reference_host": reference_host,
+                "expected_ips": expected_ips,
+                "target_ips": [],
+                "message": f"{domain} does not resolve yet.",
+            }
+
+        if set(expected_ips) & set(target_ips):
+            return {
+                "ok": True,
+                "status": "match",
+                "reference_host": reference_host,
+                "expected_ips": expected_ips,
+                "target_ips": target_ips,
+                "message": f"{domain} resolves to this server.",
+            }
+
+        return {
+            "ok": False,
+            "status": "mismatch",
+            "reference_host": reference_host,
+            "expected_ips": expected_ips,
+            "target_ips": target_ips,
+            "message": f"{domain} resolves, but not to the same IPs as {reference_host}.",
+        }
+
+    def _symlink_points_to_target(source: Path, target: Path) -> bool:
+        """Detect the destructive case where copying a symlink would overwrite its referent."""
+        if not source.is_symlink():
+            return False
+        try:
+            return _normalize_absolute_pathname(source.resolve()) == _normalize_absolute_pathname(target)
+        except OSError:
+            return False
+
+    def _activation_result(
+        message: str | None = None,
+        *,
+        error: bool = False,
+        kind: str | None = None,
+        domain: str | None = None,
+        cert_path: str | None = None,
+    ) -> dict[str, str | bool | None]:
         return {
             "message": message,
             "error": error,
+            "kind": kind,
+            "domain": domain,
+            "cert_path": cert_path,
         }
 
     def _activate_service(dest_dir: str, filename: str, activate: bool, *, old_filename: str | None = None) -> dict[str, str | bool | None]:
@@ -1436,15 +1622,32 @@ def create_app() -> Flask:
                             ["sudo", "-n", "rm", "-f", str(enabled_link)],
                             stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
                         )
+                    stderr = test.stderr.decode("utf-8", errors="replace")
+                    missing_cert = _parse_missing_certificate_error(stderr)
+                    if missing_cert:
+                        site_domain = _get_nginx_site_primary_domain(filename)
+                        if site_domain:
+                            missing_cert["domain"] = site_domain
                     return _activation_result(
-                        f"nginx config test failed: {test.stderr.decode('utf-8', errors='replace')}",
+                        f"nginx config test failed: {stderr}",
                         error=True,
+                        kind=missing_cert["kind"] if missing_cert else None,
+                        domain=missing_cert["domain"] if missing_cert else None,
+                        cert_path=missing_cert["cert_path"] if missing_cert else None,
                     )
                 reload = subprocess.run(
                     ["sudo", "-n", "systemctl", "reload", "nginx"],
                     stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
                 )
                 if reload.returncode == 0:
+                    http_only = _inspect_nginx_site_tls_status(filename)
+                    if http_only:
+                        return _activation_result(
+                            f"Site {filename} enabled and nginx reloaded. Warning: {http_only['domain']} is currently HTTP-only and traffic is not protected by TLS.",
+                            kind=http_only["kind"],
+                            domain=http_only["domain"],
+                            cert_path=http_only["cert_path"],
+                        )
                     return _activation_result(f"Site {filename} enabled and nginx reloaded.")
                 return _activation_result(
                     f"nginx reload failed: {reload.stderr.decode('utf-8', errors='replace')}",
@@ -1458,12 +1661,133 @@ def create_app() -> Flask:
         return _activation_result()
 
     def _operation_success_payload(target: Path, activation: dict[str, str | bool | None]) -> dict[str, object]:
-        return {
+        payload = {
             "success": True,
             "path": str(target),
             "activate_message": activation["message"],
             "activate_error": activation["error"],
+            "activate_kind": activation["kind"],
+            "activate_domain": activation["domain"],
+            "activate_cert_path": activation["cert_path"],
         }
+        if activation["kind"] in {"http_only", "missing_cert"} and activation["domain"]:
+            dns = _dns_sanity_check(str(activation["domain"]), request.host)
+            payload.update({
+                "dns_ok": dns["ok"],
+                "dns_status": dns["status"],
+                "dns_message": dns["message"],
+                "dns_reference_host": dns["reference_host"],
+                "dns_expected_ips": dns["expected_ips"],
+                "dns_target_ips": dns["target_ips"],
+            })
+        return payload
+
+    @app.post("/api/nginx/request-cert")
+    def request_nginx_certificate_route():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        domain = str(data.get("domain", "")).strip().lower()
+        filename = str(data.get("filename", "")).strip()
+        request_kind = str(data.get("kind", "missing_cert")).strip().lower()
+
+        if not domain:
+            return jsonify({"error": "No domain provided"}), 400
+        if not re.fullmatch(r"(?!-)[a-z0-9-]{1,63}(?<!-)(?:\.(?!-)[a-z0-9-]{1,63}(?<!-))+", domain):
+            return jsonify({"error": "Invalid domain"}), 400
+        if not filename:
+            filename = domain
+        if "/" in filename or "\\" in filename or filename in {".", ".."}:
+            return jsonify({"error": "Invalid filename"}), 400
+        if request_kind not in {"missing_cert", "http_only"}:
+            return jsonify({"error": "Invalid certificate request kind"}), 400
+        if not command_exists("certbot"):
+            return jsonify({"error": "certbot is not installed"}), 500
+
+        site_path = Path("/etc/nginx/sites-available") / filename
+        if not site_path.exists() and not site_path.is_symlink():
+            return jsonify({"error": f"Nginx site file not found: {filename}"}), 404
+
+        certbot_cmd = ["sudo", "-n", "certbot"]
+        if request_kind == "http_only":
+            certbot_cmd.extend(["--nginx", "--redirect"])
+        else:
+            certbot_cmd.extend(["certonly", "--nginx"])
+        certbot_cmd.extend(["--non-interactive", "--agree-tos", "-d", domain])
+        letsencrypt_email = os.getenv("LETSENCRYPT_EMAIL", "").strip()
+        if letsencrypt_email:
+            certbot_cmd.extend(["-m", letsencrypt_email])
+        else:
+            certbot_cmd.append("--register-unsafely-without-email")
+
+        try:
+            certbot_result = subprocess.run(
+                certbot_cmd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return jsonify({"error": "Certificate request timed out"}), 500
+        except Exception as e:
+            return jsonify({"error": f"Certificate request failed: {e}"}), 500
+
+        certbot_stdout = certbot_result.stdout.decode("utf-8", errors="replace").strip()
+        certbot_stderr = certbot_result.stderr.decode("utf-8", errors="replace").strip()
+        certbot_output = "\n".join(part for part in (certbot_stdout, certbot_stderr) if part)
+
+        if certbot_result.returncode != 0:
+            return jsonify({
+                "error": certbot_output or f"certbot failed with exit code {certbot_result.returncode}",
+            }), 500
+
+        activation = _activate_service("/etc/nginx/sites-available", filename, True)
+        return jsonify({
+            "success": True,
+            "message": (
+                f"HTTPS was requested and installed for {domain}."
+                if request_kind == "http_only"
+                else f"Certificate requested for {domain}."
+            ),
+            "activate_message": activation["message"],
+            "activate_error": activation["error"],
+            "activate_kind": activation["kind"],
+            "activate_domain": activation["domain"],
+            "activate_cert_path": activation["cert_path"],
+            "certbot_output": certbot_output or None,
+        })
+
+    @app.post("/api/nginx/check-dns")
+    def check_nginx_dns_route():
+        csrf = request.headers.get("X-CSRF-Token", "")
+        if not validate_csrf_token(csrf):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        domain = str(data.get("domain", "")).strip().lower()
+        if not domain:
+            return jsonify({"error": "No domain provided"}), 400
+        if not re.fullmatch(r"(?!-)[a-z0-9-]{1,63}(?<!-)(?:\.(?!-)[a-z0-9-]{1,63}(?<!-))+", domain):
+            return jsonify({"error": "Invalid domain"}), 400
+
+        dns = _dns_sanity_check(domain, request.host)
+        return jsonify({
+            "success": True,
+            "dns_ok": dns["ok"],
+            "dns_status": dns["status"],
+            "dns_message": dns["message"],
+            "dns_reference_host": dns["reference_host"],
+            "dns_expected_ips": dns["expected_ips"],
+            "dns_target_ips": dns["target_ips"],
+        })
 
     @app.post("/api/file/copy")
     def copy_file_route():
@@ -1519,8 +1843,10 @@ def create_app() -> Flask:
             dest_dir = path.parent
 
         target = Path(os.path.abspath(dest_dir / new_name))
-        if target.resolve() == path.resolve():
+        if _normalize_absolute_pathname(target) == _normalize_absolute_pathname(path):
             return jsonify({"error": "Source and destination are the same file"}), 400
+        if _symlink_points_to_target(path, target):
+            return jsonify({"error": "Cannot overwrite a file via a symlink source"}), 400
         if target.exists() or target.is_symlink():
             if overwrite:
                 if _is_protected_path(target):
@@ -1604,8 +1930,10 @@ def create_app() -> Flask:
 
         target = Path(os.path.abspath(dest_dir / new_name))
         resolved_path = path.resolve()
-        if target.resolve() == resolved_path:
+        if _normalize_absolute_pathname(target) == _normalize_absolute_pathname(path):
             return jsonify({"error": "Source and destination are the same directory"}), 400
+        if _symlink_points_to_target(path, target):
+            return jsonify({"error": "Cannot overwrite a directory via a symlink source"}), 400
         if not path.is_symlink() and str(target.resolve()).startswith(str(resolved_path) + "/"):
             return jsonify({"error": "Cannot copy a directory into itself"}), 400
         if target.exists() or target.is_symlink():

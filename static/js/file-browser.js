@@ -239,6 +239,309 @@ function showModalError(errorEl, content) {
     errorEl.style.display = 'block';
 }
 
+function getCertRequestActivation(data) {
+    if (!data?.activate_kind || !['missing_cert', 'http_only'].includes(data.activate_kind)) {
+        return null;
+    }
+
+    const domain = String(data.activate_domain || '').trim();
+    if (!domain) {
+        return null;
+    }
+
+    return {
+        kind: data.activate_kind,
+        isError: Boolean(data.activate_error),
+        domain,
+        certPath: String(data.activate_cert_path || '').trim(),
+        dns: {
+            ok: data.dns_ok,
+            status: String(data.dns_status || '').trim(),
+            message: String(data.dns_message || '').trim(),
+            referenceHost: String(data.dns_reference_host || '').trim(),
+            expectedIps: Array.isArray(data.dns_expected_ips) ? data.dns_expected_ips : [],
+            targetIps: Array.isArray(data.dns_target_ips) ? data.dns_target_ips : [],
+        },
+    };
+}
+
+function formatIpListHtml(ips) {
+    if (!Array.isArray(ips) || ips.length === 0) {
+        return '<span class="cert-request-muted">none yet</span>';
+    }
+    return ips.map(ip => `<span class="info-mono">${escapeHtml(ip)}</span>`).join(', ');
+}
+
+function buildDnsInstructionsHtml({ domain, dns }) {
+    const status = dns?.status || '';
+    const message = dns?.message || `${domain} is not pointing to this server yet.`;
+    const referenceHost = dns?.referenceHost || 'the current editor host';
+    const expectedIps = formatIpListHtml(dns?.expectedIps);
+    const targetIps = formatIpListHtml(dns?.targetIps);
+
+    let fixText = `Update the DNS for <strong>${escapeHtml(domain)}</strong> so it points to the same server as <strong>${escapeHtml(referenceHost)}</strong>.`;
+    if (status === 'unresolved') {
+        fixText = `Create an <strong>A</strong> and/or <strong>AAAA</strong> record for <strong>${escapeHtml(domain)}</strong> that points to the same server as <strong>${escapeHtml(referenceHost)}</strong>.`;
+    }
+
+    return `
+        <div class="cert-request-details">
+            <div><strong>Check:</strong> <span class="cert-request-warning">${escapeHtml(message)}</span></div>
+            <div><strong>Reference host:</strong> <span class="info-mono">${escapeHtml(referenceHost)}</span></div>
+            <div><strong>Expected IPs:</strong> ${expectedIps}</div>
+            <div><strong>Current DNS:</strong> ${targetIps}</div>
+        </div>
+        <div class="cert-request-note">
+            ${fixText} DNS changes can take a little time to propagate, so after updating the record you can press <strong>Retry DNS Check</strong>.
+        </div>
+    `;
+}
+
+async function showDnsSanityModal({ filename, activationMessage, kind, domain, certPath, dns }) {
+    const isHttpOnly = kind === 'http_only';
+    const summary = isHttpOnly
+        ? `<strong>${escapeHtml(filename)}</strong> is enabled, but the app should not request a certificate for <strong>${escapeHtml(domain)}</strong> until DNS points at this server.`
+        : `The app can request a certificate for <strong>${escapeHtml(domain)}</strong>, but DNS should be fixed first so certbot validates the right server.`;
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-dialog cert-request-modal">
+            <div class="modal-title cert-request-title">DNS Needs Fixing First</div>
+            <div class="modal-summary cert-request-summary">${summary}</div>
+            <div class="dns-check-body">${buildDnsInstructionsHtml({ domain, dns })}</div>
+            <div class="copy-error" style="display:none"></div>
+            <div class="modal-buttons">
+                <button class="btn-modal btn-modal-cancel">Not now</button>
+                <button class="btn-modal btn-modal-copy">Retry DNS Check</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const bodyEl = overlay.querySelector('.dns-check-body');
+    const errorEl = overlay.querySelector('.copy-error');
+    const retryBtn = overlay.querySelector('.btn-modal-copy');
+    const cancelBtn = overlay.querySelector('.btn-modal-cancel');
+    let submitting = false;
+    let settled = false;
+    let resolver = () => {};
+
+    function finish() {
+        if (!settled) {
+            settled = true;
+            overlay.remove();
+            resolver();
+        }
+    }
+
+    async function retry() {
+        if (submitting) {
+            return;
+        }
+
+        submitting = true;
+        hideModalError(errorEl);
+        retryBtn.disabled = true;
+        cancelBtn.disabled = true;
+        retryBtn.textContent = 'Checking...';
+
+        try {
+            const { response, data } = await postJson('api/nginx/check-dns', { domain });
+            if (!response.ok) {
+                showModalError(errorEl, data.error || 'DNS check failed.');
+                submitting = false;
+                retryBtn.disabled = false;
+                cancelBtn.disabled = false;
+                retryBtn.textContent = 'Retry DNS Check';
+                return;
+            }
+
+            const nextDns = {
+                ok: data.dns_ok,
+                status: String(data.dns_status || '').trim(),
+                message: String(data.dns_message || '').trim(),
+                referenceHost: String(data.dns_reference_host || '').trim(),
+                expectedIps: Array.isArray(data.dns_expected_ips) ? data.dns_expected_ips : [],
+                targetIps: Array.isArray(data.dns_target_ips) ? data.dns_target_ips : [],
+            };
+
+            if (nextDns.ok === true) {
+                finish();
+                await showCertRequestModal({ filename, activationMessage, kind, domain, certPath });
+                return;
+            }
+
+            bodyEl.innerHTML = buildDnsInstructionsHtml({ domain, dns: nextDns });
+            submitting = false;
+            retryBtn.disabled = false;
+            cancelBtn.disabled = false;
+            retryBtn.textContent = 'Retry DNS Check';
+        } catch (err) {
+            showModalError(errorEl, `Error: ${err.message}`);
+            submitting = false;
+            retryBtn.disabled = false;
+            cancelBtn.disabled = false;
+            retryBtn.textContent = 'Retry DNS Check';
+        }
+    }
+
+    cancelBtn.addEventListener('click', () => {
+        if (!submitting) {
+            finish();
+        }
+    });
+    retryBtn.addEventListener('click', retry);
+    bindBackdropClose(overlay, () => {
+        if (!submitting) {
+            finish();
+        }
+    });
+
+    await new Promise(resolve => {
+        resolver = resolve;
+    });
+}
+
+async function showCertRequestModal({ filename, activationMessage, kind, domain, certPath }) {
+    const isHttpOnly = kind === 'http_only';
+    const title = isHttpOnly ? 'HTTP-Only Site' : 'Missing TLS Certificate';
+    const summary = isHttpOnly
+        ? `Enabling <strong>${escapeHtml(filename)}</strong> worked, but <strong>${escapeHtml(domain)}</strong> is still HTTP-only.`
+        : `Enabling <strong>${escapeHtml(filename)}</strong> failed because nginx could not find a certificate for <strong>${escapeHtml(domain)}</strong>.`;
+    const note = isHttpOnly
+        ? `Traffic to ${escapeHtml(domain)} is not protected without HTTPS, so passwords, cookies, and page contents can be exposed or modified in transit. Request and install a Let's Encrypt certificate now?`
+        : 'Request a new Let\'s Encrypt certificate now and then retry enabling the site?';
+    const buttonLabel = isHttpOnly ? 'Enable HTTPS' : 'Request Certificate';
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+        <div class="modal-dialog cert-request-modal">
+            <div class="modal-title cert-request-title">${title}</div>
+            <div class="modal-summary cert-request-summary">${summary}</div>
+            <div class="cert-request-details">
+                <div><strong>Status:</strong> ${isHttpOnly ? '<span class="cert-request-warning">HTTP only</span>' : '<span class="cert-request-warning">TLS missing</span>'}</div>
+                <div><strong>Domain:</strong> <span class="info-mono">${escapeHtml(domain)}</span></div>
+                ${certPath ? `<div><strong>Expected cert:</strong> <span class="info-mono">${escapeHtml(certPath)}</span></div>` : ''}
+            </div>
+            <div class="cert-request-note">${note}</div>
+            <div class="copy-error" style="display:none"></div>
+            <div class="modal-buttons">
+                <button class="btn-modal btn-modal-cancel">Not now</button>
+                <button class="btn-modal btn-modal-copy">${buttonLabel}</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const errorEl = overlay.querySelector('.copy-error');
+    const requestBtn = overlay.querySelector('.btn-modal-copy');
+    const cancelBtn = overlay.querySelector('.btn-modal-cancel');
+    let submitting = false;
+    let settled = false;
+
+    function finish() {
+        if (!settled) {
+            settled = true;
+            overlay.remove();
+            resolver();
+        }
+    }
+
+    let resolver = () => {};
+
+    async function submit() {
+        if (submitting) {
+            return;
+        }
+
+        submitting = true;
+        hideModalError(errorEl);
+        requestBtn.disabled = true;
+        cancelBtn.disabled = true;
+        requestBtn.textContent = 'Requesting...';
+
+        try {
+            const { response, data } = await postJson('api/nginx/request-cert', {
+                domain,
+                filename,
+                kind,
+            });
+            if (!response.ok) {
+                showModalError(errorEl, data.error || 'Certificate request failed.');
+                submitting = false;
+                requestBtn.disabled = false;
+                cancelBtn.disabled = false;
+                requestBtn.textContent = buttonLabel;
+                return;
+            }
+
+            finish();
+
+            const notices = [data.message || `Certificate requested for ${domain}.`];
+            if (data.activate_message) {
+                notices.push(data.activate_message);
+            } else if (activationMessage) {
+                notices.push(activationMessage);
+            }
+            window.alert(notices.join('\n\n'));
+            loadDirectory(currentPath);
+        } catch (err) {
+            showModalError(errorEl, `Error: ${err.message}`);
+            submitting = false;
+            requestBtn.disabled = false;
+            cancelBtn.disabled = false;
+            requestBtn.textContent = buttonLabel;
+        }
+    }
+
+    cancelBtn.addEventListener('click', () => {
+        if (!submitting) {
+            finish();
+        }
+    });
+    requestBtn.addEventListener('click', submit);
+    bindBackdropClose(overlay, () => {
+        if (!submitting) {
+            finish();
+        }
+    });
+
+    await new Promise(resolve => {
+        resolver = resolve;
+    });
+}
+
+async function handleActivationFeedback(data, { filename }) {
+    if (!data?.activate_message) {
+        return;
+    }
+
+    const certRequest = getCertRequestActivation(data);
+    if (certRequest) {
+        if (certRequest.dns.ok === false) {
+            await showDnsSanityModal({
+                filename,
+                activationMessage: data.activate_message,
+                kind: certRequest.kind,
+                domain: certRequest.domain,
+                certPath: certRequest.certPath,
+                dns: certRequest.dns,
+            });
+            return;
+        }
+        await showCertRequestModal({
+            filename,
+            activationMessage: data.activate_message,
+            kind: certRequest.kind,
+            domain: certRequest.domain,
+            certPath: certRequest.certPath,
+        });
+        return;
+    }
+
+    window.alert(data.activate_message);
+}
+
 function bindShortcutButtons(overlay, shortcuts, onSelect) {
     overlay.querySelectorAll('.btn-shortcut').forEach(btn => {
         btn.addEventListener('click', () => onSelect(shortcuts[btn.dataset.idx]));
@@ -1421,9 +1724,7 @@ function showFileModal({ path, name, isDir, mode, trashOriginalPath = '', trashO
 
             submitting = false;
             close();
-            if (data.activate_message) {
-                window.alert(data.activate_message);
-            }
+            await handleActivationFeedback(data, { filename: trimmedName });
             loadDirectory(currentPath);
         } catch (err) {
             showModalError(errorEl, `Error: ${err.message}`);

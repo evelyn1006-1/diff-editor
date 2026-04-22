@@ -677,6 +677,50 @@ main {
     line-height: 1.4;
 }
 
+.cert-request-modal {
+    max-width: 560px;
+}
+
+.cert-request-title {
+    color: var(--accent);
+}
+
+.cert-request-summary {
+    line-height: 1.45;
+}
+
+.cert-request-details {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.9rem;
+    padding: 0.85rem 0.95rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.92rem;
+}
+
+.cert-request-warning {
+    color: var(--error);
+    font-weight: 700;
+}
+
+.cert-request-muted {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.cert-request-note {
+    margin-bottom: 0.85rem;
+    color: var(--text-secondary);
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.9rem;
+    line-height: 1.45;
+}
+
 .preview-list {
     flex: 1;
     overflow-y: auto;
