@@ -610,8 +610,11 @@ async function fetchCompileInfo(path) {
     return data;
 }
 
+const LAST_PATH_KEY = 'diff_editor_last_path';
+
 function initFileBrowser(defaultRoot) {
-    currentPath = defaultRoot;
+    const savedPath = sessionStorage.getItem(LAST_PATH_KEY);
+    currentPath = savedPath || defaultRoot;
 
     document.getElementById('btn-up').addEventListener('click', goUp);
     document.getElementById('show-hidden').addEventListener('change', () => loadDirectory(currentPath));
@@ -668,6 +671,7 @@ async function loadDirectory(path) {
         setRecycleBinState(data);
         currentPath = data.path;
         pathInput.value = data.path;
+        sessionStorage.setItem(LAST_PATH_KEY, currentPath);
 
         if (data.items.length === 0) {
             fileList.innerHTML = '<div class="loading">Empty directory</div>';

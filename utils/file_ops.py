@@ -1004,7 +1004,8 @@ def resolve_request_path(raw_path: str, field_name: str = "path") -> tuple[Path 
         return None, f"Invalid {field_name}"
 
     try:
-        return Path(os.path.abspath(raw_path)), None
+        expanded = os.path.expandvars(os.path.expanduser(raw_path))
+        return Path(os.path.abspath(expanded)), None
     except (OSError, RuntimeError, ValueError):
         return None, f"Invalid {field_name}"
 
