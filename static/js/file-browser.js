@@ -239,6 +239,108 @@ function showModalError(errorEl, content) {
     errorEl.style.display = 'block';
 }
 
+function showConfirmModal({ title, message, confirmLabel = 'OK', cancelLabel = 'Cancel', confirmClass = 'btn-modal-copy' }) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        const messageHtml = escapeHtml(message).replace(/\n/g, '<br>');
+        overlay.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-title">${escapeHtml(title)}</div>
+                <div class="modal-summary">${messageHtml}</div>
+                <div class="modal-buttons">
+                    <button class="btn-modal btn-modal-cancel">${escapeHtml(cancelLabel)}</button>
+                    <button class="btn-modal ${confirmClass}">${escapeHtml(confirmLabel)}</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const cleanup = (value) => {
+            overlay.remove();
+            resolve(value);
+        };
+
+        overlay.querySelector('.btn-modal-cancel').addEventListener('click', () => cleanup(false));
+        overlay.querySelector(`.${confirmClass}`).addEventListener('click', () => cleanup(true));
+        bindBackdropClose(overlay, () => cleanup(false));
+    });
+}
+
+function showPromptModal({ title, message, defaultValue = '', confirmLabel = 'OK', cancelLabel = 'Cancel' }) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        const messageHtml = message ? `<div class="modal-summary">${escapeHtml(message).replace(/\n/g, '<br>')}</div>` : '';
+        overlay.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-title">${escapeHtml(title)}</div>
+                ${messageHtml}
+                <input type="text" class="copy-input prompt-input" value="${escapeHtml(defaultValue)}" autocomplete="off">
+                <div class="modal-buttons">
+                    <button class="btn-modal btn-modal-cancel">${escapeHtml(cancelLabel)}</button>
+                    <button class="btn-modal btn-modal-copy">${escapeHtml(confirmLabel)}</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const input = overlay.querySelector('.prompt-input');
+        input.focus();
+        input.select();
+
+        const cleanup = (value) => {
+            overlay.remove();
+            resolve(value);
+        };
+
+        overlay.querySelector('.btn-modal-cancel').addEventListener('click', () => cleanup(null));
+        overlay.querySelector('.btn-modal-copy').addEventListener('click', () => cleanup(input.value));
+        bindBackdropClose(overlay, () => cleanup(null));
+
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                cleanup(input.value);
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                cleanup(null);
+            }
+        });
+    });
+}
+
+function showAlertModal({ message, kind = 'info' }) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        const messageHtml = escapeHtml(message).replace(/\n/g, '<br>');
+        const btnClass = kind === 'error' ? 'btn-modal-delete' : 'btn-modal-copy';
+        const dialogStyle = kind === 'error' ? 'style="border-color: var(--error);"' : '';
+        const contentHtml = kind === 'error'
+            ? `<div class="error-box">${messageHtml}</div>`
+            : `<div class="modal-summary">${messageHtml}</div>`;
+        overlay.innerHTML = `
+            <div class="modal-dialog" ${dialogStyle}>
+                ${contentHtml}
+                <div class="modal-buttons">
+                    <button class="btn-modal ${btnClass}">OK</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const cleanup = () => {
+            overlay.remove();
+            resolve();
+        };
+
+        overlay.querySelector('.btn-modal').addEventListener('click', cleanup);
+        bindBackdropClose(overlay, cleanup);
+    });
+}
+
 function getCertRequestActivation(data) {
     if (!data?.activate_kind || !['missing_cert', 'http_only'].includes(data.activate_kind)) {
         return null;
@@ -483,7 +585,7 @@ async function showCertRequestModal({ filename, activationMessage, kind, domain,
             } else if (activationMessage) {
                 notices.push(activationMessage);
             }
-            window.alert(notices.join('\n\n'));
+            await showAlertModal({ message: notices.join('\n\n') });
             loadDirectory(currentPath);
         } catch (err) {
             showModalError(errorEl, `Error: ${err.message}`);
@@ -539,7 +641,7 @@ async function handleActivationFeedback(data, { filename }) {
         return;
     }
 
-    window.alert(data.activate_message);
+    await showAlertModal({ message: data.activate_message });
 }
 
 function bindShortcutButtons(overlay, shortcuts, onSelect) {
@@ -895,7 +997,13 @@ async function emptyRecycleBin() {
         return;
     }
 
-    if (!window.confirm('Permanently empty the recycle bin?\n\nThis cannot be undone.')) {
+    const confirmed = await showConfirmModal({
+        title: 'Empty Recycle Bin',
+        message: 'Permanently empty the recycle bin?\n\nThis cannot be undone.',
+        confirmLabel: 'Empty',
+        confirmClass: 'btn-modal-delete',
+    });
+    if (!confirmed) {
         return;
     }
 
@@ -913,16 +1021,16 @@ async function emptyRecycleBin() {
             const details = Array.isArray(data.details) && data.details.length > 0
                 ? `\n\n${data.details.join('\n')}`
                 : '';
-            window.alert((data.error || 'Failed to empty the recycle bin.') + details);
+            await showAlertModal({ message: (data.error || 'Failed to empty the recycle bin.') + details, kind: 'error' });
             return;
         }
 
         if (data.message) {
-            window.alert(data.message);
+            await showAlertModal({ message: data.message });
         }
         loadDirectory(currentPath);
     } catch (err) {
-        window.alert(`Error: ${err.message}`);
+        await showAlertModal({ message: `Error: ${err.message}`, kind: 'error' });
     }
 }
 
@@ -1097,7 +1205,7 @@ function showZipModal(zipPath) {
 
                 close();
                 if (data.warning) {
-                    window.alert(data.warning);
+                    await showAlertModal({ message: data.warning, kind: 'error' });
                 }
                 loadDirectory(currentPath);
             } catch (err) {
@@ -1131,7 +1239,12 @@ function goUp() {
 }
 
 async function createNewFile() {
-    const name = window.prompt('New file name:', 'newfile.txt');
+    const name = await showPromptModal({
+        title: 'New File',
+        message: 'Enter a name for the new file:',
+        defaultValue: 'newfile.txt',
+        confirmLabel: 'Create',
+    });
     if (name === null) return;
 
     const trimmedName = name.trim();
@@ -1152,14 +1265,14 @@ async function createNewFile() {
 
         const data = await response.json();
         if (!response.ok) {
-            window.alert(data.error || 'Failed to create file');
+            await showAlertModal({ message: data.error || 'Failed to create file', kind: 'error' });
             return;
         }
 
         // Open the new file directly in the diff editor.
         window.location.href = `diff?file=${encodeURIComponent(data.path)}`;
     } catch (err) {
-        window.alert(`Error: ${err.message}`);
+        await showAlertModal({ message: `Error: ${err.message}`, kind: 'error' });
     }
 }
 
@@ -1196,7 +1309,13 @@ function batchDownload() {
 
 async function deleteFile(path, name) {
     const intent = getDeleteIntent(path);
-    if (!window.confirm(intent.filePrompt(name))) {
+    const confirmed = await showConfirmModal({
+        title: intent.permanent ? 'Delete Permanently' : 'Delete',
+        message: intent.filePrompt(name),
+        confirmLabel: intent.buttonLabel,
+        confirmClass: 'btn-modal-delete',
+    });
+    if (!confirmed) {
         return;
     }
 
@@ -1212,13 +1331,13 @@ async function deleteFile(path, name) {
 
         const data = await response.json();
         if (!response.ok) {
-            window.alert(data.error || 'Failed to delete file');
+            await showAlertModal({ message: data.error || 'Failed to delete file', kind: 'error' });
             return;
         }
 
         loadDirectory(currentPath);
     } catch (err) {
-        window.alert(`Error: ${err.message}`);
+        await showAlertModal({ message: `Error: ${err.message}`, kind: 'error' });
     }
 }
 
@@ -1243,7 +1362,7 @@ async function deleteDirectory(path, name) {
         const data = await response.json();
 
         if (!response.ok) {
-            window.alert(data.error || 'Failed to preview directory');
+            await showAlertModal({ message: data.error || 'Failed to preview directory', kind: 'error' });
             return;
         }
 
@@ -1302,18 +1421,22 @@ async function deleteDirectory(path, name) {
 
         const delData = await delResponse.json();
         if (!delResponse.ok) {
-            window.alert(delData.error || 'Failed to delete directory');
+            await showAlertModal({ message: delData.error || 'Failed to delete directory', kind: 'error' });
             return;
         }
 
         loadDirectory(currentPath);
     } catch (err) {
-        window.alert(`Error: ${err.message}`);
+        await showAlertModal({ message: `Error: ${err.message}`, kind: 'error' });
     }
 }
 
 async function createNewDir() {
-    const name = window.prompt('New directory name:');
+    const name = await showPromptModal({
+        title: 'New Directory',
+        message: 'Enter a name for the new directory:',
+        confirmLabel: 'Create',
+    });
     if (name === null) return;
 
     const trimmed = name.trim();
@@ -1334,13 +1457,13 @@ async function createNewDir() {
 
         const data = await response.json();
         if (!response.ok) {
-            window.alert(data.error || 'Failed to create directory');
+            await showAlertModal({ message: data.error || 'Failed to create directory', kind: 'error' });
             return;
         }
 
         loadDirectory(currentPath);
     } catch (err) {
-        window.alert(`Error: ${err.message}`);
+        await showAlertModal({ message: `Error: ${err.message}`, kind: 'error' });
     }
 }
 
@@ -1392,28 +1515,28 @@ function uploadFiles(files) {
         }
     });
 
-    xhr.addEventListener('load', () => {
+    xhr.addEventListener('load', async () => {
         overlay.remove();
         if (xhr.status === 413) {
-            window.alert('File too large to upload through the browser. Use SFTP instead.');
+            await showAlertModal({ message: 'File too large to upload through the browser. Use SFTP instead.', kind: 'error' });
             return;
         }
         try {
             const data = JSON.parse(xhr.responseText);
             if (xhr.status >= 400) {
-                window.alert(data.error || 'Failed to upload');
+                await showAlertModal({ message: data.error || 'Failed to upload', kind: 'error' });
             } else if (data.skipped && data.skipped.length > 0) {
-                window.alert(data.message);
+                await showAlertModal({ message: data.message });
             }
         } catch {
-            if (xhr.status >= 400) window.alert('Upload failed');
+            if (xhr.status >= 400) await showAlertModal({ message: 'Upload failed', kind: 'error' });
         }
         loadDirectory(currentPath);
     });
 
-    xhr.addEventListener('error', () => {
+    xhr.addEventListener('error', async () => {
         overlay.remove();
-        window.alert('Upload failed — network error');
+        await showAlertModal({ message: 'Upload failed — network error', kind: 'error' });
     });
 
     xhr.addEventListener('abort', () => {
@@ -1438,7 +1561,7 @@ async function compileFile(path, name) {
     try {
         compileInfo = await fetchCompileInfo(path);
     } catch (err) {
-        window.alert(`Error: ${err.message}`);
+        await showAlertModal({ message: `Error: ${err.message}`, kind: 'error' });
         return;
     }
 
@@ -1549,7 +1672,7 @@ async function compileFile(path, name) {
             if (data.compiler_output) {
                 successLines.push('', data.compiler_output);
             }
-            window.alert(successLines.join('\n'));
+            await showAlertModal({ message: successLines.join('\n') });
         } catch (err) {
             showModalError(errorEl, `Error: ${err.message}`);
             submitting = false;
@@ -1900,7 +2023,7 @@ function showBatchFileModal({ paths, mode }) {
             if (activationMessages.length > 0) {
                 notices.push(`Activation results:\n\n${activationMessages.join('\n\n')}`);
             }
-            window.alert(notices.join('\n\n'));
+            await showAlertModal({ message: notices.join('\n\n') });
         }
     }
 
@@ -2373,7 +2496,7 @@ async function moveItems(paths, destDir) {
     }
 
     if (errors.length > 0) {
-        window.alert(`Some items could not be moved:\n\n${errors.join('\n')}`);
+        await showAlertModal({ message: `Some items could not be moved:\n\n${errors.join('\n')}`, kind: 'error' });
     }
 
     clearSelection();
@@ -2481,7 +2604,7 @@ async function batchDelete() {
     }
 
     if (errors.length > 0) {
-        window.alert(`Some items could not be deleted:\n\n${errors.join('\n')}`);
+        await showAlertModal({ message: `Some items could not be deleted:\n\n${errors.join('\n')}`, kind: 'error' });
     }
 
     clearSelection();
