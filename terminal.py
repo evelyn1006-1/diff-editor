@@ -63,6 +63,24 @@ TASK_MANAGER_COMMANDS = {"top", "htop"}
 # this textbox-based terminal since there is no cursor positioning or
 # alternate screen buffer support).
 PAGER_COMMANDS = {"less", "more"}
+_PAGER_SHORT_FLAGS_WITH_VALUE = {"-D", "-P", "-j", "-k", "-o", "-O", "-p", "-t", "-T", "-x", "-y", "-z"}
+_PAGER_LONG_FLAGS_WITH_VALUE = {
+    "--color",
+    "--color-scheme",
+    "--jump-target",
+    "--line-num-width",
+    "--log-file",
+    "--pattern",
+    "--prompt",
+    "--rscroll",
+    "--shift",
+    "--status-column",
+    "--tabs",
+    "--tag",
+    "--tag-file",
+    "--use-color",
+    "--window",
+}
 # Commands that spawn an editor internally and require sudo -E so our $SUDO_EDITOR
 # env var is preserved through the privilege escalation.
 _SUDO_E_COMMANDS = {"visudo"}
@@ -90,6 +108,8 @@ _GIT_GLOBAL_VALUE_FLAGS = {
     "--super-prefix",
     "--work-tree",
 }
+_GIT_NO_PAGER_FLAGS = {"-P", "--no-pager"}
+_GIT_PAGINATE_FLAGS = {"-p", "--paginate"}
 _GIT_PAGER_SUBCOMMANDS = {"blame", "diff", "grep", "help", "log", "reflog", "shortlog", "show"}
 _GIT_STASH_PAGER_SUBCOMMANDS = {"list", "show"}
 _GIT_CONFIG_EDITOR_FLAGS = {"-e", "--edit"}
@@ -242,6 +262,7 @@ _SYSTEMCTL_PAGER_SUBCOMMANDS = {
     "show-environment",
     "status",
 }
+_NO_PAGER_FLAGS = {"--no-pager"}
 _MAX_COMPLETIONS = 50
 _BASH_COMPLETION_SCRIPTS = (
     "/usr/share/bash-completion/bash_completion",
@@ -425,7 +446,7 @@ def init_terminal_socketio(socketio):
         parsed = parse_intercept_command(command)
         if parsed:
             parts, idx = parsed
-            if parts[0] == "sudo" and _command_uses_browser_editor(parts, idx):
+            if _sudo_prefix_index(parts, idx) is not None and _command_uses_browser_editor(parts, idx):
                 # Ensure command keeps the browser editor env without corrupting
                 # sudo option/env ordering.
                 rewritten = " ".join(shlex.quote(p) for p in _rewrite_sudo_preserve_env(parts, idx))
@@ -511,8 +532,13 @@ def parse_intercept_command(command: str) -> tuple[list[str], int] | None:
         return None
 
     idx = 0
-    if parts[0] == "sudo":
-        idx = 1
+    while idx < len(parts) and _ENV_ASSIGNMENT_RE.match(parts[idx]):
+        idx += 1
+
+    if idx < len(parts) and parts[idx] == "sudo":
+        idx += 1
+        while idx < len(parts) and _ENV_ASSIGNMENT_RE.match(parts[idx]):
+            idx += 1
         while idx < len(parts):
             arg = parts[idx]
             if arg == "--":
@@ -541,6 +567,16 @@ def parse_intercept_command(command: str) -> tuple[list[str], int] | None:
         return None
 
     return parts, idx
+
+
+def _sudo_prefix_index(parts: list[str], idx: int) -> int | None:
+    """Return the sudo token index when command parsing skipped a sudo prefix."""
+    prefix_idx = 0
+    while prefix_idx < idx and _ENV_ASSIGNMENT_RE.match(parts[prefix_idx]):
+        prefix_idx += 1
+    if prefix_idx < idx and parts[prefix_idx] == "sudo":
+        return prefix_idx
+    return None
 
 
 def _find_subcommand_after_options(args: list[str], value_flags: set[str]) -> tuple[int, str] | None:
@@ -606,15 +642,16 @@ def _git_config_is_query(args: list[str]) -> bool:
 
 def _rewrite_sudo_preserve_env(parts: list[str], idx: int) -> list[str]:
     """Insert sudo -E before env assignments/--, unless already present."""
-    if parts[0] != "sudo":
+    sudo_idx = _sudo_prefix_index(parts, idx)
+    if sudo_idx is None:
         return parts
 
-    prefix = parts[1:idx]
+    prefix = parts[sudo_idx + 1:idx]
     if any(_match_command_arg(arg, _SUDO_PRESERVE_ENV_FLAGS) in _SUDO_PRESERVE_ENV_FLAGS for arg in prefix):
         return parts
 
     insert_at = idx
-    for pos in range(1, idx):
+    for pos in range(sudo_idx + 1, idx):
         arg = parts[pos]
         if arg == "--" or _ENV_ASSIGNMENT_RE.match(arg):
             insert_at = pos
@@ -686,6 +723,11 @@ def _get_git_pager_request(parts: list[str], idx: int) -> tuple[str, list[str]] 
         return None
 
     sub_idx, subcmd = parsed
+    global_args = args[:sub_idx]
+    if any(_match_command_arg(arg, _GIT_NO_PAGER_FLAGS) in _GIT_NO_PAGER_FLAGS for arg in global_args):
+        return None
+
+    force_pager = any(_match_command_arg(arg, _GIT_PAGINATE_FLAGS) in _GIT_PAGINATE_FLAGS for arg in global_args)
     subargs = args[sub_idx + 1:]
     title: str | None = None
     if subcmd in _GIT_PAGER_SUBCOMMANDS:
@@ -700,11 +742,18 @@ def _get_git_pager_request(parts: list[str], idx: int) -> tuple[str, list[str]] 
         title = "git tag"
     elif subcmd == "config" and _git_config_is_query(subargs):
         title = "git config"
+    elif force_pager:
+        title = f"git {subcmd}"
 
     if title is None:
         return None
 
-    return title, parts[:idx + 1] + ["--no-pager"] + args
+    run_global_args = [
+        arg
+        for arg in global_args
+        if _match_command_arg(arg, _GIT_PAGINATE_FLAGS) not in _GIT_PAGINATE_FLAGS
+    ]
+    return title, parts[:idx + 1] + ["--no-pager"] + run_global_args + args[sub_idx:]
 
 
 def _match_command_arg(arg: str, candidates: set[str]) -> str | None:
@@ -823,15 +872,35 @@ def check_task_manager_command(command: str) -> bool:
     return parts[idx] in TASK_MANAGER_COMMANDS
 
 
+def _split_leading_env_assignments(parts: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Return argv without shell-style leading env assignments plus env updates."""
+    env_updates: dict[str, str] = {}
+    idx = 0
+    while idx < len(parts) and _ENV_ASSIGNMENT_RE.match(parts[idx]):
+        key, value = parts[idx].split("=", 1)
+        env_updates[key] = value
+        idx += 1
+    return parts[idx:], env_updates
+
+
 def _run_no_pager(run_parts: list[str], cwd: str, timeout: int = 10) -> str | None:
     """Run a command and return its combined output, or None on failure."""
+    argv, env_updates = _split_leading_env_assignments(run_parts)
+    if not argv:
+        return None
+
+    env = None
+    if env_updates:
+        env = {**os.environ, **env_updates}
+
     try:
         result = subprocess.run(
-            run_parts,
+            argv,
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=cwd,
+            env=env,
         )
         output = result.stdout or result.stderr
         return output if output.strip() else None
@@ -865,6 +934,90 @@ def _has_shell_operators(command: str) -> bool:
 _PAGER_MAX_CHARS = 512 * 1024  # 512 KB
 
 
+def _resolve_pager_path(file_arg: str, cwd: str) -> Path:
+    path = Path(os.path.expanduser(file_arg))
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def _pager_file_args(args: list[str]) -> list[str]:
+    """Extract file operands from less/more args without treating jumps/options as files."""
+    files: list[str] = []
+    end_options = False
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if end_options:
+            files.append(arg)
+            idx += 1
+            continue
+
+        if arg == "--":
+            end_options = True
+            idx += 1
+            continue
+        if arg.startswith("+"):
+            idx += 1
+            continue
+        if arg.startswith("--"):
+            key = arg.split("=", 1)[0]
+            if "=" not in arg and key in _PAGER_LONG_FLAGS_WITH_VALUE:
+                idx += 2
+            else:
+                idx += 1
+            continue
+        if arg.startswith("-") and arg != "-":
+            short_key = arg[:2]
+            if short_key in _PAGER_SHORT_FLAGS_WITH_VALUE and len(arg) == 2:
+                idx += 2
+            else:
+                idx += 1
+            continue
+
+        files.append(arg)
+        idx += 1
+
+    return files
+
+
+def _read_pager_files(file_args: list[str], cwd: str, sudo_prefix: list[str] | None = None) -> str | None:
+    """Read one or more pager file operands, optionally through a sudo prefix."""
+    if not file_args:
+        return None
+
+    paths = [_resolve_pager_path(file_arg, cwd) for file_arg in file_args]
+    if sudo_prefix:
+        contents: list[str] = []
+        for file_arg, path in zip(file_args, paths):
+            content = _run_no_pager(sudo_prefix + ["cat", "--", str(path)], cwd)
+            if content is None:
+                return None
+            if len(file_args) > 1:
+                contents.append(f"==> {file_arg} <==\n")
+            contents.append(content)
+            if len(file_args) > 1 and not content.endswith("\n"):
+                contents.append("\n")
+        return "".join(contents)
+
+    contents: list[str] = []
+    for file_arg, path in zip(file_args, paths):
+        try:
+            content = path.read_text(errors="replace")
+        except OSError:
+            return None
+        if len(file_args) > 1:
+            contents.append(f"==> {file_arg} <==\n")
+        contents.append(content)
+        if len(file_args) > 1 and not content.endswith("\n"):
+            contents.append("\n")
+
+    return "".join(contents)
+
+
 def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str, str] | None:
     """Return (title, content) if this is an interceptable pager command.
 
@@ -879,11 +1032,12 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
         return None
     parts, idx = parsed
     cmd = parts[idx]
+    sudo_idx = _sudo_prefix_index(parts, idx)
 
     # If the command is prefixed with sudo, only intercept when the user has
     # non-interactive sudo (no password required). The result is cached per
     # session so the check only runs once per connection.
-    if idx > 0:
+    if sudo_idx is not None:
         if session_id not in _sudo_nopasswd_cache:
             try:
                 check = subprocess.run(
@@ -896,6 +1050,7 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
                 _sudo_nopasswd_cache[session_id] = False
         if not _sudo_nopasswd_cache.get(session_id):
             return None
+    sudo_prefix = parts[:idx] if sudo_idx is not None else None
 
     out: tuple[str, str] | None = None
 
@@ -917,15 +1072,11 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
 
     elif cmd in PAGER_COMMANDS:
         args = parts[idx + 1:]
-        file_arg = next((a for a in reversed(args) if not a.startswith("-")), None)
-        if file_arg:
-            path = Path(os.path.expanduser(file_arg))
-            if not path.is_absolute():
-                path = Path(cwd) / path
-            try:
-                out = (file_arg, path.read_text(errors="replace"))
-            except OSError:
-                pass
+        file_args = _pager_file_args(args)
+        content = _read_pager_files(file_args, cwd, sudo_prefix)
+        if content is not None:
+            title = file_args[0] if len(file_args) == 1 else f"{cmd} {' '.join(file_args)}"
+            out = (title, content)
 
     elif cmd == "git":
         request = _get_git_pager_request(parts, idx)
@@ -937,8 +1088,11 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
 
     elif cmd == "systemctl":
         args = parts[idx + 1:]
-        parsed_subcmd = _find_subcommand_after_options(args, _SYSTEMCTL_GLOBAL_VALUE_FLAGS)
-        subcmd = parsed_subcmd[1] if parsed_subcmd else None
+        if not any(_match_command_arg(arg, _NO_PAGER_FLAGS) in _NO_PAGER_FLAGS for arg in args):
+            parsed_subcmd = _find_subcommand_after_options(args, _SYSTEMCTL_GLOBAL_VALUE_FLAGS)
+            subcmd = parsed_subcmd[1] if parsed_subcmd else None
+        else:
+            subcmd = None
         if subcmd in _SYSTEMCTL_PAGER_SUBCOMMANDS:
             run_parts = parts[:idx + 1] + ["--no-pager"] + args
             content = _run_no_pager(run_parts, cwd)
@@ -947,10 +1101,11 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
 
     elif cmd == "journalctl":
         args = parts[idx + 1:]
-        run_parts = parts[:idx + 1] + ["--no-pager"] + args
-        content = _run_no_pager(run_parts, cwd)
-        if content is not None:
-            out = ("journalctl", content)
+        if not any(_match_command_arg(arg, _NO_PAGER_FLAGS) in _NO_PAGER_FLAGS for arg in args):
+            run_parts = parts[:idx + 1] + ["--no-pager"] + args
+            content = _run_no_pager(run_parts, cwd)
+            if content is not None:
+                out = ("journalctl", content)
 
     if out is None:
         return None
@@ -958,6 +1113,29 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
     if len(content) > _PAGER_MAX_CHARS:
         content = content[:_PAGER_MAX_CHARS] + "\n\n[… output truncated at 512 KB …]"
     return title, content
+
+
+@terminal_bp.route("/terminal/pager_request", methods=["POST"])
+def pager_request():
+    """Called by pager_wrapper.py to open captured pager output in the browser."""
+    session_id = request.form.get("session_id", "")
+    if not session_id or not pty_manager.get_session(session_id):
+        return jsonify({"error": "invalid session"}), 403
+
+    title = request.form.get("title", "Pager") or "Pager"
+    content = request.form.get("content", "")
+    if len(content) > _PAGER_MAX_CHARS:
+        content = content[:_PAGER_MAX_CHARS] + "\n\n[… output truncated at 512 KB …]"
+
+    if _socketio_ref:
+        _socketio_ref.emit(
+            "pager_popup",
+            {"title": title, "content": content},
+            room=session_id,
+            namespace="/terminal",
+        )
+
+    return jsonify({"ok": True})
 
 
 @terminal_bp.route("/terminal")

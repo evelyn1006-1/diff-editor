@@ -18,7 +18,9 @@ from typing import Optional
 from app_runtime import TERMINAL_SERVER_URL
 
 _WRAPPER_PATH = str(Path(__file__).resolve().parent / "editor_wrapper.py")
+_PAGER_WRAPPER_PATH = str(Path(__file__).resolve().parent / "pager_wrapper.py")
 _EDITOR_CMD = _WRAPPER_PATH
+_PAGER_CMD = _PAGER_WRAPPER_PATH
 _EDITOR_ENV_VARS = (
     "EDITOR",
     "VISUAL",
@@ -29,6 +31,12 @@ _EDITOR_ENV_VARS = (
     "KUBE_EDITOR",
     "HGEDITOR",
     "SVN_EDITOR",
+)
+_PAGER_ENV_VARS = (
+    "PAGER",
+    "GIT_PAGER",
+    "MANPAGER",
+    "SYSTEMD_PAGER",
 )
 
 
@@ -63,6 +71,8 @@ class PTYSession:
                 env["TERMINAL_SERVER_URL"] = TERMINAL_SERVER_URL
                 for key in _EDITOR_ENV_VARS:
                     env[key] = _EDITOR_CMD
+                for key in _PAGER_ENV_VARS:
+                    env[key] = _PAGER_CMD
                 argv = [self.shell] + self.shell_args
                 os.execvpe(self.shell, argv, env)
             else:
