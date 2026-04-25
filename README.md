@@ -18,7 +18,7 @@ It is designed for a trusted, admin-level environment rather than a multi-tenant
 - Recycle-bin delete flow with permanent delete inside the recycle bin
 - Zip inspection, extraction, and directory zipping
 - Browser terminal backed by PTYs and Socket.IO
-- Editor redirects for commands like `nano`, `vim`, `vi`, `nvim`, and `emacs`
+- Modal editor support for commands like `nano`, `vim`, `vi`, `nvim`, and `emacs`; use `diff-editor` for the full diff editor
 - Pager interception for commands like `less` and `more`
 - Built-in task manager with process details and systemd controls
 - Compile helpers for `C`, `C++`, `Go`, `Java`, `Rust`, and `C#`

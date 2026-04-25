@@ -100,7 +100,7 @@ function connect() {
     });
 
     socket.on('editor_modal', (data) => {
-        openEditorModal(data.title, data.content);
+        openEditorModal(data.title, data.content, data);
     });
 
     socket.on('disconnect', () => {
@@ -981,6 +981,9 @@ let editorSearchError = '';
 let editorDiffMode = false;
 let editorDiffStats = { added: 0, removed: 0 };
 let editorModalInitialized = false;
+let editorModalMode = 'wrapper';
+let editorFilePath = '';
+let editorNeedsPath = false;
 
 function setEditorStatus(message, isError = false) {
     const hint = document.getElementById('editor-hint');
@@ -1039,6 +1042,78 @@ function setEditorSummary(message = '') {
 
 function escapeRegExp(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function showEditorSavePathModal(defaultValue = '') {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay terminal-save-path-overlay';
+        overlay.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-title">Save File</div>
+                <div class="modal-summary">Choose where to save this editor buffer.</div>
+                <input type="text" class="copy-input terminal-save-path-input" value="${escapeHtml(defaultValue)}" autocomplete="off" spellcheck="false">
+                <div class="copy-error terminal-save-path-error" style="display:none"></div>
+                <div class="modal-buttons">
+                    <button class="btn-modal btn-modal-cancel">Cancel</button>
+                    <button class="btn-modal btn-modal-copy">Save</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        const input = overlay.querySelector('.terminal-save-path-input');
+        const errorEl = overlay.querySelector('.terminal-save-path-error');
+        const cancelBtn = overlay.querySelector('.btn-modal-cancel');
+        const saveBtn = overlay.querySelector('.btn-modal-copy');
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', handleKeydown, true);
+            overlay.remove();
+            resolve(value);
+        };
+
+        const showError = (message) => {
+            errorEl.textContent = message;
+            errorEl.style.display = 'block';
+        };
+
+        const submit = () => {
+            const value = input.value.trim();
+            if (!value) {
+                showError('Choose a path before saving.');
+                input.focus();
+                return;
+            }
+            cleanup(value);
+        };
+
+        const handleKeydown = (e) => {
+            if (!overlay.contains(e.target)) return;
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                submit();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup(null);
+            }
+        };
+
+        cancelBtn.addEventListener('click', () => cleanup(null));
+        saveBtn.addEventListener('click', submit);
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) cleanup(null);
+        });
+        input.addEventListener('input', () => {
+            errorEl.style.display = 'none';
+        });
+        document.addEventListener('keydown', handleKeydown, true);
+
+        input.focus();
+        input.select();
+    });
 }
 
 function normalizeEditorDiffText(text) {
@@ -1705,7 +1780,7 @@ function initializeEditorModal() {
     document.getElementById('editor-replace-all')?.addEventListener('click', replaceAllEditorMatches);
 }
 
-function openEditorModal(title, content) {
+function openEditorModal(title, content, options = {}) {
     initializeEditorModal();
 
     const overlay = document.getElementById('editor-overlay');
@@ -1727,6 +1802,9 @@ function openEditorModal(title, content) {
     editorSearchError = '';
     editorDiffMode = false;
     editorDiffStats = { added: 0, removed: 0 };
+    editorModalMode = options.mode || 'wrapper';
+    editorFilePath = options.filePath || '';
+    editorNeedsPath = Boolean(options.needsPath);
 
     textarea.value = content;
     if (findInput) findInput.value = '';
@@ -1755,6 +1833,9 @@ function closeEditorModal() {
     editorWholeWord = false;
     editorRegexMode = false;
     editorDiffMode = false;
+    editorModalMode = 'wrapper';
+    editorFilePath = '';
+    editorNeedsPath = false;
     editorSearchMatches = [];
     editorSearchIndex = -1;
     editorSearchError = '';
@@ -1794,6 +1875,16 @@ async function submitEditorModal(saved) {
     }
 
     const content = getEditorTextarea().value;
+    let filePath = editorFilePath;
+    if (saved && editorModalMode === 'direct' && editorNeedsPath) {
+        const chosenPath = await showEditorSavePathModal(filePath);
+        if (chosenPath === null) {
+            getEditorTextarea()?.focus();
+            setEditorStatus('Save cancelled.');
+            return;
+        }
+        filePath = chosenPath;
+    }
     setEditorBusy(true);
     setEditorStatus(saved ? 'Saving...' : 'Cancelling...');
 
@@ -1802,6 +1893,8 @@ async function submitEditorModal(saved) {
         session_id: socket.id,
         saved: saved ? 'true' : 'false',
         content: saved ? content : '',
+        mode: editorModalMode,
+        file_path: filePath,
     });
 
     try {

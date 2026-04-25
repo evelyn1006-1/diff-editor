@@ -23,6 +23,7 @@ from flask_socketio import emit, join_room, leave_room
 from utils.pack_autocomp import find_npm_packages, find_pypi_packages
 from utils.pty_manager import PTYManager
 from utils.constants import CLOUD_COMMAND_RULES
+from utils.file_ops import check_path_is_file, read_file, write_file
 
 # Set up WebSocket access logging (same file as HTTP, rotation handled by rotatelog)
 LOG_DIR = Path(__file__).resolve().parent / "logs"
@@ -50,9 +51,11 @@ _sudo_nopasswd_cache: dict[str, bool] = {}  # session_id → has passwordless su
 _socketio_ref = None  # set by init_terminal_socketio; used by HTTP routes that need to emit
 _editor_events: dict[str, gevent.event.Event] = {}   # session_id → blocking event
 _editor_results: dict[str, dict] = {}                # session_id → {saved, content}
+_direct_editor_sessions: dict[str, dict] = {}        # session_id → {file_path, cwd}
 
 # Commands that should redirect to diff editor
 EDITOR_COMMANDS = {"nano", "vim", "vi", "nvim", "emacs", "pico", "edit"}
+DIFF_EDITOR_COMMANDS = {"diff-editor"}
 CLOUD_COMMAND_REDIRECTS = {
     "codex": ("https://chatgpt.com/codex", "Codex Cloud"),
     "claude": ("https://claude.ai/code", "Claude Code"),
@@ -269,7 +272,7 @@ _BASH_COMPLETION_SCRIPTS = (
     "/etc/bash_completion",
 )
 _PATH_COMPLETION_COMMANDS = {
-    "cd", "nano", "vim", "vi", "nvim", "emacs", "pico", "edit",
+    "cd", "nano", "vim", "vi", "nvim", "emacs", "pico", "edit", "diff-editor",
     "cat", "less", "more", "head", "tail",
 }
 NO_PACKAGE_LOOKUP = os.environ.get("NO_PACKAGE_LOOKUP", "").lower() in {"1", "true", "yes", "on"} 
@@ -387,6 +390,7 @@ def init_terminal_socketio(socketio):
         if ev:
             _editor_results[session_id] = {"saved": False, "content": ""}
             ev.set()
+        _direct_editor_sessions.pop(session_id, None)
         leave_room(session_id)
         ws_logger.info(
             '%s - - [%s] "WS DISCONNECT /terminal" - - "-" "-"',
@@ -416,12 +420,37 @@ def init_terminal_socketio(socketio):
             session.write("\n")
             return
 
-        redirect_url = check_editor_redirect(command, get_session_cwd(session))
+        redirect_url = check_diff_editor_redirect(command, get_session_cwd(session))
         if redirect_url:
             # Show clean terminal output without sending fake shell input.
             emit("output", {"data": f"{command}\nRedirecting to diff editor...\n"})
             emit("editor_redirect", {"url": redirect_url})
             # Ask shell for a fresh prompt so terminal feels natural after interception.
+            session.write("\n")
+            return
+
+        direct_editor = get_direct_editor_request(command, get_session_cwd(session))
+        if direct_editor:
+            title, content, file_path, needs_path, error = direct_editor
+            if error:
+                emit("output", {"data": f"{command}\nCould not open editor: {error}\n"})
+                session.write("\n")
+                return
+            _direct_editor_sessions[session_id] = {
+                "file_path": file_path,
+                "cwd": get_session_cwd(session),
+            }
+            emit("output", {"data": f"{command}\nOpening editor...\n"})
+            emit(
+                "editor_modal",
+                {
+                    "title": title,
+                    "content": content,
+                    "mode": "direct",
+                    "filePath": file_path or "",
+                    "needsPath": needs_path,
+                },
+            )
             session.write("\n")
             return
 
@@ -824,10 +853,44 @@ def check_cloud_redirect(command: str) -> tuple[str, str] | None:
     return CLOUD_COMMAND_REDIRECTS[cmd]
 
 
-def check_editor_redirect(command: str, cwd: str | None = None) -> str | None:
+def _editor_file_path(parts: list[str], idx: int, cwd: str | None = None) -> Path | None:
+    """Return the first file operand for an editor-style command."""
+    args = parts[idx + 1:]
+    file_path = next((arg for arg in args if not arg.startswith("-") and not arg.startswith("+")), None)
+    if not file_path:
+        return None
+
+    base_cwd = Path(cwd or os.path.expanduser("~"))
+    target = Path(os.path.expanduser(file_path))
+    if not target.is_absolute():
+        target = base_cwd / target
+
+    try:
+        return target.resolve()
+    except OSError:
+        return target.absolute()
+
+
+def _resolve_editor_save_path(raw_path: str, cwd: str | None = None) -> Path | None:
+    raw_path = raw_path.strip()
+    if not raw_path:
+        return None
+
+    base_cwd = Path(cwd or os.path.expanduser("~"))
+    target = Path(os.path.expanduser(raw_path))
+    if not target.is_absolute():
+        target = base_cwd / target
+
+    try:
+        return target.resolve()
+    except OSError:
+        return target.absolute()
+
+
+def check_diff_editor_redirect(command: str, cwd: str | None = None) -> str | None:
     """
-    Check if a command is an editor command and return redirect URL.
-    Returns None if not an editor command.
+    Check if a command explicitly requests the full diff editor redirect.
+    Returns None if not a diff-editor command.
     """
     parsed = parse_intercept_command(command)
     if not parsed:
@@ -837,30 +900,42 @@ def check_editor_redirect(command: str, cwd: str | None = None) -> str | None:
 
     cmd = parts[idx]
 
-    # Check if it's an editor command
-    if cmd not in EDITOR_COMMANDS:
+    if cmd not in DIFF_EDITOR_COMMANDS:
         return None
 
-    # Get the file path if provided (first non-flag argument after editor command)
-    args = parts[idx + 1:]
-    file_path = next((arg for arg in args if not arg.startswith("-") and not arg.startswith("+")), None)
-    if file_path:
-        base_cwd = Path(cwd or os.path.expanduser("~"))
-        target = Path(os.path.expanduser(file_path))
-        if not target.is_absolute():
-            target = base_cwd / target
-
-        # Resolve as much as possible, even if file doesn't exist yet.
-        try:
-            target = target.resolve()
-        except OSError:
-            target = target.absolute()
-
+    target = _editor_file_path(parts, idx, cwd)
+    if target:
         # Absolute path - use /diff/diff because nginx proxies /diff/ to Flask
         return f"/diff/diff?file={quote(str(target))}"
 
-    # Editor without file - redirect to file browser
     return "/diff/"
+
+
+def get_direct_editor_request(command: str, cwd: str | None = None) -> tuple[str, str, str, bool, str | None] | None:
+    """Return modal editor data for direct editor commands."""
+    parsed = parse_intercept_command(command)
+    if not parsed:
+        return None
+
+    parts, idx = parsed
+    if parts[idx] not in EDITOR_COMMANDS:
+        return None
+
+    target = _editor_file_path(parts, idx, cwd)
+    if target is None:
+        return "Untitled", "", "", True, None
+
+    is_file, error, status = check_path_is_file(target, allow_symlink=True)
+    if is_file:
+        success, content = read_file(target)
+        if not success:
+            return target.name or str(target), "", str(target), False, content
+    elif status == 404:
+        content = ""
+    else:
+        return target.name or str(target), "", str(target), False, error or "Could not open file"
+
+    return target.name or str(target), content, str(target), False, None
 
 
 def check_task_manager_command(command: str) -> bool:
@@ -1530,12 +1605,44 @@ def editor_response():
     content = request.form.get("content", "")
 
     ev = _editor_events.get(session_id)
-    if not ev:
+    if ev:
+        _editor_results[session_id] = {"saved": saved, "content": content}
+        ev.set()
+        return jsonify({"ok": True})
+
+    direct = _direct_editor_sessions.get(session_id)
+    if not direct:
         return jsonify({"error": "no pending editor"}), 404
 
-    _editor_results[session_id] = {"saved": saved, "content": content}
-    ev.set()
-    return jsonify({"ok": True})
+    if not saved:
+        _direct_editor_sessions.pop(session_id, None)
+        if _socketio_ref:
+            _socketio_ref.emit(
+                "output",
+                {"data": "Editor cancelled.\n"},
+                room=session_id,
+                namespace="/terminal",
+            )
+        return jsonify({"ok": True})
+
+    raw_path = request.form.get("file_path", "") or direct.get("file_path", "")
+    target = _resolve_editor_save_path(raw_path, direct.get("cwd", ""))
+    if target is None:
+        return jsonify({"error": "Choose a path before saving."}), 400
+
+    success, message = write_file(target, content)
+    if not success:
+        return jsonify({"error": message}), 400
+
+    _direct_editor_sessions.pop(session_id, None)
+    if _socketio_ref:
+        _socketio_ref.emit(
+            "output",
+            {"data": f"Saved {target}\n"},
+            room=session_id,
+            namespace="/terminal",
+        )
+    return jsonify({"ok": True, "message": message, "file_path": str(target)})
 
 
 def _get_completion_cwd(session_id: str) -> str:

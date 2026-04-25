@@ -577,6 +577,14 @@ main {
     flex-direction: column;
 }
 
+.terminal-save-path-overlay {
+    z-index: 2100;
+}
+
+.terminal-save-path-overlay .modal-title {
+    color: var(--accent);
+}
+
 .modal-title {
     font-family: 'Comic Neue', sans-serif;
     font-size: 1.1rem;
