@@ -65,6 +65,11 @@ from utils.file_ops import (
     is_likely_binary,
     is_recycle_bin_root,
     is_writable_by_user,
+    list_directory_entries,
+    check_path_is_file,
+    check_path_is_directory,
+    check_path_exists,
+    get_file_size,
     make_executable,
     parse_hex_view,
     permanently_delete_path,
@@ -794,10 +799,9 @@ def create_app() -> Flask:
         if error:
             return render_template("index.html", default_root=DEFAULT_ROOT, error=error)
 
-        if not path.exists():
-            return render_template("index.html", default_root=DEFAULT_ROOT, error=f"File not found: {file_path}")
-        if not path.is_file():
-            return render_template("index.html", default_root=DEFAULT_ROOT, error=f"Not a file: {file_path}")
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return render_template("index.html", default_root=DEFAULT_ROOT, error=f"{error}: {file_path}"), status
 
         return render_template("diff.html", file_path=str(path))
 
@@ -810,11 +814,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "Path does not exist"}), 404
-
-        if not path.is_dir():
-            return jsonify({"error": "Not a directory"}), 400
+        ok, error, status = check_path_is_directory(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         # Get git status and tracked files for the directory
         git_status = get_directory_git_status(path)
@@ -825,26 +827,40 @@ def create_app() -> Flask:
 
         items = []
         try:
-            for entry in sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                if not show_hidden and entry.name.startswith("."):
+            raw_entries = list_directory_entries(path)
+            for info in sorted(raw_entries, key=lambda x: (not x.get("is_dir"), x["name"].lower())):
+                if not show_hidden and info["name"].startswith("."):
                     continue
 
+                if info.get("error"):
+                    items.append({
+                        "name": info["name"],
+                        "path": info["path"],
+                        "is_dir": False,
+                        "is_git": False,
+                        "git_status": None,
+                        "writable": False,
+                        "error": "Permission denied",
+                    })
+                    continue
+
+                entry = Path(info["path"])
                 try:
-                    is_dir = entry.is_dir()
-                    entry_path = str(entry)
+                    is_dir = info["is_dir"]
+                    entry_path = info["path"]
                     file_git_status = git_status.get(entry_path) if not is_dir else None
                     # Only mark as git-tracked if actually in git's index (not just in a repo folder)
                     is_tracked = entry_path in tracked_files if not is_dir else False
                     recycle_meta = get_recycle_metadata(entry)
                     original_path = recycle_meta.get("original_path") if isinstance(recycle_meta, dict) else None
 
-                    is_link = entry.is_symlink()
+                    is_link = info["is_symlink"]
                     items.append({
-                        "name": entry.name,
+                        "name": info["name"],
                         "path": entry_path,
                         "is_dir": is_dir,
                         "is_symlink": is_link,
-                        "symlink_target": str(os.readlink(entry)) if is_link else None,
+                        "symlink_target": info.get("symlink_target"),
                         "is_git": is_tracked,
                         "git_status": file_git_status,
                         "writable": is_writable_by_user(entry) if not is_dir else None,
@@ -853,8 +869,8 @@ def create_app() -> Flask:
                     })
                 except PermissionError:
                     items.append({
-                        "name": entry.name,
-                        "path": str(entry),
+                        "name": info["name"],
+                        "path": info["path"],
                         "is_dir": False,
                         "is_git": False,
                         "git_status": None,
@@ -885,13 +901,12 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "File not found"}), 404
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
-        if not path.is_file():
-            return jsonify({"error": "Not a file"}), 400
-
-        if path.stat().st_size > MAX_FILE_SIZE:
+        size = get_file_size(path)
+        if size is not None and size > MAX_FILE_SIZE:
             return jsonify({"error": f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)"}), 400
 
         success, content_bytes = read_file_bytes(path)
@@ -958,11 +973,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "File not found"}), 404
-
-        if not path.is_file():
-            return jsonify({"error": "Not a file"}), 400
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         compile_context, error, http_status = get_compile_context_for_path(path)
         if error:
@@ -1008,11 +1021,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "File not found"}), 404
-
-        if not path.is_file():
-            return jsonify({"error": "Not a file"}), 400
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         compile_context, error, http_status = get_compile_context_for_path(path)
         if error:
@@ -1108,13 +1119,12 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "File not found"}), 404
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
-        if not path.is_file():
-            return jsonify({"error": "Not a file"}), 400
-
-        if path.stat().st_size > MAX_FILE_SIZE:
+        size = get_file_size(path)
+        if size is not None and size > MAX_FILE_SIZE:
             return jsonify({"error": f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)"}), 400
 
         success, content_bytes = read_file_bytes(path)
@@ -1290,11 +1300,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "File not found"}), 404
-
-        if not path.is_file():
-            return jsonify({"error": "Not a file"}), 400
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         # Use read_file_bytes which has sudo fallback for unreadable files
         if os.access(path, os.R_OK):
@@ -1325,11 +1333,10 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "File not found"}), 404
+        ok, error, status = check_path_is_file(path, allow_symlink=True)
+        if not ok:
+            return jsonify({"error": error}), status
 
-        if not path.is_file():
-            return jsonify({"error": "Not a file"}), 400
         if _is_protected_path(path):
             return jsonify({"error": "Cannot delete files in a system directory"}), 403
 
@@ -1838,10 +1845,9 @@ def create_app() -> Flask:
         activate = bool(data.get("activate", False))
         overwrite = bool(data.get("overwrite", False))
 
-        if not path.exists() and not path.is_symlink():
-            return jsonify({"error": "File not found"}), 404
-        if not path.is_file() and not path.is_symlink():
-            return jsonify({"error": "Not a file"}), 400
+        ok, error, status = check_path_is_file(path, allow_symlink=True)
+        if not ok:
+            return jsonify({"error": error}), status
 
         if dest_dir_str:
             dest_dir, error = resolve_request_path(dest_dir_str, "directory")
@@ -2008,8 +2014,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "Path not found"}), 404
+        ok, error, status = check_path_exists(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         if dest_dir_str:
             dest_dir, error = resolve_request_path(dest_dir_str, "directory")
@@ -2256,8 +2263,10 @@ def create_app() -> Flask:
         path, error = resolve_request_path(raw_path)
         if error:
             return jsonify({"error": error}), 400
-        if not path.exists() and not path.is_symlink():
-            return jsonify({"error": "Not found"}), 404
+
+        ok, error, status = check_path_exists(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         success, info = stat_path(path)
         if not success:
@@ -2275,8 +2284,10 @@ def create_app() -> Flask:
         path, error = resolve_request_path(raw_path)
         if error:
             return jsonify({"error": error}), 400
-        if not path.exists() and not path.is_symlink():
-            return jsonify({"error": "Not found"}), 404
+
+        ok, error, status = check_path_exists(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         return jsonify(get_extended_file_info(path))
 
@@ -2290,8 +2301,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not zip_path.exists():
-            return jsonify({"error": "File not found"}), 404
+        ok, error, status = check_path_is_file(zip_path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         success, result = get_zip_info(zip_path)
         if not success:
@@ -2318,8 +2330,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not zip_path.exists():
-            return jsonify({"error": "File not found"}), 404
+        ok, error, status = check_path_is_file(zip_path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         success, result, http_status = extract_zip_archive(zip_path, mode=mode)
         if not success:
@@ -2350,8 +2363,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "File not found"}), 404
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         read_ok, existing_bytes = read_file_bytes(path)
         if not read_ok:

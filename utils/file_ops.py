@@ -11,10 +11,12 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 
 HOME_DIR = Path.home()
 RECYCLE_BIN = Path("/var/tmp/RECYCLE_BIN")
@@ -215,6 +217,93 @@ def is_writable_by_user(path: Path) -> bool:
     if not path.exists():
         return os.access(path.parent, os.W_OK)
     return os.access(path, os.W_OK)
+
+
+def list_directory_entries(path: Path) -> list[dict]:
+    """
+    List directory entries with basic metadata.
+    Falls back to sudo if the directory is not directly readable/executable.
+    Returns a list of dicts with keys: name, path, is_dir, is_symlink, symlink_target.
+    Raises PermissionError if both direct and sudo access fail.
+    """
+    path = _normalize_path(path)
+
+    try:
+        entries = []
+        for entry in path.iterdir():
+            try:
+                entries.append({
+                    "name": entry.name,
+                    "path": str(entry),
+                    "is_dir": entry.is_dir(),
+                    "is_symlink": entry.is_symlink(),
+                    "symlink_target": str(os.readlink(entry)) if entry.is_symlink() else None,
+                })
+            except PermissionError:
+                entries.append({
+                    "name": entry.name,
+                    "path": str(entry),
+                    "is_dir": False,
+                    "is_symlink": False,
+                    "symlink_target": None,
+                    "error": "Permission denied",
+                })
+        return entries
+    except PermissionError:
+        pass
+
+    # Fall back to sudo
+    script = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "p = Path(sys.argv[1])\n"
+        "entries = []\n"
+        "for e in p.iterdir():\n"
+        "    try:\n"
+        "        entries.append({\n"
+        '            "name": e.name,\n'
+        '            "path": str(e),\n'
+        '            "is_dir": e.is_dir(),\n'
+        '            "is_symlink": e.is_symlink(),\n'
+        '            "symlink_target": str(os.readlink(e)) if e.is_symlink() else None,\n'
+        "        })\n"
+        "    except Exception:\n"
+        "        entries.append({\n"
+        '            "name": e.name,\n'
+        '            "path": str(e),\n'
+        '            "is_dir": False,\n'
+        '            "is_symlink": False,\n'
+        '            "symlink_target": None,\n'
+        '            "error": "Permission denied",\n'
+        "        })\n"
+        "print(json.dumps(entries))\n"
+    )
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", sys.executable, "-c", script, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+        raise PermissionError(result.stderr.strip() if result.stderr else "sudo listing failed")
+    except subprocess.TimeoutExpired:
+        raise PermissionError("Directory listing timed out")
+    except json.JSONDecodeError as e:
+        raise PermissionError(f"Failed to parse directory listing: {e}")
+
+
+def _sudo_test(flag: str, path: Path) -> bool:
+    """Run sudo test for path checks that may cross protected directories."""
+    result = subprocess.run(
+        ["sudo", "-n", "test", flag, str(path)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=5,
+    )
+    return result.returncode == 0
 
 
 def read_file_bytes(path: Path) -> tuple[bool, bytes | str]:
@@ -990,6 +1079,147 @@ SHEBANG_LANGUAGE_MAP = {
     "lua": "lua", "awk": "shell", "sed": "shell",
     "bf": "brainfuck", "magma": "magma",
 }
+
+
+def check_path_is_file(
+    path: Path,
+    *,
+    allow_symlink: bool = False,
+) -> tuple[bool, str | None, int | None]:
+    """
+    Check if a path exists and is a regular file.
+    When allow_symlink is True, any symlink is also accepted.
+    Distinguishes PermissionError (403) from other OS errors (404).
+    Falls back to sudo test when direct access is blocked.
+    Returns (ok, error_message, http_status).
+    """
+    path = _normalize_path(path)
+
+    def _sudo_status() -> tuple[bool, str | None, int | None]:
+        try:
+            if _sudo_test("-f", path):
+                return True, None, None
+            if allow_symlink and _sudo_test("-L", path):
+                return True, None, None
+            if _sudo_test("-e", path):
+                return False, "Not a file", 400
+            return False, "File not found", 404
+        except Exception:
+            return False, "Permission denied", 403
+
+    try:
+        source_stat = path.lstat()
+    except PermissionError:
+        return _sudo_status()
+    except FileNotFoundError:
+        return False, "File not found", 404
+    except (OSError, RuntimeError):
+        return _sudo_status()
+
+    if allow_symlink and path.is_symlink():
+        return True, None, None
+
+    if S_ISREG(source_stat.st_mode):
+        return True, None, None
+
+    try:
+        target_stat = path.resolve(strict=False).lstat()
+    except PermissionError:
+        return _sudo_status()
+    except FileNotFoundError:
+        return _sudo_status()
+    except (OSError, RuntimeError):
+        return _sudo_status()
+
+    if S_ISREG(target_stat.st_mode):
+        return True, None, None
+    return False, "Not a file", 400
+
+
+def check_path_is_directory(path: Path) -> tuple[bool, str | None, int | None]:
+    """
+    Check if a path exists and resolves to a directory.
+    Falls back to sudo test when direct access is blocked.
+    Returns (ok, error_message, http_status).
+    """
+    path = _normalize_path(path)
+
+    def _sudo_status() -> tuple[bool, str | None, int | None]:
+        try:
+            if _sudo_test("-d", path):
+                return True, None, None
+            if _sudo_test("-e", path) or _sudo_test("-L", path):
+                return False, "Not a directory", 400
+            return False, "Path does not exist", 404
+        except Exception:
+            return False, "Permission denied", 403
+
+    try:
+        source_stat = path.lstat()
+    except PermissionError:
+        return _sudo_status()
+    except FileNotFoundError:
+        return False, "Path does not exist", 404
+    except (OSError, RuntimeError):
+        return _sudo_status()
+
+    if S_ISDIR(source_stat.st_mode):
+        return True, None, None
+
+    try:
+        target_stat = path.resolve(strict=False).lstat()
+    except PermissionError:
+        return _sudo_status()
+    except FileNotFoundError:
+        return _sudo_status()
+    except (OSError, RuntimeError):
+        return _sudo_status()
+
+    if S_ISDIR(target_stat.st_mode):
+        return True, None, None
+    return False, "Not a directory", 400
+
+
+def check_path_exists(path: Path) -> tuple[bool, str | None, int | None]:
+    """
+    Check if a path exists (as any type, including broken symlinks).
+    Distinguishes PermissionError (403) from other OS errors (404).
+    Falls back to sudo test -e when direct access is blocked.
+    Returns (ok, error_message, http_status).
+    """
+    path = _normalize_path(path)
+
+    try:
+        path.lstat()
+    except PermissionError:
+        try:
+            if _sudo_test("-e", path) or _sudo_test("-L", path):
+                return True, None, None
+            return False, "Not found", 404
+        except Exception:
+            return False, "Permission denied", 403
+    except OSError:
+        return False, "Not found", 404
+    return True, None, None
+
+
+def get_file_size(path: Path) -> int | None:
+    """Get file size in bytes. Falls back to sudo stat if direct access fails."""
+    try:
+        return path.stat().st_size
+    except PermissionError:
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "stat", "-c", "%s", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return int(result.stdout.strip())
+        except Exception:
+            pass
+    return None
 
 
 def resolve_request_path(raw_path: str, field_name: str = "path") -> tuple[Path | None, str | None]:
