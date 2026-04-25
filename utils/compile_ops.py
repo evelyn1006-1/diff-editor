@@ -33,6 +33,7 @@ COMPILE_LANGUAGE_CONFIGS: dict[str, dict[str, object]] = {
         "optimization_label": "Optimize (-O2)",
         "supports_warnings": True,
         "warning_label": "Extra warnings (-Wall -Wextra)",
+        "supports_cross_compile": True,
     },
     "cpp": {
         "label": "C++",
@@ -41,6 +42,7 @@ COMPILE_LANGUAGE_CONFIGS: dict[str, dict[str, object]] = {
         "optimization_label": "Optimize (-O2)",
         "supports_warnings": True,
         "warning_label": "Extra warnings (-Wall -Wextra)",
+        "supports_cross_compile": True,
     },
     "go": {
         "label": "Go",
@@ -49,6 +51,7 @@ COMPILE_LANGUAGE_CONFIGS: dict[str, dict[str, object]] = {
         "optimization_label": None,
         "supports_warnings": False,
         "warning_label": None,
+        "supports_cross_compile": True,
     },
     "java": {
         "label": "Java",
@@ -57,6 +60,7 @@ COMPILE_LANGUAGE_CONFIGS: dict[str, dict[str, object]] = {
         "optimization_label": None,
         "supports_warnings": True,
         "warning_label": "Lint warnings (-Xlint)",
+        "supports_cross_compile": False,
     },
     "rust": {
         "label": "Rust",
@@ -65,6 +69,7 @@ COMPILE_LANGUAGE_CONFIGS: dict[str, dict[str, object]] = {
         "optimization_label": "Optimize (-O)",
         "supports_warnings": False,
         "warning_label": None,
+        "supports_cross_compile": True,
     },
     "csharp": {
         "label": "C#",
@@ -73,6 +78,7 @@ COMPILE_LANGUAGE_CONFIGS: dict[str, dict[str, object]] = {
         "optimization_label": "Optimize (-optimize+)",
         "supports_warnings": True,
         "warning_label": "Higher warning level (-warn:4)",
+        "supports_cross_compile": False,
     },
 }
 
@@ -270,6 +276,115 @@ def has_dotnet_sdk() -> bool:
     return bool(result.stdout.strip())
 
 
+def _detect_c_cross_targets() -> list[dict[str, str]]:
+    """Scan PATH for C cross-compilers matching *-gcc or *-cc."""
+    targets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for bindir in os.environ.get("PATH", "").split(os.pathsep):
+        if not bindir or not os.path.isdir(bindir):
+            continue
+        try:
+            entries = os.listdir(bindir)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.endswith(("-gcc", "-cc")):
+                continue
+            full = os.path.join(bindir, entry)
+            if not os.path.isfile(full) or not os.access(full, os.X_OK):
+                continue
+            prefix = entry.rsplit("-", 1)[0]
+            if prefix and prefix not in seen and not re.fullmatch(r"c\d{2}", prefix):
+                seen.add(prefix)
+                targets.append({"value": prefix, "label": prefix})
+    return sorted(targets, key=lambda t: t["value"])
+
+
+def _detect_cpp_cross_targets() -> list[dict[str, str]]:
+    """Scan PATH for C++ cross-compilers matching *-g++ or *-c++."""
+    targets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for bindir in os.environ.get("PATH", "").split(os.pathsep):
+        if not bindir or not os.path.isdir(bindir):
+            continue
+        try:
+            entries = os.listdir(bindir)
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.endswith(("-g++", "-c++")):
+                continue
+            full = os.path.join(bindir, entry)
+            if not os.path.isfile(full) or not os.access(full, os.X_OK):
+                continue
+            prefix = entry.rsplit("-", 1)[0]
+            if prefix and prefix not in seen:
+                seen.add(prefix)
+                targets.append({"value": prefix, "label": prefix})
+    return sorted(targets, key=lambda t: t["value"])
+
+
+def _detect_go_targets() -> list[dict[str, str]]:
+    """Return all GOOS/GOARCH pairs supported by the installed Go toolchain."""
+    if not command_exists("go"):
+        return []
+    try:
+        result = subprocess.run(
+            ["go", "tool", "dist", "list"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    targets: list[dict[str, str]] = []
+    for line in result.stdout.strip().splitlines():
+        line = line.strip()
+        if line and "/" in line:
+            targets.append({"value": line, "label": line})
+    return targets
+
+
+def _detect_rust_targets() -> list[dict[str, str]]:
+    """Return installed Rust target triples."""
+    if command_exists("rustup"):
+        try:
+            result = subprocess.run(
+                ["rustup", "target", "list", "--installed"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            targets: list[dict[str, str]] = []
+            for line in result.stdout.strip().splitlines():
+                line = line.strip()
+                if line:
+                    targets.append({"value": line, "label": line})
+            return targets
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if command_exists("rustc"):
+        try:
+            result = subprocess.run(
+                ["rustc", "--print", "target-list"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            targets = []
+            for line in result.stdout.strip().splitlines():
+                line = line.strip()
+                if line:
+                    targets.append({"value": line, "label": line})
+            return targets
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return []
+
+
 def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], int]:
     """Return compile-tooling availability for browser-compilable languages."""
     normalized = (language or "").strip().lower()
@@ -279,7 +394,12 @@ def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], in
     if normalized == "c":
         compiler = find_first_command("gcc", "cc")
         if compiler:
-            return {"available": True, "compiler": compiler}, 200
+            return {
+                "available": True,
+                "compiler": compiler,
+                "supports_cross_compile": True,
+                "cross_compile_targets": _detect_c_cross_targets(),
+            }, 200
         return {
             "available": False,
             "error": "C compilation requires gcc.",
@@ -289,7 +409,12 @@ def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], in
     if normalized == "cpp":
         compiler = find_first_command("g++", "c++")
         if compiler:
-            return {"available": True, "compiler": compiler}, 200
+            return {
+                "available": True,
+                "compiler": compiler,
+                "supports_cross_compile": True,
+                "cross_compile_targets": _detect_cpp_cross_targets(),
+            }, 200
         return {
             "available": False,
             "error": "C++ compilation requires g++.",
@@ -298,7 +423,12 @@ def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], in
 
     if normalized == "go":
         if command_exists("go"):
-            return {"available": True, "compiler": "go"}, 200
+            return {
+                "available": True,
+                "compiler": "go",
+                "supports_cross_compile": True,
+                "cross_compile_targets": _detect_go_targets(),
+            }, 200
         return {
             "available": False,
             "error": "Go compilation requires the Go toolchain.",
@@ -309,7 +439,13 @@ def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], in
         javac = find_first_command("javac")
         jar = find_first_command("jar")
         if javac and jar:
-            return {"available": True, "compiler": javac, "archiver": jar}, 200
+            return {
+                "available": True,
+                "compiler": javac,
+                "archiver": jar,
+                "supports_cross_compile": False,
+                "cross_compile_targets": [],
+            }, 200
         return {
             "available": False,
             "error": "Java compilation requires javac and jar from a JDK.",
@@ -318,7 +454,12 @@ def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], in
 
     if normalized == "rust":
         if command_exists("rustc"):
-            return {"available": True, "compiler": "rustc"}, 200
+            return {
+                "available": True,
+                "compiler": "rustc",
+                "supports_cross_compile": True,
+                "cross_compile_targets": _detect_rust_targets(),
+            }, 200
         return {
             "available": False,
             "error": "Rust compilation requires rustc.",
@@ -328,7 +469,12 @@ def compute_compile_tooling_status(language: str) -> tuple[dict[str, object], in
     if normalized == "csharp":
         compiler = find_first_command("csc", "mono-csc", "cli-csc", "mcs")
         if compiler:
-            return {"available": True, "compiler": compiler}, 200
+            return {
+                "available": True,
+                "compiler": compiler,
+                "supports_cross_compile": False,
+                "cross_compile_targets": [],
+            }, 200
         return {
             "available": False,
             "error": "C# compilation requires csc or Mono's mcs.",
@@ -397,15 +543,24 @@ def _run_compile_command(
     cwd: Path,
     timeout: int,
     use_sudo: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a compile command, optionally through passwordless sudo."""
-    run_cmd = ["sudo", "-n", *cmd] if use_sudo else cmd
+    if use_sudo and env:
+        env_cmd = ["env", *[f"{key}={value}" for key, value in env.items()]]
+        run_cmd = ["sudo", "-n", *env_cmd, *cmd]
+    elif use_sudo:
+        run_cmd = ["sudo", "-n", *cmd]
+    else:
+        run_cmd = cmd
     run_kwargs: dict[str, object] = {
         "cwd": str(cwd),
         "capture_output": True,
         "text": True,
         "timeout": timeout,
     }
+    if env is not None:
+        run_kwargs["env"] = env
     if use_sudo:
         run_kwargs["stdin"] = subprocess.DEVNULL
     return subprocess.run(run_cmd, **run_kwargs)
@@ -433,12 +588,14 @@ def compile_source_file(
     *,
     optimize: bool = False,
     warnings: bool = False,
+    cross_compile_target: str | None = None,
 ) -> tuple[bool, str]:
     """Compile a source file to the requested output path."""
     language = str(compile_context.get("language") or "")
     compiler = str(tooling_status.get("compiler") or "")
     timeout = 300
     use_sudo = _compile_requires_sudo(source_path, target_path, compile_context)
+    cross = (cross_compile_target or "").strip()
 
     try:
         if language == "java":
@@ -490,15 +647,27 @@ def compile_source_file(
                     _prepare_sudo_tempdir_for_cleanup(temp_dir)
                 temp_dir_obj.cleanup()
 
+        env: dict[str, str] | None = None
+
         if language == "c":
-            cmd = [compiler or "gcc"]
+            if cross:
+                cmd = [f"{cross}-gcc"]
+                if not command_exists(cmd[0]):
+                    cmd = [f"{cross}-cc"]
+            else:
+                cmd = [compiler or "gcc"]
             if optimize:
                 cmd.append("-O2")
             if warnings:
                 cmd.extend(["-Wall", "-Wextra"])
             cmd.extend([str(source_path), "-o", str(target_path)])
         elif language == "cpp":
-            cmd = [compiler or "g++"]
+            if cross:
+                cmd = [f"{cross}-g++"]
+                if not command_exists(cmd[0]):
+                    cmd = [f"{cross}-c++"]
+            else:
+                cmd = [compiler or "g++"]
             if optimize:
                 cmd.append("-O2")
             if warnings:
@@ -511,10 +680,20 @@ def compile_source_file(
                 if str(p).strip()
             ]
             cmd = [compiler or "go", "build", "-o", str(target_path), *go_input_paths]
+            if cross:
+                parts = cross.split("/")
+                if len(parts) == 2:
+                    env = dict(os.environ)
+                    env["GOOS"] = parts[0]
+                    env["GOARCH"] = parts[1]
+                else:
+                    return False, f"Invalid Go cross-compile target: {cross}"
         elif language == "rust":
             cmd = [compiler or "rustc"]
             if optimize:
                 cmd.append("-O")
+            if cross:
+                cmd.extend(["--target", cross])
             cmd.extend([str(source_path), "-o", str(target_path)])
         elif language == "csharp":
             cmd = [compiler or "csc"]
@@ -531,6 +710,7 @@ def compile_source_file(
             cwd=source_path.parent,
             timeout=timeout,
             use_sudo=use_sudo,
+            env=env,
         )
         output = _combine_subprocess_output(result.stdout, result.stderr)
         if result.returncode != 0:

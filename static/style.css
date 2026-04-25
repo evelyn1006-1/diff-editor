@@ -940,6 +940,17 @@ textarea.copy-input:disabled {
     cursor: pointer;
 }
 
+.copy-select {
+    font-family: 'Comic Neue', sans-serif;
+    font-size: 0.9rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 0.35rem;
+    background: var(--input-bg);
+    color: var(--text);
+    width: 100%;
+}
+
 .copy-error {
     font-family: 'Comic Neue', sans-serif;
     font-size: 0.85rem;

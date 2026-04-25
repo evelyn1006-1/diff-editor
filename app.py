@@ -990,6 +990,8 @@ def create_app() -> Flask:
         warnings = bool(data.get("warnings", False))
         create_dirs = bool(data.get("create_dirs", False))
         overwrite = bool(data.get("overwrite", False))
+        cross_compile_enabled = bool(data.get("cross_compile_enabled", False))
+        cross_compile_target = str(data.get("cross_compile_target", "")).strip() or None
 
         if not file_path:
             return jsonify({"error": "No path specified"}), 400
@@ -1022,6 +1024,18 @@ def create_app() -> Flask:
             return jsonify(tooling_status), http_status
         if not tooling_status.get("available"):
             return jsonify(tooling_status), 400
+
+        if cross_compile_enabled:
+            if not tooling_status.get("supports_cross_compile"):
+                return jsonify({"error": "Cross-compilation is not supported for this language"}), 400
+            if not cross_compile_target:
+                return jsonify({"error": "Select a cross-compile target"}), 400
+
+        if cross_compile_target:
+            available_targets = tooling_status.get("cross_compile_targets") or []
+            valid_targets = {str(t.get("value")) for t in available_targets}
+            if cross_compile_target not in valid_targets:
+                return jsonify({"error": f"Cross-compile target '{cross_compile_target}' is not available"}), 400
 
         output_dir_raw = directory or str(path.parent)
         output_dir, error = resolve_request_path(output_dir_raw, "directory")
@@ -1065,6 +1079,7 @@ def create_app() -> Flask:
             tooling_status,
             optimize=optimize,
             warnings=warnings,
+            cross_compile_target=cross_compile_target,
         )
         if not success:
             return jsonify({"error": compiler_output or "Compilation failed"}), 400

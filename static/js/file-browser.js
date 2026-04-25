@@ -1567,7 +1567,17 @@ async function compileFile(path, name) {
 
     const supportsOptimization = Boolean(compileInfo.supports_optimization);
     const supportsWarnings = Boolean(compileInfo.supports_warnings);
+    const crossTargets = compileInfo.cross_compile_targets || [];
+    const supportsCrossCompile = Boolean(compileInfo.supports_cross_compile) && crossTargets.length > 0;
+    const crossCompileHtml = supportsCrossCompile ? `
+        <label class="copy-option"><input type="checkbox" class="chk-cross-compile"> Cross-compile</label>
+        <select class="copy-select cross-target-select" style="display:none; margin-bottom:0.3rem;">
+            <option value="">Select target...</option>
+            ${crossTargets.map(t => `<option value="${escapeHtml(t.value)}">${escapeHtml(t.label)}</option>`).join('')}
+        </select>
+    ` : '';
     const optionHtml = `
+        ${crossCompileHtml}
         ${supportsOptimization ? `<label class="copy-option"><input type="checkbox" class="chk-optimize"> ${escapeHtml(compileInfo.optimization_label || 'Optimize')}</label>` : ''}
         ${supportsWarnings ? `<label class="copy-option"><input type="checkbox" class="chk-warnings" checked> ${escapeHtml(compileInfo.warning_label || 'Warnings')}</label>` : ''}
     `;
@@ -1599,6 +1609,8 @@ async function compileFile(path, name) {
     const nameInput = overlay.querySelector('.copy-name-input');
     const chkOptimize = overlay.querySelector('.chk-optimize');
     const chkWarnings = overlay.querySelector('.chk-warnings');
+    const chkCrossCompile = overlay.querySelector('.chk-cross-compile');
+    const crossTargetSelect = overlay.querySelector('.cross-target-select');
 
     dirInput.value = compileInfo.default_directory || currentPath;
     nameInput.value = compileInfo.default_name || name.replace(/\.[^.]+$/, '');
@@ -1612,6 +1624,22 @@ async function compileFile(path, name) {
     function resetActionButton() {
         actionBtn.disabled = false;
         actionBtn.textContent = 'Compile';
+    }
+
+    if (chkCrossCompile && crossTargetSelect) {
+        chkCrossCompile.addEventListener('change', () => {
+            crossTargetSelect.style.display = chkCrossCompile.checked ? 'block' : 'none';
+            if (!chkCrossCompile.checked) {
+                crossTargetSelect.value = '';
+            }
+        });
+        crossTargetSelect.addEventListener('change', () => {
+            const target = crossTargetSelect.value;
+            const isWindows = target.startsWith('windows/') || target.includes('mingw');
+            if (isWindows && !nameInput.value.endsWith('.exe')) {
+                nameInput.value += '.exe';
+            }
+        });
     }
 
     if (!compileInfo.available) {
@@ -1635,6 +1663,10 @@ async function compileFile(path, name) {
             showModalError(errorEl, 'Output name cannot be empty.');
             return;
         }
+        if (chkCrossCompile?.checked && !crossTargetSelect?.value) {
+            showModalError(errorEl, 'Select a cross-compile target.');
+            return;
+        }
 
         submitting = true;
         actionBtn.disabled = true;
@@ -1647,6 +1679,8 @@ async function compileFile(path, name) {
                 name: trimmedName,
                 optimize: Boolean(chkOptimize?.checked),
                 warnings: Boolean(chkWarnings?.checked),
+                cross_compile_enabled: Boolean(chkCrossCompile?.checked),
+                cross_compile_target: crossTargetSelect?.value || undefined,
                 overwrite: chkOverwrite.checked,
                 create_dirs: chkCreateDirs.checked,
             });
