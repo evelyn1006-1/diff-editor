@@ -627,15 +627,15 @@ def read_pty_output(socketio, session_id: str):
 
 def get_session_cwd(session) -> str:
     """Best-effort current working directory for the shell process."""
-    if session and getattr(session, "effective_cwd", None):
-        return session.effective_cwd
-    if session and session.pid:
+    if session and session.pid and not getattr(session, "is_root", False):
         try:
             cwd = os.readlink(f"/proc/{session.pid}/cwd")
             session.effective_cwd = cwd
             return cwd
         except OSError:
             pass
+    if session and getattr(session, "effective_cwd", None):
+        return session.effective_cwd
     return os.path.expanduser("~")
 
 
