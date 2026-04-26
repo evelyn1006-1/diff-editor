@@ -11,7 +11,7 @@
         <nav>
             <a href="/diff/" class="logo">Terminal</a>
             <span class="spacer"></span>
-            <span class="terminal-title">{{ cwd or '~' }}</span>
+            <span class="terminal-title">{{ ('root@' ~ cwd) if root_terminal else (cwd or '~') }}</span>
             <span id="status" class="status">Connecting...</span>
             <button id="btn-raise-terminal" title="Raise or lower terminal panel">Raise Panel</button>
             <button id="btn-clear" title="Clear output">Clear</button>
@@ -267,7 +267,11 @@
         </div>
     </main>
     <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.4/dist/socket.io.min.js"></script>
-    <script>window.AUTO_CMD = {{ auto_cmd | default('') | tojson }};</script>
+    <script>
+        window.AUTO_CMD = {{ auto_cmd | default('') | tojson }};
+        window.TERMINAL_CWD = {{ cwd | default('') | tojson }};
+        window.TERMINAL_ROOT = {{ root_terminal | default(false) | tojson }};
+    </script>
     <script src="{{ static_url('js/terminal.js') }}"></script>
 </body>
 </html>

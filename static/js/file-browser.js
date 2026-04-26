@@ -721,6 +721,8 @@ function initFileBrowser(defaultRoot) {
     document.getElementById('btn-up').addEventListener('click', goUp);
     document.getElementById('show-hidden').addEventListener('change', () => loadDirectory(currentPath));
     document.getElementById('btn-empty-recycle-bin')?.addEventListener('click', emptyRecycleBin);
+    initBrowserTerminalModal();
+    initTerminalDropdown();
 
     // "New" dropdown
     const btnNew = document.getElementById('btn-new');
@@ -730,8 +732,9 @@ function initFileBrowser(defaultRoot) {
         dropdown.classList.toggle('open');
     });
     document.addEventListener('click', () => {
-        dropdown.classList.remove('open');
+        document.querySelectorAll('.dropdown-menu.open').forEach(d => d.classList.remove('open'));
         document.querySelectorAll('.actions-dropdown.open').forEach(d => d.classList.remove('open'));
+        document.getElementById('btn-terminal-menu')?.setAttribute('aria-expanded', 'false');
     });
     dropdown.addEventListener('click', (e) => e.stopPropagation());
 
@@ -749,6 +752,179 @@ function initFileBrowser(defaultRoot) {
     });
 
     loadDirectory(currentPath);
+}
+
+function initTerminalDropdown() {
+    const menuBtn = document.getElementById('btn-terminal-menu');
+    const dropdown = document.getElementById('terminal-dropdown');
+    const fullTerminalBtn = document.getElementById('btn-terminal-page');
+    const rootModalBtn = document.getElementById('btn-terminal-root-modal');
+    const rootTerminalBtn = document.getElementById('btn-terminal-root');
+
+    if (!menuBtn || !dropdown || !fullTerminalBtn || !rootModalBtn || !rootTerminalBtn) {
+        return;
+    }
+
+    menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const willOpen = !dropdown.classList.contains('open');
+        document.querySelectorAll('.dropdown-menu.open').forEach((menu) => {
+            if (menu !== dropdown) {
+                menu.classList.remove('open');
+            }
+        });
+        dropdown.classList.toggle('open', willOpen);
+        menuBtn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+    });
+
+    dropdown.addEventListener('click', (e) => e.stopPropagation());
+    fullTerminalBtn.addEventListener('click', () => {
+        window.location.href = '/terminal';
+    });
+    rootModalBtn.addEventListener('click', () => {
+        dropdown.classList.remove('open');
+        menuBtn.setAttribute('aria-expanded', 'false');
+        window.openBrowserTerminalModal?.({ root: true, force: true });
+    });
+    rootTerminalBtn.addEventListener('click', () => {
+        window.location.href = '/terminal?root=1';
+    });
+}
+
+function initBrowserTerminalModal() {
+    const terminalBtn = document.getElementById('btn-terminal');
+    const overlay = document.getElementById('browser-terminal-overlay');
+    const frame = document.getElementById('browser-terminal-frame');
+    const restoreBtn = document.getElementById('btn-browser-terminal-restore');
+    const titleEl = document.getElementById('browser-terminal-title');
+    const popup = overlay?.querySelector('.run-terminal-popup');
+    const resizeHandle = document.getElementById('browser-terminal-resize-handle');
+
+    if (!terminalBtn || !overlay || !frame || !restoreBtn || !titleEl || !popup || !resizeHandle) {
+        return;
+    }
+
+    function hasOpenTerminal() {
+        return frame.getAttribute('src') && frame.getAttribute('src') !== 'about:blank';
+    }
+
+    function closeTerminal() {
+        setTerminalCompact(false);
+        overlay.classList.add('hidden');
+        restoreBtn.classList.add('hidden');
+        frame.src = 'about:blank';
+        titleEl.textContent = 'Terminal';
+    }
+
+    function minimizeTerminal() {
+        if (!hasOpenTerminal()) {
+            return;
+        }
+        setTerminalCompact(false);
+        overlay.classList.add('hidden');
+        restoreBtn.classList.remove('hidden');
+    }
+
+    function restoreTerminal() {
+        if (!hasOpenTerminal()) {
+            openTerminal();
+            return;
+        }
+        setTerminalCompact(false);
+        restoreBtn.classList.add('hidden');
+        overlay.classList.remove('hidden');
+    }
+
+    function setTerminalCompact(compact) {
+        if (compact) {
+            popup.dataset.expandedHeight = popup.style.height || popup.dataset.expandedHeight || '';
+            popup.style.height = '';
+        } else if (popup.dataset.expandedHeight) {
+            popup.style.height = popup.dataset.expandedHeight;
+        }
+        overlay.classList.toggle('semi-minimized', compact);
+        frame.contentWindow?.postMessage({ type: 'terminal-compact-mode', compact }, window.location.origin);
+    }
+
+    function semiMinimizeTerminal() {
+        if (!hasOpenTerminal()) {
+            return;
+        }
+        restoreBtn.classList.add('hidden');
+        overlay.classList.remove('hidden');
+        setTerminalCompact(true);
+    }
+
+    function openTerminal({ root = false, force = false } = {}) {
+        const pathInputValue = document.getElementById('path-input')?.value.trim();
+        const cwd = normalizeDirectoryPath((root ? pathInputValue : currentPath) || currentPath || '/');
+        const url = root
+            ? `/terminal?root=1&cwd=${encodeURIComponent(cwd)}`
+            : `/terminal?cwd=${encodeURIComponent(cwd)}`;
+        if (!hasOpenTerminal() || force) {
+            frame.src = url;
+            titleEl.textContent = root ? `Root Terminal - ${cwd}` : `Terminal - ${cwd}`;
+        }
+        setTerminalCompact(false);
+        restoreBtn.classList.add('hidden');
+        overlay.classList.remove('hidden');
+    }
+
+    function applyResizeHeight(clientY) {
+        const newHeight = window.innerHeight - clientY;
+        const clamped = Math.max(150, Math.min(newHeight, window.innerHeight - 40));
+        popup.style.height = `${clamped}px`;
+    }
+
+    terminalBtn.addEventListener('click', openTerminal);
+    window.openBrowserTerminalModal = openTerminal;
+    document.getElementById('btn-browser-terminal-close').addEventListener('click', closeTerminal);
+    document.getElementById('btn-browser-terminal-semi').addEventListener('click', semiMinimizeTerminal);
+    document.getElementById('btn-browser-terminal-minimize').addEventListener('click', minimizeTerminal);
+    restoreBtn.addEventListener('click', restoreTerminal);
+    frame.addEventListener('load', () => {
+        if (overlay.classList.contains('semi-minimized')) {
+            setTerminalCompact(true);
+        }
+    });
+    document.getElementById('btn-browser-terminal-popout').addEventListener('click', () => {
+        const src = frame.getAttribute('src');
+        if (src && src !== 'about:blank') {
+            window.open(src, '_blank');
+        }
+        closeTerminal();
+    });
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) {
+            minimizeTerminal();
+        }
+    });
+
+    resizeHandle.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        frame.style.pointerEvents = 'none';
+        const onMouseMove = (moveEvent) => applyResizeHeight(moveEvent.clientY);
+        const onMouseUp = () => {
+            frame.style.pointerEvents = '';
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        };
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+
+    resizeHandle.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        frame.style.pointerEvents = 'none';
+        const onTouchMove = (moveEvent) => applyResizeHeight(moveEvent.touches[0].clientY);
+        const onTouchEnd = () => {
+            frame.style.pointerEvents = '';
+            document.removeEventListener('touchmove', onTouchMove);
+            document.removeEventListener('touchend', onTouchEnd);
+        };
+        document.addEventListener('touchmove', onTouchMove, { passive: false });
+        document.addEventListener('touchend', onTouchEnd);
+    }, { passive: false });
 }
 
 async function loadDirectory(path) {

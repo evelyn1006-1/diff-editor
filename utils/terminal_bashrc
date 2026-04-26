@@ -1,0 +1,23 @@
+# Source the user's normal interactive bash setup first, then append the
+# browser terminal cwd marker so backend helpers can track shell cwd changes.
+if [ -r ~/.bashrc ] && [ -z "${DET_TERMINAL_IN_RC:-}" ]; then
+    export DET_TERMINAL_IN_RC=1
+    . ~/.bashrc
+    unset DET_TERMINAL_IN_RC
+fi
+
+__det_emit_cwd() {
+    local __det_pwd
+    [ -n "${__det_cwd_token:-}" ] || return 0
+    __det_pwd="$(printf '%s' "$PWD" | base64 | tr -d '\n')"
+    printf '\033]777;cwd=%s:%s\a' "$__det_cwd_token" "$__det_pwd"
+}
+
+__det_cwd_token="${DET_TERMINAL_CWD_TOKEN:-}"
+unset DET_TERMINAL_CWD_TOKEN
+
+if declare -p PROMPT_COMMAND >/dev/null 2>&1 && [[ "$(declare -p PROMPT_COMMAND)" == declare\ -a* || "$(declare -p PROMPT_COMMAND)" == declare\ -A* ]]; then
+    PROMPT_COMMAND=(__det_emit_cwd "${PROMPT_COMMAND[@]}")
+else
+    PROMPT_COMMAND="__det_emit_cwd${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+fi

@@ -6,6 +6,20 @@ let socket = null;
 let currentCwd = '~';
 let terminalToken = null;  // Secret token for authenticated terminal requests
 
+window.addEventListener('message', (event) => {
+    if (event.origin !== window.location.origin) {
+        return;
+    }
+    if (event.data?.type !== 'terminal-compact-mode') {
+        return;
+    }
+    const compact = Boolean(event.data.compact);
+    document.body.classList.toggle('terminal-compact', compact);
+    if (compact) {
+        requestAnimationFrame(() => document.getElementById('terminal-input')?.focus());
+    }
+});
+
 // Command history for textbox-based navigation
 const commandHistory = [];
 let historyIndex = -1;
@@ -37,13 +51,25 @@ function connect() {
         return;
     }
 
-    socket = io('/terminal', {
+    const socketOptions = {
         path: socketPath,
         transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionAttempts: 5,
         reconnectionDelay: 1000,
-    });
+    };
+    const socketQuery = {};
+    if (window.TERMINAL_CWD) {
+        socketQuery.cwd = window.TERMINAL_CWD;
+    }
+    if (window.TERMINAL_ROOT) {
+        socketQuery.root = '1';
+    }
+    if (Object.keys(socketQuery).length > 0) {
+        socketOptions.query = socketQuery;
+    }
+
+    socket = io('/terminal', socketOptions);
 
     socket.on('connect', () => {
         statusEl.textContent = 'Connected';

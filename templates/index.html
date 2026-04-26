@@ -4,7 +4,15 @@
 
 {% block nav %}
 <button id="btn-about" title="About this app">About</button>
-<button id="btn-terminal" class="btn-primary" title="Open terminal" onclick="location.href='/terminal'">Terminal</button>
+<div class="terminal-split dropdown-wrap">
+    <button id="btn-terminal" class="btn-primary terminal-split-main" title="Open terminal here">Terminal</button>
+    <button id="btn-terminal-menu" class="btn-primary terminal-split-toggle" title="More terminal options" aria-expanded="false">▾</button>
+    <div id="terminal-dropdown" class="dropdown-menu terminal-dropdown">
+        <button class="dropdown-item" id="btn-terminal-page">Full Terminal</button>
+        <button class="dropdown-item" id="btn-terminal-root-modal">Root Terminal</button>
+        <button class="dropdown-item" id="btn-terminal-root">Full Root Terminal</button>
+    </div>
+</div>
 <button id="btn-empty-recycle-bin" class="hidden" title="Permanently empty the recycle bin">Empty Recycle Bin</button>
 {% endblock %}
 
@@ -38,6 +46,23 @@
         <div class="loading">Loading...</div>
     </div>
 </div>
+
+<div id="browser-terminal-overlay" class="run-terminal-overlay hidden">
+    <div class="run-terminal-popup">
+        <div id="browser-terminal-resize-handle" class="run-terminal-resize-handle"></div>
+        <div class="run-terminal-header">
+            <span id="browser-terminal-title" class="run-terminal-title">Terminal</span>
+            <div class="run-terminal-controls">
+                <button id="btn-browser-terminal-popout" class="run-terminal-popout-btn" title="Open in new tab">↗</button>
+                <button id="btn-browser-terminal-semi" class="run-terminal-semi-btn" title="Semi-minimize">▔</button>
+                <button id="btn-browser-terminal-minimize" class="run-terminal-minimize-btn" title="Minimize">─</button>
+                <button id="btn-browser-terminal-close" class="run-terminal-close-btn" title="Close">&times;</button>
+            </div>
+        </div>
+        <iframe id="browser-terminal-frame" class="run-terminal-frame"></iframe>
+    </div>
+</div>
+<button id="btn-browser-terminal-restore" class="run-terminal-restore hidden" title="Restore terminal">▶ Terminal</button>
 
 <div id="about-modal" class="modal-overlay hidden" aria-hidden="true">
     <div class="modal-dialog about-modal" role="dialog" aria-modal="true" aria-labelledby="about-title">

@@ -19,6 +19,7 @@ from app_runtime import TERMINAL_SERVER_URL
 
 _WRAPPER_PATH = str(Path(__file__).resolve().parent / "editor_wrapper.py")
 _PAGER_WRAPPER_PATH = str(Path(__file__).resolve().parent / "pager_wrapper.py")
+_BASH_RCFILE_PATH = str(Path(__file__).resolve().parent / "terminal_bashrc")
 _EDITOR_CMD = _WRAPPER_PATH
 _PAGER_CMD = _PAGER_WRAPPER_PATH
 _EDITOR_ENV_VARS = (
@@ -43,15 +44,26 @@ _PAGER_ENV_VARS = (
 class PTYSession:
     """Manages a single PTY session."""
 
-    def __init__(self, shell: str = "/bin/bash", shell_args: list[str] = None, cwd: str = None, session_id: str = ""):
+    def __init__(
+        self,
+        shell: str = "/bin/bash",
+        shell_args: list[str] = None,
+        cwd: str = None,
+        session_id: str = "",
+        effective_cwd: str = None,
+        is_root: bool = False,
+    ):
         self.shell = shell
         self.shell_args = shell_args or []
         self.cwd = cwd or os.path.expanduser("~")
+        self.effective_cwd = effective_cwd or self.cwd
+        self.is_root = is_root
         self.session_id = session_id
         self.master_fd: Optional[int] = None
         self.pid: Optional[int] = None
         self.alive = False
         self.token = secrets.token_hex(32)  # 256-bit secret for request validation
+        self.cwd_marker_token = secrets.token_hex(16)
 
     def spawn(self) -> bool:
         """Spawn a new PTY process."""
@@ -69,11 +81,15 @@ class PTYSession:
                 # Route editor invocations (git commit, crontab -e, etc.) to the browser modal.
                 env["TERMINAL_SESSION_ID"] = self.session_id
                 env["TERMINAL_SERVER_URL"] = TERMINAL_SERVER_URL
+                env["DET_TERMINAL_CWD_TOKEN"] = self.cwd_marker_token
                 for key in _EDITOR_ENV_VARS:
                     env[key] = _EDITOR_CMD
                 for key in _PAGER_ENV_VARS:
                     env[key] = _PAGER_CMD
-                argv = [self.shell] + self.shell_args
+                shell_args = list(self.shell_args)
+                if os.path.basename(self.shell) == "bash" and not shell_args:
+                    shell_args = ["--rcfile", _BASH_RCFILE_PATH]
+                argv = [self.shell] + shell_args
                 os.execvpe(self.shell, argv, env)
             else:
                 # Parent process
@@ -194,13 +210,28 @@ class PTYManager:
         self.sessions: dict[str, PTYSession] = {}
         self.lock = Lock()
 
-    def create_session(self, session_id: str, shell: str = "/bin/bash", shell_args: list[str] = None, cwd: str = None) -> bool:
+    def create_session(
+        self,
+        session_id: str,
+        shell: str = "/bin/bash",
+        shell_args: list[str] = None,
+        cwd: str = None,
+        effective_cwd: str = None,
+        is_root: bool = False,
+    ) -> bool:
         """Create a new PTY session."""
         with self.lock:
             if session_id in self.sessions:
                 self.sessions[session_id].terminate()
 
-            session = PTYSession(shell=shell, shell_args=shell_args, cwd=cwd, session_id=session_id)
+            session = PTYSession(
+                shell=shell,
+                shell_args=shell_args,
+                cwd=cwd,
+                session_id=session_id,
+                effective_cwd=effective_cwd,
+                is_root=is_root,
+            )
             if session.spawn():
                 self.sessions[session_id] = session
                 return True

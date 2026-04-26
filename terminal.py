@@ -3,6 +3,7 @@ Terminal routes and SocketIO handlers.
 """
 
 import glob
+import base64
 import json
 import logging
 import logging.handlers
@@ -23,7 +24,7 @@ from flask_socketio import emit, join_room, leave_room
 from utils.pack_autocomp import find_npm_packages, find_pypi_packages
 from utils.pty_manager import PTYManager
 from utils.constants import CLOUD_COMMAND_RULES
-from utils.file_ops import check_path_is_file, read_file, write_file
+from utils.file_ops import check_path_is_file, read_file, resolve_request_path, write_file
 
 # Set up WebSocket access logging (same file as HTTP, rotation handled by rotatelog)
 LOG_DIR = Path(__file__).resolve().parent / "logs"
@@ -52,6 +53,72 @@ _socketio_ref = None  # set by init_terminal_socketio; used by HTTP routes that 
 _editor_events: dict[str, gevent.event.Event] = {}   # session_id → blocking event
 _editor_results: dict[str, dict] = {}                # session_id → {saved, content}
 _direct_editor_sessions: dict[str, dict] = {}        # session_id → {file_path, cwd}
+_CWD_MARKER_PREFIX = "\x1b]777;cwd="
+_CWD_MARKER_RE = re.compile(r"\x1b\]777;cwd=([a-f0-9]{32}):([A-Za-z0-9+/=]*)\x07")
+_BASH_RCFILE_PATH = str(Path(__file__).resolve().parent / "utils" / "terminal_bashrc")
+
+
+def _resolve_initial_terminal_cwd(raw_cwd: str | None) -> str:
+    """Resolve an optional initial terminal cwd, falling back to home."""
+    fallback = os.path.expanduser("~")
+    if not raw_cwd:
+        return fallback
+
+    path, error = resolve_request_path(raw_cwd, "cwd")
+    if error or path is None:
+        return fallback
+
+    try:
+        if path.exists() and path.is_dir():
+            return str(path)
+    except OSError:
+        pass
+    return fallback
+
+
+def _is_truthy_request_flag(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_root_terminal_cwd(raw_cwd: str | None) -> str:
+    """Resolve a root terminal cwd, validating directory access through sudo."""
+    fallback = "/root"
+    if not raw_cwd:
+        return fallback
+
+    path, error = resolve_request_path(raw_cwd, "cwd")
+    if error or path is None:
+        return fallback
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "test", "-d", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return str(path)
+    except Exception:
+        pass
+
+    try:
+        if path.exists() and path.is_dir():
+            return str(path)
+    except OSError:
+        pass
+    return fallback
+
+
+def _root_terminal_argv(cwd: str) -> tuple[str, list[str]]:
+    sudo_path = "/usr/bin/sudo" if os.path.exists("/usr/bin/sudo") else "sudo"
+    return sudo_path, [
+        "-E",
+        "-H",
+        "/bin/bash",
+        "-lc",
+        f"cd {shlex.quote(cwd)} && exec /bin/bash --rcfile {shlex.quote(_BASH_RCFILE_PATH)}",
+    ]
 
 # Commands that should redirect to diff editor
 EDITOR_COMMANDS = {"nano", "vim", "vi", "nvim", "emacs", "pico", "edit"}
@@ -360,13 +427,24 @@ def init_terminal_socketio(socketio):
     @socketio.on("connect", namespace="/terminal")
     def handle_connect():
         session_id = request.sid
-        cwd = os.path.expanduser("~")
+        root_terminal = _is_truthy_request_flag(request.args.get("root"))
+        root_cwd = _resolve_root_terminal_cwd(request.args.get("cwd")) if root_terminal else ""
+        cwd = os.path.expanduser("~") if root_terminal else _resolve_initial_terminal_cwd(request.args.get("cwd"))
+        display_cwd = f"root@{root_cwd}" if root_terminal else cwd
+        shell, shell_args = _root_terminal_argv(root_cwd) if root_terminal else ("/bin/bash", [])
         remote_addr = request.remote_addr or "-"
 
-        if pty_manager.create_session(session_id, cwd=cwd, shell="/bin/bash"):
+        if pty_manager.create_session(
+            session_id,
+            cwd=cwd,
+            shell=shell,
+            shell_args=shell_args,
+            effective_cwd=root_cwd if root_terminal else cwd,
+            is_root=root_terminal,
+        ):
             join_room(session_id)
             pty_session = pty_manager.get_session(session_id)
-            emit("connected", {"status": "ok", "cwd": cwd, "token": pty_session.token})
+            emit("connected", {"status": "ok", "cwd": display_cwd, "token": pty_session.token})
             # Start reading output
             socketio.start_background_task(read_pty_output, socketio, session_id)
             ws_logger.info(
@@ -420,7 +498,8 @@ def init_terminal_socketio(socketio):
             session.write("\n")
             return
 
-        redirect_url = check_diff_editor_redirect(command, get_session_cwd(session))
+        context_cwd = get_session_cwd(session)
+        redirect_url = check_diff_editor_redirect(command, context_cwd)
         if redirect_url:
             # Show clean terminal output without sending fake shell input.
             emit("output", {"data": f"{command}\nRedirecting to diff editor...\n"})
@@ -429,7 +508,7 @@ def init_terminal_socketio(socketio):
             session.write("\n")
             return
 
-        direct_editor = get_direct_editor_request(command, get_session_cwd(session))
+        direct_editor = get_direct_editor_request(command, context_cwd)
         if direct_editor:
             title, content, file_path, needs_path, error = direct_editor
             if error:
@@ -438,7 +517,8 @@ def init_terminal_socketio(socketio):
                 return
             _direct_editor_sessions[session_id] = {
                 "file_path": file_path,
-                "cwd": get_session_cwd(session),
+                "cwd": context_cwd,
+                "is_root": bool(getattr(session, "is_root", False)),
             }
             emit("output", {"data": f"{command}\nOpening editor...\n"})
             emit(
@@ -462,7 +542,12 @@ def init_terminal_socketio(socketio):
             return
 
         # Intercept pager commands and open a scrollable modal instead
-        pager_result = get_pager_content(command, get_session_cwd(session), session_id)
+        pager_result = get_pager_content(
+            command,
+            context_cwd,
+            session_id,
+            as_root=bool(getattr(session, "is_root", False)),
+        )
         if pager_result is not None:
             title, content = pager_result
             emit("output", {"data": f"{command}\nOpening in pager...\n"})
@@ -517,10 +602,12 @@ def init_terminal_socketio(socketio):
 def read_pty_output(socketio, session_id: str):
     """Background task to read PTY output and emit to client."""
     session = pty_manager.get_session(session_id)
+    pending = ""
 
     while session and session.alive:
         output = session.read(timeout=0.05)
         if output:
+            output, pending = _strip_cwd_markers(session, pending + output)
             socketio.emit(
                 "output",
                 {"data": output},
@@ -540,12 +627,43 @@ def read_pty_output(socketio, session_id: str):
 
 def get_session_cwd(session) -> str:
     """Best-effort current working directory for the shell process."""
+    if session and getattr(session, "effective_cwd", None):
+        return session.effective_cwd
     if session and session.pid:
         try:
-            return os.readlink(f"/proc/{session.pid}/cwd")
+            cwd = os.readlink(f"/proc/{session.pid}/cwd")
+            session.effective_cwd = cwd
+            return cwd
         except OSError:
             pass
     return os.path.expanduser("~")
+
+
+def _strip_cwd_markers(session, text: str) -> tuple[str, str]:
+    """Strip hidden prompt cwd markers from terminal output and update session context."""
+    def replace_marker(match: re.Match) -> str:
+        if match.group(1) != getattr(session, "cwd_marker_token", ""):
+            return ""
+        raw = match.group(2)
+        try:
+            decoded = base64.b64decode(raw.encode("ascii"), validate=True).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+        if decoded:
+            session.effective_cwd = decoded
+        return ""
+
+    text = _CWD_MARKER_RE.sub(replace_marker, text)
+
+    marker_start = text.rfind(_CWD_MARKER_PREFIX)
+    if marker_start != -1 and "\x07" not in text[marker_start:]:
+        return text[:marker_start], text[marker_start:]
+
+    for length in range(min(len(_CWD_MARKER_PREFIX) - 1, len(text)), 0, -1):
+        if text.endswith(_CWD_MARKER_PREFIX[:length]):
+            return text[:-length], text[-length:]
+
+    return text, ""
 
 
 def parse_intercept_command(command: str) -> tuple[list[str], int] | None:
@@ -958,7 +1076,7 @@ def _split_leading_env_assignments(parts: list[str]) -> tuple[list[str], dict[st
     return parts[idx:], env_updates
 
 
-def _run_no_pager(run_parts: list[str], cwd: str, timeout: int = 10) -> str | None:
+def _run_no_pager(run_parts: list[str], cwd: str, timeout: int = 10, *, as_root: bool = False) -> str | None:
     """Run a command and return its combined output, or None on failure."""
     argv, env_updates = _split_leading_env_assignments(run_parts)
     if not argv:
@@ -967,6 +1085,28 @@ def _run_no_pager(run_parts: list[str], cwd: str, timeout: int = 10) -> str | No
     env = None
     if env_updates:
         env = {**os.environ, **env_updates}
+
+    if as_root:
+        env_prefix = " ".join(
+            f"{key}={shlex.quote(value)}"
+            for key, value in env_updates.items()
+        )
+        command = shlex.join(argv)
+        if env_prefix:
+            command = f"{env_prefix} {command}"
+        shell_script = f"cd {shlex.quote(cwd or '/root')} && exec {command}"
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "bash", "-lc", shell_script],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=os.path.expanduser("~"),
+            )
+            output = result.stdout or result.stderr
+            return output if output.strip() else None
+        except (subprocess.TimeoutExpired, OSError):
+            return None
 
     try:
         result = subprocess.run(
@@ -1059,16 +1199,23 @@ def _pager_file_args(args: list[str]) -> list[str]:
     return files
 
 
-def _read_pager_files(file_args: list[str], cwd: str, sudo_prefix: list[str] | None = None) -> str | None:
+def _read_pager_files(
+    file_args: list[str],
+    cwd: str,
+    sudo_prefix: list[str] | None = None,
+    *,
+    as_root: bool = False,
+) -> str | None:
     """Read one or more pager file operands, optionally through a sudo prefix."""
     if not file_args:
         return None
 
     paths = [_resolve_pager_path(file_arg, cwd) for file_arg in file_args]
-    if sudo_prefix:
+    if sudo_prefix or as_root:
         contents: list[str] = []
         for file_arg, path in zip(file_args, paths):
-            content = _run_no_pager(sudo_prefix + ["cat", "--", str(path)], cwd)
+            run_parts = (sudo_prefix + ["cat", "--", str(path)]) if sudo_prefix else ["cat", "--", str(path)]
+            content = _run_no_pager(run_parts, cwd, as_root=as_root)
             if content is None:
                 return None
             if len(file_args) > 1:
@@ -1093,7 +1240,7 @@ def _read_pager_files(file_args: list[str], cwd: str, sudo_prefix: list[str] | N
     return "".join(contents)
 
 
-def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str, str] | None:
+def get_pager_content(command: str, cwd: str, session_id: str = "", *, as_root: bool = False) -> tuple[str, str] | None:
     """Return (title, content) if this is an interceptable pager command.
 
     Returns None to let the command fall through to the PTY normally
@@ -1148,7 +1295,7 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
     elif cmd in PAGER_COMMANDS:
         args = parts[idx + 1:]
         file_args = _pager_file_args(args)
-        content = _read_pager_files(file_args, cwd, sudo_prefix)
+        content = _read_pager_files(file_args, cwd, sudo_prefix, as_root=as_root)
         if content is not None:
             title = file_args[0] if len(file_args) == 1 else f"{cmd} {' '.join(file_args)}"
             out = (title, content)
@@ -1157,7 +1304,7 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
         request = _get_git_pager_request(parts, idx)
         if request is not None:
             title, run_parts = request
-            content = _run_no_pager(run_parts, cwd)
+            content = _run_no_pager(run_parts, cwd, as_root=as_root)
             if content is not None:
                 out = (title, content)
 
@@ -1170,7 +1317,7 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
             subcmd = None
         if subcmd in _SYSTEMCTL_PAGER_SUBCOMMANDS:
             run_parts = parts[:idx + 1] + ["--no-pager"] + args
-            content = _run_no_pager(run_parts, cwd)
+            content = _run_no_pager(run_parts, cwd, as_root=as_root)
             if content is not None:
                 out = (f"systemctl {subcmd}", content)
 
@@ -1178,7 +1325,7 @@ def get_pager_content(command: str, cwd: str, session_id: str = "") -> tuple[str
         args = parts[idx + 1:]
         if not any(_match_command_arg(arg, _NO_PAGER_FLAGS) in _NO_PAGER_FLAGS for arg in args):
             run_parts = parts[:idx + 1] + ["--no-pager"] + args
-            content = _run_no_pager(run_parts, cwd)
+            content = _run_no_pager(run_parts, cwd, as_root=as_root)
             if content is not None:
                 out = ("journalctl", content)
 
@@ -1218,7 +1365,10 @@ def terminal_view():
     """Render the terminal page."""
     # Optional command to auto-execute on connect
     auto_cmd = request.args.get("cmd", "")
-    return render_template("terminal.html", auto_cmd=auto_cmd)
+    root_terminal = _is_truthy_request_flag(request.args.get("root"))
+    raw_cwd = request.args.get("cwd")
+    cwd = _resolve_root_terminal_cwd(raw_cwd) if root_terminal else (_resolve_initial_terminal_cwd(raw_cwd) if raw_cwd else "")
+    return render_template("terminal.html", auto_cmd=auto_cmd, cwd=cwd, root_terminal=root_terminal)
 
 
 @terminal_bp.route("/terminal/complete")
@@ -1228,7 +1378,7 @@ def complete():
     comp_type = request.args.get("type", "path")  # "command", "path", or "argument"
     dirs_only = request.args.get("dirs_only", "false") == "true"
     session_id = request.args.get("session_id", "").strip()
-    completion_cwd = _get_completion_cwd(session_id)
+    completion_cwd, completion_as_root = _get_completion_context(session_id)
     line = request.args.get("line")
     cursor_raw = request.args.get("cursor")
     raw_words = request.args.get("raw_words", "")
@@ -1259,6 +1409,7 @@ def complete():
             line=line,
             cursor_raw=cursor_raw,
             cwd=completion_cwd,
+            as_root=completion_as_root,
             raw_words_json=raw_words,
             cword_raw=cword_raw,
         )
@@ -1323,10 +1474,10 @@ def complete():
             pass
 
     elif comp_type == "path":
-        completions = _complete_path(prefix, dirs_only, completion_cwd)
+        completions = _complete_path(prefix, dirs_only, completion_cwd, as_root=completion_as_root)
 
     elif comp_type == "argument":
-        completions = _complete_argument(command, prefix, arg_index, completion_cwd)
+        completions = _complete_argument(command, prefix, arg_index, completion_cwd, as_root=completion_as_root)
 
     method = {
         "command": "builtin-command",
@@ -1407,6 +1558,7 @@ def _complete_bash_from_request(
     line: str | None,
     cursor_raw: str | None,
     cwd: str,
+    as_root: bool,
     raw_words_json: str,
     cword_raw: str | None,
 ) -> tuple[list[str] | None, dict[str, object]]:
@@ -1459,6 +1611,7 @@ def _complete_bash_from_request(
         line=line,
         cursor=cursor,
         cwd=cwd,
+        as_root=as_root,
         comp_words=comp_words,
         cword=cword,
         meta=meta,
@@ -1470,6 +1623,7 @@ def _complete_with_bash(
     line: str,
     cursor: int,
     cwd: str,
+    as_root: bool,
     comp_words: list[str],
     cword: int,
     meta: dict[str, object],
@@ -1502,10 +1656,16 @@ printf '%s\\0' "${{COMPREPLY[@]}}"
 """
 
     try:
+        argv = ["bash", "--noprofile", "--norc", "-c", shell_script]
+        run_cwd = None
+        if as_root:
+            argv = ["sudo", "-n"] + argv
+            run_cwd = os.path.expanduser("~")
         result = subprocess.run(
-            ["bash", "--noprofile", "--norc", "-c", shell_script],
+            argv,
             capture_output=True,
             timeout=3,
+            cwd=run_cwd,
         )
     except (subprocess.TimeoutExpired, OSError):
         meta["status"] = "error"
@@ -1630,7 +1790,7 @@ def editor_response():
     if target is None:
         return jsonify({"error": "Choose a path before saving."}), 400
 
-    success, message = write_file(target, content)
+    success, message = _write_file_for_terminal(target, content, as_root=bool(direct.get("is_root")))
     if not success:
         return jsonify({"error": message}), 400
 
@@ -1645,13 +1805,33 @@ def editor_response():
     return jsonify({"ok": True, "message": message, "file_path": str(target)})
 
 
-def _get_completion_cwd(session_id: str) -> str:
-    """Resolve completion cwd from active terminal session."""
+def _write_file_for_terminal(path: Path, content: str, *, as_root: bool = False) -> tuple[bool, str]:
+    if not as_root:
+        return write_file(path, content)
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "tee", str(path)],
+            input=content.encode("utf-8"),
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return True, "File saved"
+        return False, result.stderr.decode("utf-8", errors="replace") or "Failed to save file"
+    except subprocess.TimeoutExpired:
+        return False, "Write operation timed out"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _get_completion_context(session_id: str) -> tuple[str, bool]:
+    """Resolve completion cwd and privilege mode from active terminal session."""
     if session_id:
         session = pty_manager.get_session(session_id)
         if session and session.alive:
-            return get_session_cwd(session)
-    return os.path.expanduser("~")
+            return get_session_cwd(session), bool(getattr(session, "is_root", False))
+    return os.path.expanduser("~"), False
 
 
 def _format_completion_path(full_path: str, prefix: str, cwd: str) -> str:
@@ -1671,10 +1851,13 @@ def _format_completion_path(full_path: str, prefix: str, cwd: str) -> str:
     return rel_path
 
 
-def _complete_path(prefix: str, dirs_only: bool = False, cwd: str | None = None) -> list[str]:
+def _complete_path(prefix: str, dirs_only: bool = False, cwd: str | None = None, *, as_root: bool = False) -> list[str]:
     """Complete filesystem paths, optionally filtering to directories only."""
     if not prefix:
         prefix = "./"
+
+    if as_root:
+        return _complete_path_as_root(prefix, dirs_only, cwd)
 
     base_cwd = os.path.abspath(cwd or os.path.expanduser("~"))
     expanded = os.path.expanduser(prefix)
@@ -1710,10 +1893,45 @@ def _complete_path(prefix: str, dirs_only: bool = False, cwd: str | None = None)
     return sorted(set(completions))[:50]
 
 
-def _complete_argument(command: str, prefix: str, arg_index: int, cwd: str | None = None) -> list[str]:
+def _complete_path_as_root(prefix: str, dirs_only: bool = False, cwd: str | None = None) -> list[str]:
+    base_cwd = cwd or "/root"
+    mode = "-A directory" if dirs_only else "-f"
+    shell_script = f"""
+cd {shlex.quote(base_cwd)} >/dev/null 2>&1 || exit 126
+while IFS= read -r match; do
+    [ -n "$match" ] || continue
+    if [ -d "$match" ]; then
+        printf '%s/\\0' "$match"
+    elif [ {shlex.quote("1" if dirs_only else "0")} = "0" ]; then
+        printf '%s\\0' "$match"
+    fi
+done < <(compgen {mode} -- {shlex.quote(prefix)})
+"""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "bash", "-lc", shell_script],
+            capture_output=True,
+            timeout=3,
+            cwd=os.path.expanduser("~"),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0 or not result.stdout:
+        return []
+    return sorted({
+        item.decode("utf-8", errors="replace")
+        for item in result.stdout.split(b"\0")
+        if item
+    })[:50]
+
+
+def _complete_argument(command: str, prefix: str, arg_index: int, cwd: str | None = None, *, as_root: bool = False) -> list[str]:
     """Complete arguments for specific commands."""
     completions = []
     subcommand = request.args.get("subcommand", "")
+
+    if as_root and (prefix.startswith("/") or prefix.startswith("~") or prefix.startswith(".") or "/" in prefix):
+        return _complete_path(prefix, False, cwd, as_root=True)
 
     if command == "systemctl":
         completions = _complete_systemctl(prefix, arg_index)
