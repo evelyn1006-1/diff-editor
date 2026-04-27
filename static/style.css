@@ -183,6 +183,97 @@ button:disabled {
     border-color: #9b7ac7;
 }
 
+.ai-review-menu-wrap {
+    position: relative;
+}
+
+.ai-review-menu {
+    left: auto;
+    right: 0;
+    min-width: 11rem;
+}
+
+.ai-review-modal {
+    max-width: 520px;
+}
+
+.ai-review-presets {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.btn-preset {
+    flex: 1;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.btn-preset:hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(214, 51, 132, 0.12);
+}
+
+.btn-preset:active {
+    background: rgba(214, 51, 132, 0.06);
+}
+
+.ai-review-modal-textarea {
+    width: 100%;
+    min-height: 7rem;
+    resize: vertical;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg);
+    color: var(--text-primary);
+    padding: 0.5rem;
+    font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    margin-bottom: 0.75rem;
+}
+
+.ai-review-modal-textarea:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(214, 51, 132, 0.18);
+}
+
+.ai-review-modal-effort {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.ai-review-modal-effort label {
+    white-space: nowrap;
+}
+
+.ai-review-modal-effort select {
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+
+.ai-review-modal-effort select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
 #btn-empty-recycle-bin {
     background: rgba(255, 77, 109, 0.12);
     border-color: rgba(255, 77, 109, 0.35);

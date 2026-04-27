@@ -9,7 +9,13 @@
 {% block nav %}
 <span class="file-path" title="{{ file_path }}">{{ file_path }}</span>
 <span id="status" class="status"></span>
-<button id="btn-ai-review" title="Get AI review of changes"><span class="btn-icon">✨</span><span class="btn-text">AI Review</span></button>
+<div class="ai-review-menu-wrap">
+    <button id="btn-ai-review" title="Get AI review of changes" aria-expanded="false" aria-controls="ai-review-menu"><span class="btn-icon">✨</span><span class="btn-text">AI Review</span></button>
+    <div id="ai-review-menu" class="dropdown-menu ai-review-menu">
+        <button id="btn-ai-review-default" class="dropdown-item" type="button">Normal Review</button>
+        <button id="btn-ai-review-open-custom" class="dropdown-item" type="button">Custom Prompt...</button>
+    </div>
+</div>
 <button id="btn-wrap" title="Toggle line wrapping"><span class="btn-icon">↩️</span><span class="btn-text">Wrap</span></button>
 <button id="btn-textbox" title="Switch to simple textbox (mobile-friendly)"><span class="btn-icon">📝</span><span class="btn-text">Textbox</span></button>
 <button id="btn-run" class="btn-primary hidden" title="Save and run this file">Run</button>
@@ -33,6 +39,31 @@
     </div>
 </div>
 <button id="btn-run-terminal-restore" class="run-terminal-restore hidden" title="Restore terminal">▶ Terminal</button>
+<div id="ai-review-modal-overlay" class="modal-overlay hidden">
+    <div class="modal-dialog ai-review-modal">
+        <div class="modal-title">Custom AI Review</div>
+        <div class="modal-summary">Choose a preset or write your own prompt.</div>
+        <div class="ai-review-presets">
+            <button id="btn-ai-review-preset-security" class="btn-preset" type="button">Security</button>
+            <button id="btn-ai-review-preset-design" class="btn-preset" type="button">Design</button>
+            <button id="btn-ai-review-preset-explain" class="btn-preset" type="button">Explain</button>
+        </div>
+        <textarea id="ai-review-custom-prompt" class="ai-review-modal-textarea" rows="6" placeholder="or write a custom review prompt…"></textarea>
+        <div class="ai-review-modal-effort">
+            <label for="ai-review-modal-effort-select">Reasoning:</label>
+            <select id="ai-review-modal-effort-select" class="effort-select">
+                <option value="low">Low</option>
+                <option value="medium" selected>Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">Max</option>
+            </select>
+        </div>
+        <div class="modal-buttons">
+            <button id="btn-ai-review-modal-cancel" class="btn-modal btn-modal-cancel" type="button">Cancel</button>
+            <button id="btn-ai-review-modal-submit" class="btn-modal" type="button">Run Review</button>
+        </div>
+    </div>
+</div>
 <div id="ai-review-panel" class="ai-review-panel hidden">
     <div class="ai-review-header">
         <span>AI Review</span>

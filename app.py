@@ -2465,6 +2465,14 @@ def create_app() -> Flask:
         file_path = data.get("file_path", "unknown")
         language = data.get("language", "plaintext")
         requested_review_id = normalize_review_id(data.get("review_id"))
+        raw_custom_prompt = data.get("custom_prompt", "")
+        if raw_custom_prompt is None:
+            raw_custom_prompt = ""
+        if not isinstance(raw_custom_prompt, str):
+            return jsonify({"error": "Custom prompt must be text"}), 400
+        custom_prompt = raw_custom_prompt.strip()
+        if len(custom_prompt) > 4000:
+            return jsonify({"error": "Custom prompt is too long"}), 400
 
         # Validate reasoning effort (default to medium for balanced speed/quality)
         VALID_EFFORTS = ("low", "medium", "high", "xhigh")
@@ -2475,7 +2483,7 @@ def create_app() -> Flask:
         if data.get("review_id") and not requested_review_id:
             return jsonify({"error": "Invalid review_id"}), 400
 
-        if original == modified:
+        if original == modified and not custom_prompt:
             return jsonify({"error": "No changes to review"}), 400
 
         cleanup_expired_review_cache()
@@ -2506,8 +2514,9 @@ def create_app() -> Flask:
             n=context_lines,
         )
         unified_diff = "".join(diff)
+        has_unified_diff = bool(unified_diff.strip())
 
-        if not unified_diff.strip():
+        if not has_unified_diff and not custom_prompt:
             return jsonify({"error": "No changes to review"}), 400
 
         # Determine review case based on git status and unsaved changes
@@ -2538,16 +2547,42 @@ def create_app() -> Flask:
                         # Disk differs from both HEAD and editor → Case 4
                         review_case = "uncommitted_plus_edits"
 
+        custom_prompt_block = ""
+        if custom_prompt:
+            custom_prompt_block = (
+                "\n\nCustom review request:\n"
+                f"{custom_prompt}\n\n"
+                "Only report review findings; do not modify files."
+            )
+
         # Build prompt based on case
-        if review_case == "uncommitted_only":
+        if not has_unified_diff:
+            review_case = "custom_file"
+            if AI_REVIEW_PROVIDER == "openai_sdk":
+                review_prompt = f"""Review `{file_path}` ({language}) using this custom request:
+{custom_prompt}
+
+Only report review findings; do not modify files.
+
+Current file contents:
+```{language}
+{modified}
+```"""
+            else:
+                review_prompt = f"""Read `{file_path}` ({language}) and review it using this custom request:
+{custom_prompt}
+
+Only report review findings; do not modify files."""
+        elif review_case == "uncommitted_only":
             # Case 3: No diff needed, tell codex to review uncommitted changes
-            review_prompt = f"Review uncommitted changes for `{file_path}` ({language}). Use `git diff` to see what changed."
+            review_prompt = f"Review uncommitted changes for `{file_path}` ({language}). Use `git diff` to see what changed.{custom_prompt_block}"
         elif review_case == "uncommitted_plus_edits":
             # Case 4: Diff needed + instruction to check HEAD
             review_prompt = f"""Review this diff for `{file_path}` ({language}).
 
 Note: The file on disk has uncommitted changes not reflected in this diff.
 This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the baseline.
+{custom_prompt_block}
 
 ```diff
 {unified_diff}
@@ -2555,6 +2590,7 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
         else:
             # Cases 2 and non_git: Simple diff prompt
             review_prompt = f"""Review this diff for `{file_path}` ({language}):
+{custom_prompt_block}
 
 ```diff
 {unified_diff}

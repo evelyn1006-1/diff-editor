@@ -143,8 +143,7 @@ async function initDiffEditor() {
         });
 
         // AI Review button
-        const aiReviewBtn = document.getElementById('btn-ai-review');
-        aiReviewBtn.addEventListener('click', requestAiReview);
+        initAiReviewMenu();
         initEffortSelector();
 
         // Close AI review panel
@@ -419,6 +418,31 @@ let currentReviewController = null;
 const REVIEW_ID_STORAGE_KEY = `diff-editor-review-id:${FILE_PATH}`;
 const REVIEW_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 let currentReviewId = loadStoredReviewId();
+let aiReviewMenuForceNew = false;
+
+const PRESET_SECURITY = [
+    'Review this code for security vulnerabilities. Check for:',
+    'injection attacks (SQL, command, code), path traversal, XSS,',
+    'authentication bypass, authorization issues, insecure file operations,',
+    'sensitive data exposure, unsafe deserialization, and missing input',
+    'validation. Prioritize high-severity findings.',
+].join(' ');
+
+const PRESET_EXPLAIN = [
+    'Explain what this code does and how it works. Walk through the logic',
+    'step by step, highlight key design decisions, and note any non-obvious',
+    'behavior or edge cases. Do not suggest changes — just help me understand',
+    'the code.',
+].join(' ');
+
+const PRESET_DESIGN = [
+    'Review this code for design and maintainability issues. Look for:',
+    'duplicated logic that should be extracted, fragile patterns that are',
+    'easy to break (mutable defaults, implicit coupling, unchecked',
+    'assumptions), overly complex or deeply nested logic, poor naming or',
+    'unclear structure, and missing separation of concerns. Flag anything',
+    'that would make future changes risky or confusing.',
+].join(' ');
 
 // Reasoning effort level
 const EFFORT_STORAGE_KEY = 'diff-editor-reasoning-effort';
@@ -554,13 +578,187 @@ function addNewReviewButton(content) {
     if (!content || content.querySelector('.btn-new-review-inline')) return;
     const btn = document.createElement('button');
     btn.className = 'btn-new-review-inline';
-    btn.textContent = 'New Review';
+    btn.textContent = 'New Review...';
     btn.addEventListener('click', requestNewAiReview);
     content.appendChild(btn);
 }
 
-function requestNewAiReview() {
-    requestAiReview({ forceNew: true });
+function requestNewAiReview(event) {
+    event.stopPropagation();
+    openAiReviewMenu({ forceNew: true, anchor: event.currentTarget });
+}
+
+function getAiReviewMenuElements() {
+    return {
+        trigger: document.getElementById('btn-ai-review'),
+        menu: document.getElementById('ai-review-menu'),
+        normalBtn: document.getElementById('btn-ai-review-default'),
+        openCustomBtn: document.getElementById('btn-ai-review-open-custom'),
+    };
+}
+
+function getAiReviewModalElements() {
+    return {
+        overlay: document.getElementById('ai-review-modal-overlay'),
+        customPrompt: document.getElementById('ai-review-custom-prompt'),
+        effortSelect: document.getElementById('ai-review-modal-effort-select'),
+        submitBtn: document.getElementById('btn-ai-review-modal-submit'),
+        cancelBtn: document.getElementById('btn-ai-review-modal-cancel'),
+    };
+}
+
+function closeAiReviewMenu() {
+    const { trigger, menu } = getAiReviewMenuElements();
+    if (!trigger || !menu) return;
+    menu.classList.remove('open');
+    trigger.setAttribute('aria-expanded', 'false');
+}
+
+function openAiReviewMenu(options = {}) {
+    const { trigger, menu } = getAiReviewMenuElements();
+    if (!trigger || !menu || trigger.disabled) return;
+    aiReviewMenuForceNew = Boolean(options.forceNew);
+
+    const anchor = options.anchor || null;
+    if (anchor) {
+        const rect = anchor.getBoundingClientRect();
+        menu.style.position = 'fixed';
+        menu.style.top = (rect.bottom + 4) + 'px';
+        menu.style.right = (window.innerWidth - rect.right) + 'px';
+        menu.style.left = 'auto';
+    } else {
+        menu.style.position = '';
+        menu.style.top = '';
+        menu.style.right = '';
+        menu.style.left = '';
+    }
+
+    menu.classList.add('open');
+    trigger.setAttribute('aria-expanded', 'true');
+}
+
+function openAiReviewModal() {
+    const { overlay, customPrompt, effortSelect } = getAiReviewModalElements();
+    if (!overlay) return;
+    document.getElementById('ai-review-panel').classList.add('hidden');
+    overlay.classList.remove('hidden');
+    if (effortSelect) effortSelect.value = getSelectedEffort();
+    customPrompt?.focus();
+}
+
+function closeAiReviewModal() {
+    const { overlay, customPrompt } = getAiReviewModalElements();
+    if (!overlay) return;
+    overlay.classList.add('hidden');
+    if (customPrompt) customPrompt.value = '';
+}
+
+function submitAiReviewModal() {
+    const { customPrompt, effortSelect } = getAiReviewModalElements();
+    const prompt = customPrompt?.value.trim() || '';
+    if (!prompt) {
+        customPrompt?.focus();
+        return;
+    }
+    const effort = effortSelect?.value || 'medium';
+    closeAiReviewModal();
+    requestAiReview({ forceNew: true, customPrompt: prompt, reasoningEffort: effort });
+}
+
+function initAiReviewMenu() {
+    const { trigger, menu, normalBtn, openCustomBtn } = getAiReviewMenuElements();
+    const { overlay, customPrompt, effortSelect, submitBtn, cancelBtn } = getAiReviewModalElements();
+    if (!trigger || !menu || !normalBtn || !openCustomBtn) return;
+
+    trigger.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const found = await loadExistingReview();
+        if (!found) {
+            openAiReviewMenu({ forceNew: false });
+        }
+    });
+
+    normalBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const forceNew = aiReviewMenuForceNew;
+        closeAiReviewMenu();
+        requestAiReview({ forceNew });
+    });
+
+    openCustomBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAiReviewMenu();
+        openAiReviewModal();
+    });
+
+    menu.addEventListener('click', (event) => {
+        event.stopPropagation();
+    });
+
+    document.addEventListener('click', closeAiReviewMenu);
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            const { overlay } = getAiReviewModalElements();
+            if (overlay && !overlay.classList.contains('hidden')) {
+                closeAiReviewModal();
+            } else {
+                closeAiReviewMenu();
+            }
+        }
+    });
+
+    // Modal controls
+    effortSelect?.addEventListener('change', () => {
+        saveEffort(effortSelect.value);
+        const mainSelect = document.getElementById('reasoning-effort');
+        if (mainSelect) mainSelect.value = effortSelect.value;
+    });
+
+    cancelBtn?.addEventListener('click', closeAiReviewModal);
+    submitBtn?.addEventListener('click', submitAiReviewModal);
+
+    overlay?.addEventListener('click', (event) => {
+        if (event.target === overlay) closeAiReviewModal();
+    });
+
+    customPrompt?.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+            event.preventDefault();
+            submitAiReviewModal();
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            closeAiReviewModal();
+        }
+    });
+
+    // Preset prompts
+    const presetSecurityBtn = document.getElementById('btn-ai-review-preset-security');
+    const presetDesignBtn = document.getElementById('btn-ai-review-preset-design');
+    const presetExplainBtn = document.getElementById('btn-ai-review-preset-explain');
+
+    presetSecurityBtn?.addEventListener('click', () => {
+        if (customPrompt) {
+            customPrompt.value = PRESET_SECURITY;
+            customPrompt.focus();
+        }
+    });
+
+    presetDesignBtn?.addEventListener('click', () => {
+        if (customPrompt) {
+            customPrompt.value = PRESET_DESIGN;
+            customPrompt.focus();
+        }
+    });
+
+    presetExplainBtn?.addEventListener('click', () => {
+        if (customPrompt) {
+            customPrompt.value = PRESET_EXPLAIN;
+            customPrompt.focus();
+        }
+    });
 }
 
 function showReviewCancelledIndicator() {
@@ -669,9 +867,27 @@ async function streamExistingReview(reviewId) {
     }
 }
 
+async function loadExistingReview() {
+    if (currentReviewController) {
+        document.getElementById('ai-review-panel').classList.remove('hidden');
+        return true;
+    }
+    const latestReviewId = await fetchLatestAiReviewId(FILE_PATH);
+    for (const reviewId of uniqueReviewIds(latestReviewId, currentReviewId)) {
+        if (reviewId !== currentReviewId) {
+            setCurrentReviewId(reviewId);
+        }
+        const result = await streamExistingReview(reviewId);
+        if (result !== 'missing') return true;
+    }
+    document.getElementById('ai-review-panel').classList.add('hidden');
+    return false;
+}
+
 async function requestAiReview(options = {}) {
     if (!diffEditor) return;
     const forceNew = Boolean(options.forceNew);
+    const customPrompt = typeof options.customPrompt === 'string' ? options.customPrompt.trim() : '';
 
     const panel = document.getElementById('ai-review-panel');
     const content = document.getElementById('ai-review-content');
@@ -682,20 +898,8 @@ async function requestAiReview(options = {}) {
         : diffEditor.getModifiedEditor().getModel().getValue();
 
     if (!forceNew) {
-        if (currentReviewController) {
-            panel.classList.remove('hidden');
-            return;
-        }
-        const latestReviewId = await fetchLatestAiReviewId(FILE_PATH);
-        for (const reviewId of uniqueReviewIds(latestReviewId, currentReviewId)) {
-            if (reviewId !== currentReviewId) {
-                setCurrentReviewId(reviewId);
-            }
-            const existingResult = await streamExistingReview(reviewId);
-            if (existingResult !== 'missing') {
-                return;
-            }
-        }
+        const found = await loadExistingReview();
+        if (found) return;
     }
 
     const previousReviewId = currentReviewId;
@@ -735,7 +939,8 @@ async function requestAiReview(options = {}) {
                 file_path: FILE_PATH,
                 language: fileLanguage,
                 review_id: nextReviewId,
-                reasoning_effort: getSelectedEffort(),
+                reasoning_effort: options.reasoningEffort || getSelectedEffort(),
+                custom_prompt: customPrompt,
             }),
             signal: reviewController.signal,
         });
