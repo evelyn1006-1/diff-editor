@@ -67,6 +67,7 @@ async function initDiffEditor() {
 
             const wrapBtn = document.getElementById('btn-wrap');
             const aiReviewBtn = document.getElementById('btn-ai-review');
+            const aiReviewCustomBtn = document.getElementById('btn-ai-review-custom');
             const textboxBtn = document.getElementById('btn-textbox');
             saveBtn.disabled = true;
             saveBtn.title = 'Image files are preview-only';
@@ -74,6 +75,8 @@ async function initDiffEditor() {
             wrapBtn.title = 'Wrap is unavailable for image preview';
             aiReviewBtn.disabled = true;
             aiReviewBtn.title = 'AI review is unavailable for image preview';
+            aiReviewCustomBtn.disabled = true;
+            aiReviewCustomBtn.title = 'AI review is unavailable for image preview';
             textboxBtn.disabled = true;
             textboxBtn.title = 'Textbox mode is unavailable for image preview';
             return;
@@ -145,6 +148,19 @@ async function initDiffEditor() {
         // AI Review button
         const aiReviewBtn = document.getElementById('btn-ai-review');
         aiReviewBtn.addEventListener('click', requestAiReview);
+        const aiReviewCustomBtn = document.getElementById('btn-ai-review-custom');
+        aiReviewCustomBtn.addEventListener('click', async () => {
+            const customPrompt = window.prompt(
+                'Enter a custom review prompt (example: "check the code for security issues").',
+                '',
+            );
+            if (customPrompt === null) return;
+            if (!customPrompt.trim()) {
+                window.alert('Custom prompt cannot be empty.');
+                return;
+            }
+            requestAiReview({ customPrompt: customPrompt.trim(), forceNew: true });
+        });
         initEffortSelector();
 
         // Close AI review panel
@@ -672,6 +688,7 @@ async function streamExistingReview(reviewId) {
 async function requestAiReview(options = {}) {
     if (!diffEditor) return;
     const forceNew = Boolean(options.forceNew);
+    const customPrompt = typeof options.customPrompt === 'string' ? options.customPrompt.trim() : '';
 
     const panel = document.getElementById('ai-review-panel');
     const content = document.getElementById('ai-review-content');
@@ -736,6 +753,7 @@ async function requestAiReview(options = {}) {
                 language: fileLanguage,
                 review_id: nextReviewId,
                 reasoning_effort: getSelectedEffort(),
+                custom_prompt: customPrompt,
             }),
             signal: reviewController.signal,
         });

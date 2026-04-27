@@ -2465,6 +2465,9 @@ def create_app() -> Flask:
         file_path = data.get("file_path", "unknown")
         language = data.get("language", "plaintext")
         requested_review_id = normalize_review_id(data.get("review_id"))
+        custom_prompt = str(data.get("custom_prompt", "") or "").strip()
+        if len(custom_prompt) > 2000:
+            custom_prompt = custom_prompt[:2000]
 
         # Validate reasoning effort (default to medium for balanced speed/quality)
         VALID_EFFORTS = ("low", "medium", "high", "xhigh")
@@ -2559,6 +2562,13 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
 ```diff
 {unified_diff}
 ```"""
+
+        if custom_prompt:
+            review_prompt = (
+                f"{review_prompt}\n\n"
+                f"Additional review instruction from user:\n"
+                f"{custom_prompt}\n"
+            )
 
         if AI_REVIEW_PROVIDER == "openai_sdk":
             api_key = os.environ.get("OPENAI_API_KEY")

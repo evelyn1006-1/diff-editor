@@ -172,13 +172,15 @@ button:disabled {
     box-shadow: 0 4px 12px rgba(214, 51, 132, 0.4);
 }
 
-#btn-ai-review {
+#btn-ai-review,
+#btn-ai-review-custom {
     border-color: #b38fd9;
     color: #8b5ec9;
     background: #f5eeff;
 }
 
-#btn-ai-review:hover:not(:disabled) {
+#btn-ai-review:hover:not(:disabled),
+#btn-ai-review-custom:hover:not(:disabled) {
     background: #ede0ff;
     border-color: #9b7ac7;
 }
@@ -1537,13 +1539,15 @@ body.terminal-compact .terminal-input {
     }
 
     /* Normalize AI Review button to match other icon buttons on mobile */
-    #btn-ai-review {
+    #btn-ai-review,
+    #btn-ai-review-custom {
         background: var(--bg-secondary);
         border-color: var(--border);
         color: var(--text-primary);
     }
 
-    #btn-ai-review:hover:not(:disabled) {
+    #btn-ai-review:hover:not(:disabled),
+    #btn-ai-review-custom:hover:not(:disabled) {
         background: var(--bg-tertiary);
         border-color: var(--accent);
     }
