@@ -276,6 +276,9 @@ def create_app() -> Flask:
         os.environ.get("AI_REVIEW_COOLDOWN_FILE", "/tmp/diff-editor-ai-review-cooldown.txt")
     )
     AI_REVIEW_PROVIDER = os.environ.get("AI_REVIEW_PROVIDER", "codex_cli").strip().lower()
+    AI_REVIEW_MODEL = os.environ.get("AI_REVIEW_MODEL", "gpt-5.3-codex").strip()
+    AI_REVIEW_BASE_URL = os.environ.get("OPENAI_BASE_URL", "").strip() or None
+    AI_REVIEW_REASONING = os.environ.get("AI_REVIEW_REASONING", "true").strip().lower() not in ("0", "false", "no", "off")
     AI_REVIEW_CACHE_DIR = Path(
         os.environ.get("AI_REVIEW_CACHE_DIR", "/tmp/diff-editor-ai-review-cache")
     )
@@ -2573,10 +2576,10 @@ Current file contents:
 {custom_prompt}
 
 Only report review findings; do not modify files."""
-        elif review_case == "uncommitted_only":
+        elif AI_REVIEW_PROVIDER != "openai_sdk" and review_case == "uncommitted_only":
             # Case 3: No diff needed, tell codex to review uncommitted changes
             review_prompt = f"Review uncommitted changes for `{file_path}` ({language}). Use `git diff` to see what changed.{custom_prompt_block}"
-        elif review_case == "uncommitted_plus_edits":
+        elif AI_REVIEW_PROVIDER != "openai_sdk" and review_case == "uncommitted_plus_edits":
             # Case 4: Diff needed + instruction to check HEAD
             review_prompt = f"""Review this diff for `{file_path}` ({language}).
 
@@ -2602,19 +2605,55 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
                 return jsonify({"error": "OpenAI API key not configured"}), 500
 
             def generate_openai():
+                reasoning_open = False
                 try:
-                    client = OpenAI(api_key=api_key)
-                    stream = client.responses.create(
-                        model="gpt-5.3-codex",
-                        reasoning={"effort": reasoning_effort},
-                        input=review_prompt,
-                        stream=True,
-                    )
-                    for event in stream:
-                        if event.type == "response.output_text.delta":
-                            yield event.delta
+                    client_kwargs = {"api_key": api_key}
+                    if AI_REVIEW_BASE_URL:
+                        client_kwargs["base_url"] = AI_REVIEW_BASE_URL
+                    client = OpenAI(**client_kwargs)
+
+                    if AI_REVIEW_BASE_URL:
+                        # Chat Completions path for alternate endpoints
+                        chat_kwargs: dict = {
+                            "model": AI_REVIEW_MODEL,
+                            "messages": [{"role": "user", "content": review_prompt}],
+                            "stream": True,
+                        }
+                        if AI_REVIEW_REASONING:
+                            chat_kwargs["reasoning_effort"] = reasoning_effort
+                        stream = client.chat.completions.create(**chat_kwargs)
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta if chunk.choices else None
+                            if delta and delta.content:
+                                yield delta.content
+                    else:
+                        # Responses API path (OpenAI native)
+                        resp_kwargs: dict = {
+                            "model": AI_REVIEW_MODEL,
+                            "input": review_prompt,
+                            "stream": True,
+                        }
+                        if AI_REVIEW_REASONING:
+                            resp_kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+                        stream = client.responses.create(**resp_kwargs)
+                        for event in stream:
+                            if event.type == "response.reasoning_summary_part.added":
+                                if not reasoning_open:
+                                    yield "\n\n<details open><summary>AI Reasoning</summary>\n\n"
+                                    reasoning_open = True
+                            elif event.type == "response.reasoning_summary_text.delta":
+                                yield event.delta
+                            elif event.type == "response.reasoning_summary_part.done":
+                                if reasoning_open:
+                                    yield "\n\n</details>\n\n"
+                                    reasoning_open = False
+                            elif event.type == "response.output_text.delta":
+                                yield event.delta
                 except Exception as e:
                     yield f"\n\n**Error:** {str(e)}"
+                finally:
+                    if reasoning_open:
+                        yield "\n\n</details>\n\n"
 
             return Response(
                 generate_openai(),
@@ -2658,7 +2697,7 @@ This diff shows changes from HEAD. Use `git show HEAD:{file_path}` to see the ba
         # Build command based on review case
         cmd = [
             "codex", "exec", "review",
-            "-m", "gpt-5.3-codex",
+            "-m", AI_REVIEW_MODEL,
             "-c", f'model_reasoning_effort="{reasoning_effort}"',
             "--json",
         ]

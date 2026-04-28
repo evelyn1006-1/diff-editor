@@ -1013,7 +1013,9 @@ async function cancelAiReview() {
 
 function renderMarkdown(text) {
     // Escape HTML before lightweight markdown transforms so tags render as text.
-    const safeText = escapeHtml(text);
+    // Whitelist <details> and <summary> — harmless interactive elements (no scripts).
+    const safeText = escapeHtml(text)
+        .replace(/&lt;(\/?)(details|summary)([^&]*)?&gt;/g, '<$1$2$3>');
 
     // Simple markdown rendering for code review output
     return safeText
