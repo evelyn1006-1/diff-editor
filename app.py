@@ -726,10 +726,11 @@ def create_app() -> Flask:
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         csp = (
             "default-src 'self'; "
-            "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
-            "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
+            "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com 'unsafe-inline'; "
+            "style-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com 'unsafe-inline'; "
             "font-src 'self' https://cdn.jsdelivr.net; "
             "img-src 'self' data:; "
+            "worker-src 'self' blob: https://cdnjs.cloudflare.com; "
             "frame-ancestors 'self'"
         )
         response.headers["Content-Security-Policy"] = csp
@@ -931,6 +932,22 @@ def create_app() -> Flask:
                 "is_git": is_git_tracked,
                 "writable": False,
             })
+        is_pdf = (mimetypes.guess_type(path.name)[0] == "application/pdf") or content_bytes.startswith(b"%PDF-")
+        if is_pdf:
+            git_root = find_git_root(path)
+            is_git_tracked = is_tracked_by_git(path, git_root) if git_root else False
+            return jsonify({
+                "path": str(path),
+                "content": "",
+                "original": "",
+                "language": "plaintext",
+                "is_image": False,
+                "is_pdf": True,
+                "is_binary": False,
+                "pdf_url": url_for("file_pdf", path=str(path)),
+                "is_git": is_git_tracked,
+                "writable": False,
+            })
 
         git_root = find_git_root(path)
         original_bytes = content_bytes
@@ -956,6 +973,7 @@ def create_app() -> Flask:
             "original": original_content,
             "language": language,
             "is_image": False,
+            "is_pdf": False,
             "is_binary": is_binary,
             "is_git": is_git_tracked,
             "writable": is_writable_by_user(path),
@@ -1141,6 +1159,41 @@ def create_app() -> Flask:
         return Response(
             content_bytes,
             mimetype=image_mime,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": f'inline; filename="{path.name}"',
+            },
+        )
+
+    @app.get("/api/file/pdf")
+    def file_pdf():
+        file_path = request.args.get("path", "")
+        if not file_path:
+            return jsonify({"error": "No path specified"}), 400
+
+        path, error = resolve_request_path(file_path, "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
+
+        size = get_file_size(path)
+        if size is not None and size > MAX_FILE_SIZE:
+            return jsonify({"error": f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)"}), 400
+
+        success, content_bytes = read_file_bytes(path)
+        if not success:
+            return jsonify({"error": content_bytes}), 500
+
+        is_pdf = (mimetypes.guess_type(path.name)[0] == "application/pdf") or content_bytes.startswith(b"%PDF-")
+        if not is_pdf:
+            return jsonify({"error": "Not a PDF file"}), 400
+
+        return Response(
+            content_bytes,
+            mimetype="application/pdf",
             headers={
                 "Cache-Control": "no-store",
                 "Content-Disposition": f'inline; filename="{path.name}"',

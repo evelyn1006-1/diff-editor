@@ -1236,6 +1236,148 @@ textarea.copy-input:disabled {
     background: rgba(255, 255, 255, 0.45);
 }
 
+.pdf-preview-container {
+    width: 100%;
+    height: 100%;
+    padding: 1rem;
+    box-sizing: border-box;
+    background: rgba(254, 240, 252, 0.5);
+    backdrop-filter: blur(8px);
+}
+
+.pdf-preview {
+    width: 100%;
+    height: 100%;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.45);
+}
+
+.pdf-workspace {
+    display: flex;
+    gap: 0.75rem;
+}
+
+.pdf-sidebar {
+    width: 180px;
+    min-width: 160px;
+    max-width: 220px;
+    display: flex;
+    flex-direction: column;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.55);
+    overflow: hidden;
+}
+
+.pdf-sidebar-title {
+    font-weight: 700;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.pdf-thumbs {
+    overflow: auto;
+    padding: 0.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.pdf-thumb-item {
+    text-align: left;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+}
+
+.pdf-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.pdf-toolbar {
+    display: flex;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.pdf-view-btn {
+    border: 1px solid var(--border);
+    background: #fff;
+    border-radius: 8px;
+    min-width: 2rem;
+    min-height: 2rem;
+    padding: 0.3rem 0.65rem;
+    cursor: pointer;
+}
+
+.pdf-view-btn:hover {
+    background: rgba(255, 255, 255, 0.75);
+}
+
+.pdf-zoom-level {
+    min-width: 3.25rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+.pdf-pages {
+    overflow: auto;
+    padding-right: 0.25rem;
+    min-height: 0;
+}
+
+.pdf-page-wrap {
+    position: relative;
+    width: fit-content;
+    margin: 0 auto 0.9rem auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fff;
+}
+
+.pdf-page-canvas,
+.pdf-text-layer {
+    display: block;
+}
+
+.pdf-page-canvas {
+    position: relative;
+    z-index: 1;
+}
+
+.pdf-text-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    line-height: 1;
+    opacity: 1;
+    text-align: initial;
+    user-select: text;
+    z-index: 2;
+}
+
+.pdf-text-layer span,
+.pdf-text-layer br {
+    position: absolute;
+    color: rgba(0, 0, 0, 0.01);
+    cursor: text;
+    transform-origin: 0% 0%;
+    white-space: pre;
+}
+
+.pdf-text-layer ::selection {
+    background: rgba(0, 110, 255, 0.3);
+}
+
 /* Scrollbar - Cute style */
 ::-webkit-scrollbar {
     width: 10px;

@@ -9,8 +9,13 @@ let isModified = false;
 let wordWrapEnabled = false;
 let fileLanguage = 'plaintext';
 let isImageFile = false;
+let isPdfFile = false;
 let isTextboxMode = false;
 let savedScrollInfo = null;
+let pdfScale = 1.35;
+const PDF_MIN_SCALE = 0.5;
+const PDF_MAX_SCALE = 3.0;
+const PDF_SCALE_STEP = 0.15;
 
 // Configure Monaco loader
 require.config({
@@ -59,6 +64,7 @@ async function initDiffEditor() {
         currentContent = data.content;
         fileLanguage = data.language;
         isImageFile = Boolean(data.is_image);
+        isPdfFile = Boolean(data.is_pdf);
 
         if (isImageFile) {
             renderImagePreview(container, data.image_url);
@@ -76,6 +82,26 @@ async function initDiffEditor() {
             aiReviewBtn.title = 'AI review is unavailable for image preview';
             textboxBtn.disabled = true;
             textboxBtn.title = 'Textbox mode is unavailable for image preview';
+            return;
+        }
+        if (isPdfFile) {
+            const rendered = await renderPdfPreview(container, data.pdf_url);
+
+            const wrapBtn = document.getElementById('btn-wrap');
+            const aiReviewBtn = document.getElementById('btn-ai-review');
+            const textboxBtn = document.getElementById('btn-textbox');
+            saveBtn.disabled = true;
+            saveBtn.title = 'PDF files are preview-only';
+            wrapBtn.disabled = true;
+            wrapBtn.title = 'Wrap is unavailable for PDF preview';
+            aiReviewBtn.disabled = true;
+            aiReviewBtn.title = 'AI review is unavailable for PDF preview';
+            textboxBtn.disabled = true;
+            textboxBtn.title = 'Textbox mode is unavailable for PDF preview';
+            if (rendered) {
+                statusEl.textContent = data.is_git ? 'pdf preview (git tracked)' : 'pdf preview';
+                statusEl.className = 'status';
+            }
             return;
         }
 
@@ -299,6 +325,152 @@ function renderImagePreview(container, imageUrl) {
     img.loading = 'eager';
     wrapper.appendChild(img);
     container.appendChild(wrapper);
+}
+
+function renderPdfPreview(container, pdfUrl) {
+    return renderPdfWorkspace(container, pdfUrl);
+}
+
+async function renderPdfWorkspace(container, pdfUrl) {
+    container.innerHTML = '';
+    pdfScale = 1.35;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'pdf-preview-container pdf-workspace';
+
+    if (!pdfUrl) {
+        const msg = document.createElement('div');
+        msg.className = 'error-box';
+        msg.textContent = 'PDF preview unavailable';
+        wrapper.appendChild(msg);
+        container.appendChild(wrapper);
+        return false;
+    }
+
+    wrapper.innerHTML = `
+        <div class="pdf-sidebar">
+            <div class="pdf-sidebar-title">Pages</div>
+            <div class="pdf-thumbs" id="pdf-thumbs"></div>
+        </div>
+        <div class="pdf-main">
+            <div class="pdf-toolbar">
+                <button type="button" class="pdf-view-btn" id="pdf-zoom-out" title="Zoom out">−</button>
+                <span class="pdf-zoom-level" id="pdf-zoom-level">135%</span>
+                <button type="button" class="pdf-view-btn" id="pdf-zoom-in" title="Zoom in">+</button>
+                <button type="button" class="pdf-view-btn" id="pdf-fit-width" title="Fit width">Fit width</button>
+            </div>
+            <div class="pdf-pages" id="pdf-pages"></div>
+        </div>
+    `;
+    container.appendChild(wrapper);
+
+    const statusEl = document.getElementById('status');
+    const sidebarEl = wrapper.querySelector('#pdf-thumbs');
+    const pagesEl = wrapper.querySelector('#pdf-pages');
+
+    if (!window.pdfjsLib) {
+        statusEl.textContent = 'PDF viewer library unavailable';
+        statusEl.className = 'status error';
+        return false;
+    }
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    let pdfDoc;
+    try {
+        const loadingTask = window.pdfjsLib.getDocument({ url: pdfUrl, isEvalSupported: false });
+        pdfDoc = await loadingTask.promise;
+    } catch (err) {
+        statusEl.textContent = `PDF preview failed: ${err.message}`;
+        statusEl.className = 'status error';
+        pagesEl.innerHTML = '';
+        const msg = document.createElement('div');
+        msg.className = 'error-box';
+        msg.textContent = 'PDF preview failed';
+        pagesEl.appendChild(msg);
+        return false;
+    }
+
+    const zoomLevelEl = wrapper.querySelector('#pdf-zoom-level');
+    const renderAllPages = async () => {
+        await renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl);
+    };
+
+    wrapper.querySelector('#pdf-zoom-out').addEventListener('click', async () => {
+        pdfScale = Math.max(PDF_MIN_SCALE, pdfScale - PDF_SCALE_STEP);
+        await renderAllPages();
+    });
+
+    wrapper.querySelector('#pdf-zoom-in').addEventListener('click', async () => {
+        pdfScale = Math.min(PDF_MAX_SCALE, pdfScale + PDF_SCALE_STEP);
+        await renderAllPages();
+    });
+
+    wrapper.querySelector('#pdf-fit-width').addEventListener('click', async () => {
+        const firstPage = await pdfDoc.getPage(1);
+        const viewport = firstPage.getViewport({ scale: 1 });
+        const availableWidth = Math.max(320, pagesEl.clientWidth - 32);
+        pdfScale = Math.max(PDF_MIN_SCALE, Math.min(PDF_MAX_SCALE, availableWidth / viewport.width));
+        await renderAllPages();
+    });
+
+    await renderAllPages();
+    return true;
+}
+
+async function renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl) {
+    pagesEl.innerHTML = '';
+    sidebarEl.innerHTML = '';
+    zoomLevelEl.textContent = `${Math.round(pdfScale * 100)}%`;
+
+    for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const page = await pdfDoc.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: pdfScale });
+
+        const pageWrap = document.createElement('div');
+        pageWrap.className = 'pdf-page-wrap';
+        pageWrap.dataset.page = String(pageNumber);
+
+        const pageCanvas = document.createElement('canvas');
+        pageCanvas.className = 'pdf-page-canvas';
+        pageCanvas.width = Math.floor(viewport.width);
+        pageCanvas.height = Math.floor(viewport.height);
+
+        const textLayer = document.createElement('div');
+        textLayer.className = 'pdf-text-layer textLayer';
+        textLayer.style.width = `${Math.floor(viewport.width)}px`;
+        textLayer.style.height = `${Math.floor(viewport.height)}px`;
+
+        pageWrap.appendChild(pageCanvas);
+        pageWrap.appendChild(textLayer);
+        pagesEl.appendChild(pageWrap);
+
+        // eslint-disable-next-line no-await-in-loop
+        await page.render({ canvasContext: pageCanvas.getContext('2d'), viewport }).promise;
+
+        try {
+            // eslint-disable-next-line no-await-in-loop
+            const textContent = await page.getTextContent();
+            // eslint-disable-next-line no-await-in-loop
+            await window.pdfjsLib.renderTextLayer({
+                textContentSource: textContent,
+                container: textLayer,
+                viewport,
+                textDivs: [],
+            }).promise;
+        } catch {
+            textLayer.remove();
+        }
+
+        const thumbWrap = document.createElement('button');
+        thumbWrap.type = 'button';
+        thumbWrap.className = 'pdf-thumb-item';
+        thumbWrap.textContent = `Page ${pageNumber}`;
+        thumbWrap.addEventListener('click', () => {
+            pageWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+        sidebarEl.appendChild(thumbWrap);
+    }
 }
 
 function updateStatus() {
