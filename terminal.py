@@ -726,6 +726,21 @@ def _sudo_prefix_index(parts: list[str], idx: int) -> int | None:
     return None
 
 
+def _session_has_nopasswd_sudo(session_id: str) -> bool:
+    """Return True when this session can execute sudo commands non-interactively."""
+    if session_id not in _sudo_nopasswd_cache:
+        try:
+            check = subprocess.run(
+                ["sudo", "-n", "true"],
+                capture_output=True,
+                timeout=2,
+            )
+            _sudo_nopasswd_cache[session_id] = check.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            _sudo_nopasswd_cache[session_id] = False
+    return _sudo_nopasswd_cache.get(session_id, False)
+
+
 def _find_subcommand_after_options(args: list[str], value_flags: set[str]) -> tuple[int, str] | None:
     """Return the first non-option token after leading command-global options."""
     idx = 0
@@ -1149,6 +1164,52 @@ def _has_shell_operators(command: str) -> bool:
 _PAGER_MAX_CHARS = 512 * 1024  # 512 KB
 
 
+def _split_pipe_to_pager(command: str) -> tuple[str, str, list[str]] | None:
+    """Return (producer_cmd, pager_cmd, pager_args) for simple pipelines to a pager."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lex.whitespace_split = False
+        tokens = list(lex)
+    except ValueError:
+        return None
+
+    if not tokens:
+        return None
+
+    # Only support plain pipelines ending in a pager command. Any other shell
+    # operators (redirects, ;, &&, ||, |&) are rejected.
+    for token in tokens:
+        if token and all(ch in _SHELL_OPERATOR_CHARS for ch in token) and token != "|":
+            return None
+
+    pipe_indexes = [idx for idx, token in enumerate(tokens) if token == "|"]
+    if not pipe_indexes:
+        return None
+
+    last_pipe_idx = pipe_indexes[-1]
+    if last_pipe_idx == 0 or last_pipe_idx >= len(tokens) - 1:
+        return None
+
+    pager_segment = tokens[last_pipe_idx + 1:]
+    producer_tokens = tokens[:last_pipe_idx]
+    if not producer_tokens:
+        return None
+
+    parsed = parse_intercept_command(" ".join(pager_segment))
+    if not parsed:
+        return None
+    parts, idx = parsed
+    pager_cmd = parts[idx]
+    if pager_cmd not in PAGER_COMMANDS:
+        return None
+
+    producer_cmd = shlex.join(producer_tokens)
+    if not producer_cmd:
+        return None
+
+    return producer_cmd, pager_cmd, parts[idx + 1:]
+
+
 def _resolve_pager_path(file_arg: str, cwd: str) -> Path:
     path = Path(os.path.expanduser(file_arg))
     if not path.is_absolute():
@@ -1247,6 +1308,26 @@ def get_pager_content(command: str, cwd: str, session_id: str = "", *, as_root: 
     (e.g. ``less`` with no file arg, piped commands, or unreadable files).
     Content is capped at _PAGER_MAX_CHARS to avoid large Socket.IO payloads.
     """
+    piped_pager = _split_pipe_to_pager(command)
+    if piped_pager is not None:
+        producer_cmd, pager_cmd, pager_args = piped_pager
+
+        producer_parsed = parse_intercept_command(producer_cmd)
+        if producer_parsed:
+            producer_parts, producer_idx = producer_parsed
+            if _sudo_prefix_index(producer_parts, producer_idx) is not None and not _session_has_nopasswd_sudo(session_id):
+                return None
+
+        content = _run_no_pager(["bash", "-lc", producer_cmd], cwd, as_root=as_root)
+        if content is not None and content.strip():
+            title = f"{producer_cmd} | {pager_cmd}"
+            if pager_args:
+                title = f"{title} {' '.join(pager_args)}"
+            if len(content) > _PAGER_MAX_CHARS:
+                content = content[:_PAGER_MAX_CHARS] + "\n\n[… output truncated at 512 KB …]"
+            return title, content
+        return None
+
     if _has_shell_operators(command):
         return None
     parsed = parse_intercept_command(command)
@@ -1260,17 +1341,7 @@ def get_pager_content(command: str, cwd: str, session_id: str = "", *, as_root: 
     # non-interactive sudo (no password required). The result is cached per
     # session so the check only runs once per connection.
     if sudo_idx is not None:
-        if session_id not in _sudo_nopasswd_cache:
-            try:
-                check = subprocess.run(
-                    ["sudo", "-n", "true"],
-                    capture_output=True,
-                    timeout=2,
-                )
-                _sudo_nopasswd_cache[session_id] = check.returncode == 0
-            except (subprocess.TimeoutExpired, OSError):
-                _sudo_nopasswd_cache[session_id] = False
-        if not _sudo_nopasswd_cache.get(session_id):
+        if not _session_has_nopasswd_sudo(session_id):
             return None
     sudo_prefix = parts[:idx] if sudo_idx is not None else None
 
