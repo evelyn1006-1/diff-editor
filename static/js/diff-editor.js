@@ -12,6 +12,10 @@ let isImageFile = false;
 let isPdfFile = false;
 let isTextboxMode = false;
 let savedScrollInfo = null;
+let pdfAnnotations = { pages: {} };
+let pdfDrawMode = 'draw';
+let pdfActiveColor = '#d63384';
+let pdfActiveSize = 2;
 
 // Configure Monaco loader
 require.config({
@@ -81,15 +85,16 @@ async function initDiffEditor() {
             return;
         }
         if (isPdfFile) {
-            renderPdfPreview(container, data.pdf_url);
+            await renderPdfPreview(container, data.pdf_url);
             statusEl.textContent = data.is_git ? 'pdf preview (git tracked)' : 'pdf preview';
             statusEl.className = 'status';
 
             const wrapBtn = document.getElementById('btn-wrap');
             const aiReviewBtn = document.getElementById('btn-ai-review');
             const textboxBtn = document.getElementById('btn-textbox');
-            saveBtn.disabled = true;
-            saveBtn.title = 'PDF files are preview-only';
+            saveBtn.disabled = false;
+            saveBtn.title = 'Save PDF annotations';
+            saveBtn.addEventListener('click', savePdfAnnotations);
             wrapBtn.disabled = true;
             wrapBtn.title = 'Wrap is unavailable for PDF preview';
             aiReviewBtn.disabled = true;
@@ -322,10 +327,14 @@ function renderImagePreview(container, imageUrl) {
 }
 
 function renderPdfPreview(container, pdfUrl) {
+    return renderPdfWorkspace(container, pdfUrl);
+}
+
+async function renderPdfWorkspace(container, pdfUrl) {
     container.innerHTML = '';
 
     const wrapper = document.createElement('div');
-    wrapper.className = 'pdf-preview-container';
+    wrapper.className = 'pdf-preview-container pdf-workspace';
 
     if (!pdfUrl) {
         const msg = document.createElement('div');
@@ -336,12 +345,241 @@ function renderPdfPreview(container, pdfUrl) {
         return;
     }
 
-    const embed = document.createElement('iframe');
-    embed.className = 'pdf-preview';
-    embed.src = pdfUrl;
-    embed.title = 'PDF preview';
-    wrapper.appendChild(embed);
+    wrapper.innerHTML = `
+        <div class="pdf-sidebar">
+            <div class="pdf-sidebar-title">Pages</div>
+            <div class="pdf-thumbs" id="pdf-thumbs"></div>
+        </div>
+        <div class="pdf-main">
+            <div class="pdf-toolbar">
+                <button type="button" class="pdf-tool-btn active" data-tool="draw">Draw</button>
+                <button type="button" class="pdf-tool-btn" data-tool="text">Text</button>
+                <button type="button" class="pdf-tool-btn" data-tool="erase">Erase</button>
+                <button type="button" class="pdf-tool-btn" data-tool="pan">Pan</button>
+            </div>
+            <div class="pdf-pages" id="pdf-pages"></div>
+        </div>
+    `;
     container.appendChild(wrapper);
+
+    const statusEl = document.getElementById('status');
+    const sidebarEl = wrapper.querySelector('#pdf-thumbs');
+    const pagesEl = wrapper.querySelector('#pdf-pages');
+
+    if (!window.pdfjsLib) {
+        statusEl.textContent = 'PDF viewer library unavailable';
+        statusEl.className = 'status error';
+        return;
+    }
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/build/pdf.worker.min.js';
+
+    const tools = wrapper.querySelectorAll('.pdf-tool-btn');
+    tools.forEach((btn) => {
+        btn.addEventListener('click', () => {
+            pdfDrawMode = btn.dataset.tool || 'draw';
+            tools.forEach((b) => b.classList.toggle('active', b === btn));
+        });
+    });
+
+    pdfAnnotations = await loadExistingPdfAnnotations();
+    const loadingTask = window.pdfjsLib.getDocument(pdfUrl);
+    const pdfDoc = await loadingTask.promise;
+
+    for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const page = await pdfDoc.getPage(pageNumber);
+        const viewport = page.getViewport({ scale: 1.35 });
+
+        const pageWrap = document.createElement('div');
+        pageWrap.className = 'pdf-page-wrap';
+        pageWrap.dataset.page = String(pageNumber);
+
+        const pageCanvas = document.createElement('canvas');
+        pageCanvas.className = 'pdf-page-canvas';
+        pageCanvas.width = Math.floor(viewport.width);
+        pageCanvas.height = Math.floor(viewport.height);
+
+        const annotCanvas = document.createElement('canvas');
+        annotCanvas.className = 'pdf-annot-canvas';
+        annotCanvas.width = pageCanvas.width;
+        annotCanvas.height = pageCanvas.height;
+
+        pageWrap.appendChild(pageCanvas);
+        pageWrap.appendChild(annotCanvas);
+        pagesEl.appendChild(pageWrap);
+
+        // eslint-disable-next-line no-await-in-loop
+        await page.render({ canvasContext: pageCanvas.getContext('2d'), viewport }).promise;
+        bindAnnotationCanvas(annotCanvas, pageNumber, pageWrap);
+        redrawPageAnnotations(annotCanvas, pageNumber);
+
+        const thumbWrap = document.createElement('button');
+        thumbWrap.type = 'button';
+        thumbWrap.className = 'pdf-thumb-item';
+        thumbWrap.textContent = `Page ${pageNumber}`;
+        thumbWrap.addEventListener('click', () => {
+            pageWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+        sidebarEl.appendChild(thumbWrap);
+    }
+}
+
+function getPageAnnotation(pageNumber) {
+    if (!pdfAnnotations.pages[pageNumber]) {
+        pdfAnnotations.pages[pageNumber] = { strokes: [], texts: [] };
+    }
+    return pdfAnnotations.pages[pageNumber];
+}
+
+function bindAnnotationCanvas(canvas, pageNumber, pageWrap) {
+    const ctx = canvas.getContext('2d');
+    let drawing = false;
+    let activeStroke = null;
+
+    canvas.addEventListener('pointerdown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+        const pageData = getPageAnnotation(pageNumber);
+
+        if (pdfDrawMode === 'text') {
+            const text = window.prompt('Text to place on page:');
+            if (text && text.trim()) {
+                pageData.texts.push({ text: text.trim(), x, y, color: pdfActiveColor, size: 16 });
+                redrawPageAnnotations(canvas, pageNumber);
+            }
+            return;
+        }
+        if (pdfDrawMode === 'erase') {
+            pageData.strokes = [];
+            pageData.texts = [];
+            redrawPageAnnotations(canvas, pageNumber);
+            return;
+        }
+        if (pdfDrawMode === 'pan') {
+            return;
+        }
+
+        drawing = true;
+        activeStroke = { points: [{ x, y }], color: pdfActiveColor, size: pdfActiveSize };
+        pageData.strokes.push(activeStroke);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = pdfActiveColor;
+        ctx.lineWidth = pdfActiveSize;
+        canvas.setPointerCapture(e.pointerId);
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+        if (!drawing || !activeStroke) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+        const points = activeStroke.points;
+        const last = points[points.length - 1];
+        points.push({ x, y });
+
+        ctx.beginPath();
+        ctx.moveTo(last.x, last.y);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+    });
+
+    const stopDraw = () => {
+        drawing = false;
+        activeStroke = null;
+    };
+    canvas.addEventListener('pointerup', stopDraw);
+    canvas.addEventListener('pointercancel', stopDraw);
+
+    pageWrap.addEventListener('wheel', (e) => {
+        if (pdfDrawMode !== 'pan') return;
+        pageWrap.parentElement.scrollTop += e.deltaY;
+        e.preventDefault();
+    }, { passive: false });
+}
+
+function redrawPageAnnotations(canvas, pageNumber) {
+    const ctx = canvas.getContext('2d');
+    const pageData = getPageAnnotation(pageNumber);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    pageData.strokes.forEach((stroke) => {
+        if (!stroke.points || stroke.points.length < 2) return;
+        ctx.beginPath();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = stroke.color || '#d63384';
+        ctx.lineWidth = stroke.size || 2;
+        ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+        for (let i = 1; i < stroke.points.length; i += 1) {
+            ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+        }
+        ctx.stroke();
+    });
+
+    pageData.texts.forEach((entry) => {
+        ctx.fillStyle = entry.color || '#d63384';
+        ctx.font = `${entry.size || 16}px sans-serif`;
+        ctx.fillText(entry.text || '', entry.x || 0, entry.y || 0);
+    });
+}
+
+async function loadExistingPdfAnnotations() {
+    const sidecarPath = `${FILE_PATH}.annotations.json`;
+    try {
+        const response = await fetch(`api/file?path=${encodeURIComponent(sidecarPath)}`);
+        if (!response.ok) {
+            return { pages: {} };
+        }
+        const data = await response.json();
+        const parsed = JSON.parse(data.content || '{}');
+        if (parsed && typeof parsed === 'object' && parsed.pages) {
+            return parsed;
+        }
+    } catch {
+        return { pages: {} };
+    }
+    return { pages: {} };
+}
+
+async function savePdfAnnotations() {
+    const statusEl = document.getElementById('status');
+    const saveBtn = document.getElementById('btn-save');
+    const sidecarPath = `${FILE_PATH}.annotations.json`;
+    const payload = JSON.stringify(pdfAnnotations, null, 2);
+
+    statusEl.textContent = 'Saving PDF annotations...';
+    statusEl.className = 'status';
+    saveBtn.disabled = true;
+
+    try {
+        const response = await fetch('api/file', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({
+                path: sidecarPath,
+                content: payload,
+            }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            statusEl.textContent = data.error || 'Failed to save annotations';
+            statusEl.className = 'status error';
+            return;
+        }
+
+        statusEl.textContent = `Annotations saved to ${sidecarPath}`;
+        statusEl.className = 'status saved';
+    } catch (err) {
+        statusEl.textContent = `Save failed: ${err.message}`;
+        statusEl.className = 'status error';
+    } finally {
+        saveBtn.disabled = false;
+    }
 }
 
 function updateStatus() {
