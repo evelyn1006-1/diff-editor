@@ -9,6 +9,7 @@ let isModified = false;
 let wordWrapEnabled = false;
 let fileLanguage = 'plaintext';
 let isImageFile = false;
+let isPdfFile = false;
 let isTextboxMode = false;
 let savedScrollInfo = null;
 
@@ -59,6 +60,7 @@ async function initDiffEditor() {
         currentContent = data.content;
         fileLanguage = data.language;
         isImageFile = Boolean(data.is_image);
+        isPdfFile = Boolean(data.is_pdf);
 
         if (isImageFile) {
             renderImagePreview(container, data.image_url);
@@ -76,6 +78,24 @@ async function initDiffEditor() {
             aiReviewBtn.title = 'AI review is unavailable for image preview';
             textboxBtn.disabled = true;
             textboxBtn.title = 'Textbox mode is unavailable for image preview';
+            return;
+        }
+        if (isPdfFile) {
+            renderPdfPreview(container, data.pdf_url);
+            statusEl.textContent = data.is_git ? 'pdf preview (git tracked)' : 'pdf preview';
+            statusEl.className = 'status';
+
+            const wrapBtn = document.getElementById('btn-wrap');
+            const aiReviewBtn = document.getElementById('btn-ai-review');
+            const textboxBtn = document.getElementById('btn-textbox');
+            saveBtn.disabled = true;
+            saveBtn.title = 'PDF files are preview-only';
+            wrapBtn.disabled = true;
+            wrapBtn.title = 'Wrap is unavailable for PDF preview';
+            aiReviewBtn.disabled = true;
+            aiReviewBtn.title = 'AI review is unavailable for PDF preview';
+            textboxBtn.disabled = true;
+            textboxBtn.title = 'Textbox mode is unavailable for PDF preview';
             return;
         }
 
@@ -298,6 +318,29 @@ function renderImagePreview(container, imageUrl) {
     img.alt = 'Image preview';
     img.loading = 'eager';
     wrapper.appendChild(img);
+    container.appendChild(wrapper);
+}
+
+function renderPdfPreview(container, pdfUrl) {
+    container.innerHTML = '';
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'pdf-preview-container';
+
+    if (!pdfUrl) {
+        const msg = document.createElement('div');
+        msg.className = 'error-box';
+        msg.textContent = 'PDF preview unavailable';
+        wrapper.appendChild(msg);
+        container.appendChild(wrapper);
+        return;
+    }
+
+    const embed = document.createElement('iframe');
+    embed.className = 'pdf-preview';
+    embed.src = pdfUrl;
+    embed.title = 'PDF preview';
+    wrapper.appendChild(embed);
     container.appendChild(wrapper);
 }
 

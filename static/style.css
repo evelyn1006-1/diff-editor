@@ -1236,6 +1236,23 @@ textarea.copy-input:disabled {
     background: rgba(255, 255, 255, 0.45);
 }
 
+.pdf-preview-container {
+    width: 100%;
+    height: 100%;
+    padding: 1rem;
+    box-sizing: border-box;
+    background: rgba(254, 240, 252, 0.5);
+    backdrop-filter: blur(8px);
+}
+
+.pdf-preview {
+    width: 100%;
+    height: 100%;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.45);
+}
+
 /* Scrollbar - Cute style */
 ::-webkit-scrollbar {
     width: 10px;
