@@ -1305,25 +1305,33 @@ textarea.copy-input:disabled {
     display: flex;
     gap: 0.35rem;
     flex-wrap: wrap;
+    align-items: center;
 }
 
-.pdf-tool-btn {
+.pdf-view-btn {
     border: 1px solid var(--border);
     background: #fff;
-    border-radius: 999px;
-    padding: 0.3rem 0.7rem;
+    border-radius: 8px;
+    min-width: 2rem;
+    min-height: 2rem;
+    padding: 0.3rem 0.65rem;
     cursor: pointer;
 }
 
-.pdf-tool-btn.active {
-    background: var(--accent);
-    color: white;
-    border-color: var(--accent);
+.pdf-view-btn:hover {
+    background: rgba(255, 255, 255, 0.75);
+}
+
+.pdf-zoom-level {
+    min-width: 3.25rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
 }
 
 .pdf-pages {
     overflow: auto;
     padding-right: 0.25rem;
+    min-height: 0;
 }
 
 .pdf-page-wrap {
@@ -1337,14 +1345,37 @@ textarea.copy-input:disabled {
 }
 
 .pdf-page-canvas,
-.pdf-annot-canvas {
+.pdf-text-layer {
     display: block;
 }
 
-.pdf-annot-canvas {
+.pdf-page-canvas {
+    position: relative;
+    z-index: 1;
+}
+
+.pdf-text-layer {
     position: absolute;
     inset: 0;
-    touch-action: none;
+    overflow: hidden;
+    line-height: 1;
+    opacity: 1;
+    text-align: initial;
+    user-select: text;
+    z-index: 2;
+}
+
+.pdf-text-layer span,
+.pdf-text-layer br {
+    position: absolute;
+    color: rgba(0, 0, 0, 0.01);
+    cursor: text;
+    transform-origin: 0% 0%;
+    white-space: pre;
+}
+
+.pdf-text-layer ::selection {
+    background: rgba(0, 110, 255, 0.3);
 }
 
 /* Scrollbar - Cute style */
