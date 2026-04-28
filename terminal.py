@@ -1149,6 +1149,52 @@ def _has_shell_operators(command: str) -> bool:
 _PAGER_MAX_CHARS = 512 * 1024  # 512 KB
 
 
+def _split_pipe_to_pager(command: str) -> tuple[str, str, list[str]] | None:
+    """Return (producer_cmd, pager_cmd, pager_args) for simple pipelines to a pager."""
+    try:
+        lex = shlex.shlex(command, posix=True, punctuation_chars="|&;<>")
+        lex.whitespace_split = False
+        tokens = list(lex)
+    except ValueError:
+        return None
+
+    if not tokens:
+        return None
+
+    # Only support plain pipelines ending in a pager command. Any other shell
+    # operators (redirects, ;, &&, ||, |&) are rejected.
+    for token in tokens:
+        if token and all(ch in _SHELL_OPERATOR_CHARS for ch in token) and token != "|":
+            return None
+
+    pipe_indexes = [idx for idx, token in enumerate(tokens) if token == "|"]
+    if not pipe_indexes:
+        return None
+
+    last_pipe_idx = pipe_indexes[-1]
+    if last_pipe_idx == 0 or last_pipe_idx >= len(tokens) - 1:
+        return None
+
+    pager_segment = tokens[last_pipe_idx + 1:]
+    producer_tokens = tokens[:last_pipe_idx]
+    if not producer_tokens:
+        return None
+
+    parsed = parse_intercept_command(" ".join(pager_segment))
+    if not parsed:
+        return None
+    parts, idx = parsed
+    pager_cmd = parts[idx]
+    if pager_cmd not in PAGER_COMMANDS:
+        return None
+
+    producer_cmd = " ".join(producer_tokens).strip()
+    if not producer_cmd:
+        return None
+
+    return producer_cmd, pager_cmd, parts[idx + 1:]
+
+
 def _resolve_pager_path(file_arg: str, cwd: str) -> Path:
     path = Path(os.path.expanduser(file_arg))
     if not path.is_absolute():
@@ -1247,6 +1293,19 @@ def get_pager_content(command: str, cwd: str, session_id: str = "", *, as_root: 
     (e.g. ``less`` with no file arg, piped commands, or unreadable files).
     Content is capped at _PAGER_MAX_CHARS to avoid large Socket.IO payloads.
     """
+    piped_pager = _split_pipe_to_pager(command)
+    if piped_pager is not None:
+        producer_cmd, pager_cmd, pager_args = piped_pager
+        content = _run_no_pager(["bash", "-lc", producer_cmd], cwd, as_root=as_root)
+        if content is not None and content.strip():
+            title = f"{producer_cmd} | {pager_cmd}"
+            if pager_args:
+                title = f"{title} {' '.join(pager_args)}"
+            if len(content) > _PAGER_MAX_CHARS:
+                content = content[:_PAGER_MAX_CHARS] + "\n\n[… output truncated at 512 KB …]"
+            return title, content
+        return None
+
     if _has_shell_operators(command):
         return None
     parsed = parse_intercept_command(command)
