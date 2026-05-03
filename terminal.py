@@ -1442,6 +1442,16 @@ def terminal_view():
     return render_template("terminal.html", auto_cmd=auto_cmd, cwd=cwd, root_terminal=root_terminal)
 
 
+@terminal_bp.route("/terminal/xterm")
+def terminal_xterm_view():
+    """Render a standalone xterm.js terminal page."""
+    auto_cmd = request.args.get("cmd", "")
+    root_terminal = _is_truthy_request_flag(request.args.get("root"))
+    raw_cwd = request.args.get("cwd")
+    cwd = _resolve_root_terminal_cwd(raw_cwd) if root_terminal else (_resolve_initial_terminal_cwd(raw_cwd) if raw_cwd else "")
+    return render_template("terminal_xterm.html", auto_cmd=auto_cmd, cwd=cwd, root_terminal=root_terminal)
+
+
 @terminal_bp.route("/terminal/complete")
 def complete():
     """Return tab completions for commands, paths, or arguments."""
