@@ -1,6 +1,32 @@
-# Princess Evelyn's License 1.1.0 (PEL-S1)
+# Princess Evelyn's License 1.2.0 (PEL-S1)
 
 <https://princessevelyn.com/license/pel-standard-1>
+
+## Preamble
+
+Princess Evelyn's License is a free, copyleft license for 
+software and other kinds of works, compatible with the GNU AGPL
+v3 license. 
+
+The licenses for most software and other practical works are 
+designed to take away your freedom to share and change the 
+works. On the other hand, most free licenses have few measures
+to prevent its users from unfairly taking advantage of the
+software, such as minimally modifying it and presenting it as 
+their own work, or benefit commercially from it without
+reasonable attribution. Princess Evelyn's License is intended
+to guarantee your freedom to share and change all versions of a 
+program, making sure it remains free software for all its users, 
+while ensuring that all of its contributors receive appropriate 
+credit for their work. 
+
+When we speak of free software, we are referring to freedom, not 
+price. Princess Evelyn's License is designed to make sure that 
+you have the freedom to distribute copies of free software (and 
+charge for them if you wish), that you receive source code or 
+can get it if you want it, that you can change the software or 
+use pieces of it in new free programs as long as you give 
+appropriate credit, and that you know you can do these things.
 
 ## Copyright License
 
@@ -27,9 +53,11 @@ these terms.
 
 ## Source Code Availability
 
-If you distribute the software in any form that is not source
-code, you must also provide the corresponding source code under
-these same terms. The corresponding source code means the
+If you distribute, host, deploy, or otherwise make available
+any modified or derivative version of the software in any form
+that is not source code, you must also provide the corresponding
+source code under these same terms or under a compatible license 
+as defined below. The corresponding source code means the
 preferred form of the software for making changes to it,
 together with any files, scripts, and interface definitions
 needed to build, install, run, and modify the software, but
@@ -114,7 +142,21 @@ make changes and new works based on the software for any purpose.
 This license is copyleft: if you distribute the software, or any
 modified or derivative version of it, you must do so under these
 same terms. You may not distribute the software under any other
-license. This is sometimes described as a share-alike requirement.
+license, with the exception of compatible licenses listed below. 
+This is sometimes described as a share-alike requirement.
+
+## Compatible licenses
+
+This license is compatible with the GNU Affero General Public
+License (AGPL) v3. You may distribute the software under a 
+compatible license, provided that you include the 
+[Attribution Preservation](#attribution-preservation) and 
+[Required Attributions](#required-attributions) sections in their 
+entirety, without alteration, as part of its Additional Terms. 
+This is a compatible Additional Term as per Section 7b of the 
+AGPL license document. 
+
+<https://www.gnu.org/licenses/agpl-3.0.en.html>
 
 ## Patent License
 
