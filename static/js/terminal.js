@@ -122,7 +122,7 @@ function connect() {
     });
 
     socket.on('pager_popup', (data) => {
-        openPagerModal(data.title, data.content);
+        openPagerModal(data.title, data.content, data.command || '');
     });
 
     socket.on('editor_modal', (data) => {
@@ -892,8 +892,10 @@ function handleTaskManagerKeydown(e) {
 
 let pagerSearchMatches = [];
 let pagerSearchIndex = 0;
+let pagerPollTimer = null;
+let pagerPollCommand = '';
 
-function openPagerModal(title, content) {
+function openPagerModal(title, content, command = '') {
     const overlay = document.getElementById('pager-overlay');
     const titleEl = document.getElementById('pager-title');
     const contentEl = document.getElementById('pager-content');
@@ -904,13 +906,15 @@ function openPagerModal(title, content) {
 
     titleEl.textContent = title;
     contentEl.textContent = content;
+    pagerPollCommand = command || '';
     pagerSearchMatches = [];
     pagerSearchIndex = 0;
     searchEl.value = '';
     countEl.textContent = '';
 
     overlay.classList.remove('hidden');
-    searchEl.focus();
+    contentEl.setAttribute('tabindex', '0');
+    contentEl.focus();
 
     closeBtn.onclick = closePagerModal;
     searchEl.oninput = () => pagerSearch(content);
@@ -927,14 +931,112 @@ function closePagerModal() {
     const overlay = document.getElementById('pager-overlay');
     if (overlay) overlay.classList.add('hidden');
     document.removeEventListener('keydown', handlePagerKeydown);
+    stopPagerPolling();
     pagerSearchMatches = [];
     document.getElementById('terminal-input')?.focus();
 }
 
+function stopPagerPolling() {
+    if (pagerPollTimer) {
+        clearInterval(pagerPollTimer);
+        pagerPollTimer = null;
+    }
+}
+
+async function pollPagerOnce() {
+    if (!pagerPollCommand || !socket?.id) return;
+    const overlay = document.getElementById('pager-overlay');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+    const res = await fetch('/terminal/pager_poll', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: socket.id, command: pagerPollCommand }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data?.ok) return;
+    document.getElementById('pager-title').textContent = data.title || 'Pager';
+    document.getElementById('pager-content').textContent = data.content || '';
+}
+
 function handlePagerKeydown(e) {
+    const overlay = document.getElementById('pager-overlay');
+    const contentEl = document.getElementById('pager-content');
+    const searchEl = document.getElementById('pager-search');
+    const countEl = document.getElementById('pager-search-count');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+
+    const inSearch = document.activeElement === searchEl;
+
     if (e.key === 'Escape') {
         e.preventDefault();
         closePagerModal();
+        return;
+    }
+
+    // Keep common less-style shortcuts available from the modal body.
+    if (inSearch && e.key !== 'Enter') return;
+
+    const pageStep = Math.max(120, contentEl.clientHeight - 24);
+    const halfPageStep = Math.max(60, Math.floor(contentEl.clientHeight / 2));
+
+    if (e.key === 'q') {
+        e.preventDefault();
+        closePagerModal();
+    } else if (e.key === '/') {
+        e.preventDefault();
+        searchEl.focus();
+        searchEl.select();
+    } else if (e.key === '?') {
+        e.preventDefault();
+        countEl.textContent = 'q quit • / search • n/N next/prev • d/u half-page • f/b page • g/G top/bottom';
+    } else if (e.key === 'n') {
+        e.preventDefault();
+        pagerSearchStep(1);
+    } else if (e.key === 'N') {
+        e.preventDefault();
+        pagerSearchStep(-1);
+    } else if ((e.ctrlKey && e.key.toLowerCase() === 'd') || e.key === 'd') {
+        e.preventDefault();
+        contentEl.scrollBy({ top: halfPageStep });
+    } else if ((e.ctrlKey && e.key.toLowerCase() === 'u') || e.key === 'u') {
+        e.preventDefault();
+        contentEl.scrollBy({ top: -halfPageStep });
+    } else if (e.key === 'j' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        contentEl.scrollBy({ top: 24 });
+    } else if (e.key === 'k' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        contentEl.scrollBy({ top: -24 });
+    } else if (e.key === ' ' || e.key === 'PageDown' || e.key === 'f') {
+        e.preventDefault();
+        contentEl.scrollBy({ top: pageStep });
+    } else if (e.key === 'b' || e.key === 'PageUp') {
+        e.preventDefault();
+        contentEl.scrollBy({ top: -pageStep });
+    } else if (e.key === 'g' && !e.shiftKey) {
+        e.preventDefault();
+        contentEl.scrollTo({ top: 0 });
+    } else if (e.key === 'F' && e.shiftKey) {
+        e.preventDefault();
+        contentEl.scrollTo({ top: contentEl.scrollHeight });
+        if (!pagerPollCommand) {
+            countEl.textContent = 'Shift+F: jumped to end (live follow unavailable for this pager source)';
+            return;
+        }
+        if (pagerPollTimer) {
+            stopPagerPolling();
+            countEl.textContent = 'Follow mode off';
+        } else {
+            pagerPollTimer = setInterval(() => { pollPagerOnce(); }, 1000);
+            countEl.textContent = 'Follow mode on (polling every 1s)';
+        }
+    } else if (e.key === 'G' || e.key === 'End') {
+        e.preventDefault();
+        contentEl.scrollTo({ top: contentEl.scrollHeight });
+    } else if (e.key === 'Home') {
+        e.preventDefault();
+        contentEl.scrollTo({ top: 0 });
     }
 }
 
