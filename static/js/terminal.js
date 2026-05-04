@@ -1134,6 +1134,15 @@ let editorModalInitialized = false;
 let editorModalMode = 'wrapper';
 let editorFilePath = '';
 let editorNeedsPath = false;
+let editorNanoCutBuffer = '';
+
+function getEditorLineBounds(text, index) {
+    const safeIndex = Math.max(0, Math.min(index, text.length));
+    const lineStart = text.lastIndexOf('\n', Math.max(0, safeIndex - 1)) + 1;
+    const lineEndIdx = text.indexOf('\n', safeIndex);
+    const lineEnd = lineEndIdx === -1 ? text.length : lineEndIdx;
+    return { lineStart, lineEnd };
+}
 
 function setEditorStatus(message, isError = false) {
     const hint = document.getElementById('editor-hint');
@@ -1998,6 +2007,79 @@ function closeEditorModal() {
 }
 
 function handleEditorKeydown(e) {
+    const overlay = document.getElementById('editor-overlay');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+
+    const activeEl = document.activeElement;
+    const textarea = getEditorTextarea();
+    const isFindReplaceField = activeEl?.id === 'editor-find-input' || activeEl?.id === 'editor-replace-input';
+    const isTextareaFocused = textarea && activeEl === textarea;
+
+    // Support common nano shortcuts when using the modal editor popup.
+    if (e.ctrlKey && !e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (key === 'o') {
+            e.preventDefault();
+            submitEditorModal(true);
+            return;
+        }
+        if (key === 'x') {
+            e.preventDefault();
+            submitEditorModal(false);
+            return;
+        }
+        if (key === 'w') {
+            e.preventDefault();
+            setEditorPanelMode('find');
+            focusEditorSearchField('find');
+            return;
+        }
+        if (key === '\\') {
+            e.preventDefault();
+            setEditorPanelMode('replace');
+            focusEditorSearchField('replace');
+            return;
+        }
+        if (key === 'g' && !isFindReplaceField) {
+            e.preventDefault();
+            stepEditorSearch(1);
+            return;
+        }
+        if (key === 'k' && isTextareaFocused) {
+            e.preventDefault();
+            const cursor = textarea.selectionStart;
+            const { lineStart, lineEnd } = getEditorLineBounds(textarea.value, cursor);
+            const hasTrailingNewline = lineEnd < textarea.value.length;
+            const removeEnd = hasTrailingNewline ? lineEnd + 1 : lineEnd;
+            editorNanoCutBuffer = textarea.value.slice(lineStart, removeEnd);
+            textarea.value = textarea.value.slice(0, lineStart) + textarea.value.slice(removeEnd);
+            textarea.setSelectionRange(lineStart, lineStart);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            return;
+        }
+        if (key === 'u' && isTextareaFocused && editorNanoCutBuffer) {
+            e.preventDefault();
+            const cursor = textarea.selectionStart;
+            textarea.value = textarea.value.slice(0, cursor) + editorNanoCutBuffer + textarea.value.slice(cursor);
+            const nextCursor = cursor + editorNanoCutBuffer.length;
+            textarea.setSelectionRange(nextCursor, nextCursor);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            return;
+        }
+        if (key === 'a' && isTextareaFocused) {
+            e.preventDefault();
+            const { lineStart } = getEditorLineBounds(textarea.value, textarea.selectionStart);
+            textarea.setSelectionRange(lineStart, lineStart);
+            return;
+        }
+        if (key === 'e' && isTextareaFocused) {
+            e.preventDefault();
+            const { lineEnd } = getEditorLineBounds(textarea.value, textarea.selectionStart);
+            textarea.setSelectionRange(lineEnd, lineEnd);
+            return;
+        }
+    }
+
     if (e.key === 'Escape') {
         if (editorDiffMode) {
             e.preventDefault();
