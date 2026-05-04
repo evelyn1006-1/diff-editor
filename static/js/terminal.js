@@ -1135,6 +1135,7 @@ let editorModalMode = 'wrapper';
 let editorFilePath = '';
 let editorNeedsPath = false;
 let editorNanoCutBuffer = '';
+let editorCommandName = '';
 
 function getEditorLineBounds(text, index) {
     const safeIndex = Math.max(0, Math.min(index, text.length));
@@ -1962,6 +1963,7 @@ function openEditorModal(title, content, options = {}) {
     editorDiffMode = false;
     editorDiffStats = { added: 0, removed: 0 };
     editorModalMode = options.mode || 'wrapper';
+    editorCommandName = (options.editorCommand || '').toLowerCase();
     editorFilePath = options.filePath || '';
     editorNeedsPath = Boolean(options.needsPath);
 
@@ -1970,7 +1972,12 @@ function openEditorModal(title, content, options = {}) {
     if (replaceInput) replaceInput.value = '';
     if (diffView) diffView.innerHTML = '<div class="editor-diff-empty">No changes yet.</div>';
 
-    setEditorStatus('Ctrl+Enter to save · Esc to cancel');
+    const shortcutHint = 'Ctrl+Enter to save · Esc to cancel';
+    if (editorModalMode === 'direct' && editorCommandName && editorCommandName !== 'nano') {
+        setEditorStatus(`${editorCommandName} is not supported in this UI; using GUI editor + nano shortcuts. ${shortcutHint}`);
+    } else {
+        setEditorStatus(shortcutHint);
+    }
     setEditorBusy(false);
     updateEditorToolbarState();
     updateEditorSummary();
@@ -1995,6 +2002,7 @@ function closeEditorModal() {
     editorModalMode = 'wrapper';
     editorFilePath = '';
     editorNeedsPath = false;
+    editorCommandName = '';
     editorSearchMatches = [];
     editorSearchIndex = -1;
     editorSearchError = '';
