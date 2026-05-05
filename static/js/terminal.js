@@ -894,6 +894,7 @@ let pagerSearchMatches = [];
 let pagerSearchIndex = 0;
 let pagerPollTimer = null;
 let pagerPollCommand = '';
+let pagerRawContent = '';
 
 function openPagerModal(title, content, command = '') {
     const overlay = document.getElementById('pager-overlay');
@@ -906,6 +907,7 @@ function openPagerModal(title, content, command = '') {
 
     titleEl.textContent = title;
     contentEl.textContent = content;
+    pagerRawContent = content || '';
     pagerPollCommand = command || '';
     pagerSearchMatches = [];
     pagerSearchIndex = 0;
@@ -917,7 +919,7 @@ function openPagerModal(title, content, command = '') {
     contentEl.focus();
 
     closeBtn.onclick = closePagerModal;
-    searchEl.oninput = () => pagerSearch(content);
+    searchEl.oninput = () => pagerSearch(pagerRawContent);
     searchEl.onkeydown = (e) => {
         if (e.key === 'Enter') {
             e.preventDefault();
@@ -933,6 +935,7 @@ function closePagerModal() {
     document.removeEventListener('keydown', handlePagerKeydown);
     stopPagerPolling();
     pagerSearchMatches = [];
+    pagerRawContent = '';
     document.getElementById('terminal-input')?.focus();
 }
 
@@ -947,16 +950,31 @@ async function pollPagerOnce() {
     if (!pagerPollCommand || !socket?.id) return;
     const overlay = document.getElementById('pager-overlay');
     if (!overlay || overlay.classList.contains('hidden')) return;
-    const res = await fetch('/terminal/pager_poll', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: socket.id, command: pagerPollCommand }),
-    });
-    if (!res.ok) return;
-    const data = await res.json();
-    if (!data?.ok) return;
-    document.getElementById('pager-title').textContent = data.title || 'Pager';
-    document.getElementById('pager-content').textContent = data.content || '';
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+    try {
+        const res = await fetch(`${basePath}/terminal/pager_poll`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: socket.id, command: pagerPollCommand }),
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data?.ok) return;
+        const contentEl = document.getElementById('pager-content');
+        const searchEl = document.getElementById('pager-search');
+        document.getElementById('pager-title').textContent = data.title || 'Pager';
+        pagerRawContent = data.content || '';
+        if (searchEl?.value) {
+            pagerSearch(pagerRawContent);
+        } else if (contentEl) {
+            contentEl.textContent = pagerRawContent;
+            if (pagerPollTimer) {
+                contentEl.scrollTo({ top: contentEl.scrollHeight });
+            }
+        }
+    } catch (_err) {
+        // Keep follow mode quiet on transient network failures.
+    }
 }
 
 function handlePagerKeydown(e) {
