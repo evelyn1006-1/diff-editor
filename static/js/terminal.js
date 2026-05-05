@@ -2014,6 +2014,22 @@ function closeEditorModal() {
     document.getElementById('terminal-input')?.focus();
 }
 
+function requestEditorCancel(options = {}) {
+    const { confirmDiscard = false } = options;
+    const textarea = getEditorTextarea();
+    if (
+        confirmDiscard &&
+        textarea &&
+        textarea.value !== editorOriginalContent &&
+        !window.confirm('Discard unsaved changes?')
+    ) {
+        textarea.focus();
+        setEditorStatus('Exit cancelled.');
+        return;
+    }
+    submitEditorModal(false);
+}
+
 function handleEditorKeydown(e) {
     const overlay = document.getElementById('editor-overlay');
     if (!overlay || overlay.classList.contains('hidden')) return;
@@ -2036,7 +2052,7 @@ function handleEditorKeydown(e) {
         }
         if (key === 'x') {
             e.preventDefault();
-            submitEditorModal(false);
+            requestEditorCancel({ confirmDiscard: true });
             return;
         }
         if (key === 'w') {
