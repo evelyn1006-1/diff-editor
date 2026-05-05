@@ -158,6 +158,32 @@ AGPL license document.
 
 <https://www.gnu.org/licenses/agpl-3.0.en.html>
 
+## Additional Permission for Separated Non-Interface Components
+
+As an additional permission, you may copy, modify, and distribute
+a separated non-interface component of the software under the GNU
+General Public License version 3 (GPLv3) or later, or the GNU 
+Affero General Public License version 3 or later (AGPLv3), 
+instead of these terms, if:
+
+1. The component does not include, adapt, or derive from any 
+   part of the software's user interface.
+
+2. The component does not include any required attributions.
+
+3. The component is reasonably separable from the software as 
+   a whole and can be used independently for a general software 
+   purpose.
+
+4. You do not use this permission to distribute, host, deploy, 
+   or otherwise make available the software as a whole, a modified 
+   version of the software as a whole, or a larger application 
+   whose user interface includes, adapts, or is based on any part 
+   of the software's user interface.
+
+This additional permission applies only to the separated component.
+All other portions of the software remain subject to these terms.
+
 ## Patent License
 
 The licensor grants you a non-exclusive, worldwide, royalty-free
