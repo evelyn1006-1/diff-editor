@@ -2026,6 +2026,9 @@ function handleEditorKeydown(e) {
     // Support common nano shortcuts when using the modal editor popup.
     if (e.ctrlKey && !e.metaKey) {
         const key = e.key.toLowerCase();
+        if (isFindReplaceField) {
+            return;
+        }
         if (key === 'o') {
             e.preventDefault();
             submitEditorModal(true);
