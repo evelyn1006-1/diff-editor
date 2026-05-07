@@ -3315,6 +3315,7 @@ body.terminal-compact .terminal-input {
     flex-direction: column;
     overflow: hidden;
     backdrop-filter: blur(12px);
+    position: relative;
 }
 
 .editor-body {
@@ -3542,6 +3543,71 @@ body.terminal-compact .terminal-input {
 
 .editor-hint.editor-hint-error {
     color: var(--error);
+}
+
+.editor-nano-modal-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 8;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgba(20, 8, 18, 0.58);
+}
+
+.editor-nano-modal {
+    width: min(100%, 420px);
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+    padding: 1rem;
+}
+
+.editor-nano-modal-title {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 0.4rem;
+}
+
+.editor-nano-modal-summary {
+    color: var(--text-muted, #aaa);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    margin-bottom: 0.75rem;
+}
+
+.editor-nano-path-input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.55rem 0.65rem;
+    font-family: monospace;
+    font-size: 0.84rem;
+    outline: none;
+    margin-bottom: 0.65rem;
+}
+
+.editor-nano-path-input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(214, 51, 132, 0.12);
+}
+
+.editor-nano-modal-error {
+    color: var(--error);
+    font-size: 0.78rem;
+    margin-bottom: 0.65rem;
+}
+
+.editor-nano-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    flex-wrap: wrap;
 }
 
 .editor-actions {

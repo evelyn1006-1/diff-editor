@@ -2014,20 +2014,192 @@ function closeEditorModal() {
     document.getElementById('terminal-input')?.focus();
 }
 
-function requestEditorCancel(options = {}) {
-    const { confirmDiscard = false } = options;
+function editorContentChanged() {
     const textarea = getEditorTextarea();
-    if (
-        confirmDiscard &&
-        textarea &&
-        textarea.value !== editorOriginalContent &&
-        !window.confirm('Discard unsaved changes?')
-    ) {
-        textarea.focus();
-        setEditorStatus('Exit cancelled.');
+    return Boolean(textarea && textarea.value !== editorOriginalContent);
+}
+
+function showEditorNanoExitModal() {
+    return new Promise((resolve) => {
+        const editorPopup = document.querySelector('.editor-popup');
+        if (!editorPopup) {
+            resolve(null);
+            return;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'editor-nano-modal-overlay';
+        overlay.innerHTML = `
+            <div class="editor-nano-modal" role="dialog" aria-modal="true" aria-labelledby="editor-nano-exit-title">
+                <div id="editor-nano-exit-title" class="editor-nano-modal-title">Save modified buffer?</div>
+                <div class="editor-nano-modal-summary">The editor content has unsaved changes.</div>
+                <div class="editor-nano-modal-actions">
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="cancel">Cancel</button>
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="discard">Don't Save</button>
+                    <button type="button" class="editor-btn editor-btn-save" data-action="save">Save</button>
+                </div>
+            </div>
+        `;
+        editorPopup.appendChild(overlay);
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', handleKeydown, true);
+            overlay.remove();
+            resolve(value);
+        };
+
+        const handleKeydown = (e) => {
+            const key = e.key.toLowerCase();
+            if ((e.ctrlKey && key === 'c') || e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup(null);
+            } else if ((e.ctrlKey && key === 'o') || key === 'y' || e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup('save');
+            } else if ((e.ctrlKey && key === 'x') || key === 'n') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup('discard');
+            }
+        };
+
+        overlay.addEventListener('click', (e) => {
+            const action = e.target.closest('[data-action]')?.dataset.action;
+            if (action) cleanup(action);
+        });
+        document.addEventListener('keydown', handleKeydown, true);
+        overlay.querySelector('[data-action="save"]')?.focus();
+    });
+}
+
+function showEditorNanoWriteModal(defaultPath = '', options = {}) {
+    const { showPath = false, requirePath = false } = options;
+    return new Promise((resolve) => {
+        const editorPopup = document.querySelector('.editor-popup');
+        if (!editorPopup) {
+            resolve(null);
+            return;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'editor-nano-modal-overlay';
+        const inputHtml = showPath
+            ? '<input type="text" class="editor-nano-path-input" autocomplete="off" spellcheck="false">'
+            : '';
+        overlay.innerHTML = `
+            <div class="editor-nano-modal" role="dialog" aria-modal="true" aria-labelledby="editor-nano-write-title">
+                <div id="editor-nano-write-title" class="editor-nano-modal-title">File Name to Write</div>
+                <div class="editor-nano-modal-summary">${showPath ? 'Choose where this buffer should be saved.' : 'Write the current editor buffer.'}</div>
+                ${inputHtml}
+                <div class="editor-nano-modal-error hidden"></div>
+                <div class="editor-nano-modal-actions">
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="cancel">Cancel</button>
+                    <button type="button" class="editor-btn editor-btn-save" data-action="write">Write</button>
+                </div>
+            </div>
+        `;
+        editorPopup.appendChild(overlay);
+
+        const input = overlay.querySelector('.editor-nano-path-input');
+        const errorEl = overlay.querySelector('.editor-nano-modal-error');
+        if (input) input.value = defaultPath || '';
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', handleKeydown, true);
+            overlay.remove();
+            resolve(value);
+        };
+
+        const showError = (message) => {
+            if (!errorEl) return;
+            errorEl.textContent = message;
+            errorEl.classList.remove('hidden');
+        };
+
+        const submit = () => {
+            if (!showPath) {
+                cleanup(true);
+                return;
+            }
+            const value = input.value.trim();
+            if (requirePath && !value) {
+                showError('Choose a path before saving.');
+                input.focus();
+                return;
+            }
+            cleanup(value);
+        };
+
+        const handleKeydown = (e) => {
+            const key = e.key.toLowerCase();
+            if ((e.ctrlKey && (key === 'c' || key === 'x')) || e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup(null);
+            } else if ((e.ctrlKey && key === 'o') || e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                submit();
+            }
+        };
+
+        overlay.addEventListener('click', (e) => {
+            const action = e.target.closest('[data-action]')?.dataset.action;
+            if (action === 'cancel') cleanup(null);
+            if (action === 'write') submit();
+        });
+        input?.addEventListener('input', () => errorEl?.classList.add('hidden'));
+        document.addEventListener('keydown', handleKeydown, true);
+        if (input) {
+            input.focus();
+            input.select();
+        } else {
+            overlay.querySelector('[data-action="write"]')?.focus();
+        }
+    });
+}
+
+async function requestEditorWriteOut() {
+    if (editorModalMode === 'direct') {
+        const chosenPath = await showEditorNanoWriteModal(editorFilePath, {
+            showPath: true,
+            requirePath: editorNeedsPath,
+        });
+        if (chosenPath === null) {
+            getEditorTextarea()?.focus();
+            setEditorStatus('Save cancelled.');
+            return;
+        }
+        await submitEditorModal(true, { filePath: chosenPath, skipPathPrompt: true });
         return;
     }
-    submitEditorModal(false);
+
+    const shouldWrite = await showEditorNanoWriteModal('', { showPath: false });
+    if (!shouldWrite) {
+        getEditorTextarea()?.focus();
+        setEditorStatus('Save cancelled.');
+        return;
+    }
+    await submitEditorModal(true);
+}
+
+async function requestEditorCancel(options = {}) {
+    const { confirmDiscard = false } = options;
+    if (confirmDiscard && editorContentChanged()) {
+        const action = await showEditorNanoExitModal();
+        if (action === 'save') {
+            await requestEditorWriteOut();
+        } else if (action === 'discard') {
+            await submitEditorModal(false);
+        } else {
+            getEditorTextarea()?.focus();
+            setEditorStatus('Exit cancelled.');
+        }
+        return;
+    }
+    await submitEditorModal(false);
 }
 
 function handleEditorKeydown(e) {
@@ -2047,7 +2219,7 @@ function handleEditorKeydown(e) {
         }
         if (key === 'o') {
             e.preventDefault();
-            submitEditorModal(true);
+            requestEditorWriteOut();
             return;
         }
         if (key === 'x') {
@@ -2127,15 +2299,15 @@ function handleEditorKeydown(e) {
     }
 }
 
-async function submitEditorModal(saved) {
+async function submitEditorModal(saved, options = {}) {
     if (!socket || !socket.id || !terminalToken) {
         setEditorStatus('Connection lost. Reconnect before trying again.', true);
         return;
     }
 
     const content = getEditorTextarea().value;
-    let filePath = editorFilePath;
-    if (saved && editorModalMode === 'direct' && editorNeedsPath) {
+    let filePath = options.filePath ?? editorFilePath;
+    if (saved && !options.skipPathPrompt && editorModalMode === 'direct' && editorNeedsPath) {
         const chosenPath = await showEditorSavePathModal(filePath);
         if (chosenPath === null) {
             getEditorTextarea()?.focus();
