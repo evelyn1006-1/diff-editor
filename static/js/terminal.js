@@ -1145,6 +1145,43 @@ function getEditorLineBounds(text, index) {
     return { lineStart, lineEnd };
 }
 
+function getEditorCursorPosition(text, index) {
+    const safeIndex = Math.max(0, Math.min(index, text.length));
+    const beforeCursor = text.slice(0, safeIndex);
+    const lineIndex = beforeCursor.split('\n').length - 1;
+    const lineStart = beforeCursor.lastIndexOf('\n') + 1;
+    return {
+        lineIndex,
+        columnIndex: safeIndex - lineStart,
+        index: safeIndex,
+    };
+}
+
+function getEditorLineCount(text) {
+    return text ? text.split('\n').length : 1;
+}
+
+function getEditorIndexForLineColumn(text, lineIndex, columnIndex) {
+    const lines = text.split('\n');
+    const safeLineIndex = Math.max(0, Math.min(lineIndex, lines.length - 1));
+    const safeColumnIndex = Math.max(0, Math.min(columnIndex, lines[safeLineIndex].length));
+    let index = 0;
+    for (let i = 0; i < safeLineIndex; i += 1) {
+        index += lines[i].length + 1;
+    }
+    return index + safeColumnIndex;
+}
+
+function getEditorVisibleLineCount(textarea) {
+    const computed = window.getComputedStyle(textarea);
+    let lineHeight = Number.parseFloat(computed.lineHeight);
+    if (!Number.isFinite(lineHeight)) {
+        const fontSize = Number.parseFloat(computed.fontSize) || 13;
+        lineHeight = fontSize * 1.6;
+    }
+    return Math.max(1, Math.floor(textarea.clientHeight / lineHeight) - 1);
+}
+
 function setEditorStatus(message, isError = false) {
     const hint = document.getElementById('editor-hint');
     if (!hint) return;
@@ -2161,6 +2198,93 @@ function showEditorNanoWriteModal(defaultPath = '', options = {}) {
     });
 }
 
+function showEditorNanoGotoModal() {
+    return new Promise((resolve) => {
+        const editorPopup = document.querySelector('.editor-popup');
+        if (!editorPopup) {
+            resolve(null);
+            return;
+        }
+
+        const textarea = getEditorTextarea();
+        const position = getEditorCursorPosition(textarea?.value || '', textarea?.selectionStart || 0);
+        const overlay = document.createElement('div');
+        overlay.className = 'editor-nano-modal-overlay';
+        overlay.innerHTML = `
+            <div class="editor-nano-modal" role="dialog" aria-modal="true" aria-labelledby="editor-nano-goto-title">
+                <div id="editor-nano-goto-title" class="editor-nano-modal-title">Enter line number, column number</div>
+                <div class="editor-nano-modal-summary">Use line,column or just a line number.</div>
+                <input type="text" class="editor-nano-path-input" autocomplete="off" spellcheck="false">
+                <div class="editor-nano-modal-error hidden"></div>
+                <div class="editor-nano-modal-actions">
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="cancel">Cancel</button>
+                    <button type="button" class="editor-btn editor-btn-save" data-action="go">Go</button>
+                </div>
+            </div>
+        `;
+        editorPopup.appendChild(overlay);
+
+        const input = overlay.querySelector('.editor-nano-path-input');
+        const errorEl = overlay.querySelector('.editor-nano-modal-error');
+        input.value = `${position.lineIndex + 1},${position.columnIndex + 1}`;
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', handleKeydown, true);
+            overlay.remove();
+            resolve(value);
+        };
+
+        const showError = (message) => {
+            errorEl.textContent = message;
+            errorEl.classList.remove('hidden');
+        };
+
+        const submit = () => {
+            const raw = input.value.trim();
+            const match = raw.match(/^(\d+)(?:\s*[,:\s]\s*(\d+))?$/);
+            if (!match) {
+                showError('Enter a line number, optionally followed by a column.');
+                input.focus();
+                return;
+            }
+            const line = Number.parseInt(match[1], 10);
+            const column = match[2] ? Number.parseInt(match[2], 10) : 1;
+            if (line < 1 || column < 1) {
+                showError('Line and column must be 1 or greater.');
+                input.focus();
+                return;
+            }
+            cleanup({
+                line,
+                column,
+            });
+        };
+
+        const handleKeydown = (e) => {
+            const key = e.key.toLowerCase();
+            if ((e.ctrlKey && (key === 'c' || key === 'x')) || e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup(null);
+            } else if ((e.ctrlKey && (key === '_' || key === '-' || key === '/')) || e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                submit();
+            }
+        };
+
+        overlay.addEventListener('click', (e) => {
+            const action = e.target.closest('[data-action]')?.dataset.action;
+            if (action === 'cancel') cleanup(null);
+            if (action === 'go') submit();
+        });
+        input.addEventListener('input', () => errorEl.classList.add('hidden'));
+        document.addEventListener('keydown', handleKeydown, true);
+        input.focus();
+        input.select();
+    });
+}
+
 async function requestEditorWriteOut() {
     if (editorModalMode === 'direct') {
         const chosenPath = await showEditorNanoWriteModal(editorFilePath, {
@@ -2202,6 +2326,77 @@ async function requestEditorCancel(options = {}) {
     await submitEditorModal(false);
 }
 
+function showEditorCursorPosition() {
+    const textarea = getEditorTextarea();
+    if (!textarea) return;
+
+    const text = textarea.value;
+    const position = getEditorCursorPosition(text, textarea.selectionStart);
+    const lineCount = getEditorLineCount(text);
+    const totalChars = text.length;
+    const percent = totalChars === 0 ? 0 : Math.round((position.index / totalChars) * 100);
+    setEditorStatus(
+        `line ${position.lineIndex + 1}/${lineCount}, column ${position.columnIndex + 1}, char ${position.index}/${totalChars} (${percent}%)`
+    );
+}
+
+function pageEditorTextarea(direction) {
+    const textarea = getEditorTextarea();
+    if (!textarea) return;
+
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+
+    const position = getEditorCursorPosition(textarea.value, textarea.selectionStart);
+    const lineOffset = getEditorVisibleLineCount(textarea) * direction;
+    const nextIndex = getEditorIndexForLineColumn(
+        textarea.value,
+        position.lineIndex + lineOffset,
+        position.columnIndex
+    );
+    textarea.focus();
+    textarea.setSelectionRange(nextIndex, nextIndex);
+    textarea.scrollBy({ top: textarea.clientHeight * direction });
+}
+
+function deleteEditorCharacter() {
+    const textarea = getEditorTextarea();
+    if (!textarea) return;
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    if (start === end && start >= textarea.value.length) return;
+
+    const deleteEnd = start === end ? start + 1 : end;
+    textarea.value = textarea.value.slice(0, start) + textarea.value.slice(deleteEnd);
+    textarea.setSelectionRange(start, start);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+async function requestEditorGotoLine() {
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+
+    const target = await showEditorNanoGotoModal();
+    const textarea = getEditorTextarea();
+    if (!target || !textarea) {
+        textarea?.focus();
+        return;
+    }
+
+    const nextIndex = getEditorIndexForLineColumn(
+        textarea.value,
+        target.line - 1,
+        target.column - 1
+    );
+    textarea.focus();
+    textarea.setSelectionRange(nextIndex, nextIndex);
+    const position = getEditorCursorPosition(textarea.value, nextIndex);
+    setEditorStatus(`Moved to line ${position.lineIndex + 1}, column ${position.columnIndex + 1}.`);
+}
+
 function handleEditorKeydown(e) {
     const overlay = document.getElementById('editor-overlay');
     if (!overlay || overlay.classList.contains('hidden')) return;
@@ -2210,6 +2405,20 @@ function handleEditorKeydown(e) {
     const textarea = getEditorTextarea();
     const isFindReplaceField = activeEl?.id === 'editor-find-input' || activeEl?.id === 'editor-replace-input';
     const isTextareaFocused = textarea && activeEl === textarea;
+
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (key === 'w') {
+            e.preventDefault();
+            if (!getEditorFindQuery()) {
+                setEditorPanelMode('find');
+                focusEditorSearchField('find');
+            } else {
+                stepEditorSearch(1);
+            }
+            return;
+        }
+    }
 
     // Support common nano shortcuts when using the modal editor popup.
     if (e.ctrlKey && !e.metaKey) {
@@ -2231,6 +2440,31 @@ function handleEditorKeydown(e) {
             e.preventDefault();
             setEditorPanelMode('find');
             focusEditorSearchField('find');
+            return;
+        }
+        if (key === '_' || key === '-' || key === '/') {
+            e.preventDefault();
+            requestEditorGotoLine();
+            return;
+        }
+        if (key === 'c' && isTextareaFocused) {
+            e.preventDefault();
+            showEditorCursorPosition();
+            return;
+        }
+        if (key === 'y' && isTextareaFocused) {
+            e.preventDefault();
+            pageEditorTextarea(-1);
+            return;
+        }
+        if (key === 'v' && isTextareaFocused) {
+            e.preventDefault();
+            pageEditorTextarea(1);
+            return;
+        }
+        if (key === 'd' && isTextareaFocused) {
+            e.preventDefault();
+            deleteEditorCharacter();
             return;
         }
         if (key === '\\') {
