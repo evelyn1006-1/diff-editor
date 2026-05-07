@@ -1119,6 +1119,7 @@ function pagerSearchStep(delta) {
 
 const EDITOR_DIFF_CELL_LIMIT = 250000;
 const EDITOR_DIFF_CONTEXT_LINES = 2;
+const EDITOR_UNDO_LIMIT = 100;
 
 let editorOriginalContent = '';
 let editorSearchMatches = [];
@@ -1136,6 +1137,8 @@ let editorFilePath = '';
 let editorNeedsPath = false;
 let editorNanoCutBuffer = '';
 let editorCommandName = '';
+let editorUndoStack = [];
+let editorRedoStack = [];
 
 function getEditorLineBounds(text, index) {
     const safeIndex = Math.max(0, Math.min(index, text.length));
@@ -1180,6 +1183,85 @@ function getEditorVisibleLineCount(textarea) {
         lineHeight = fontSize * 1.6;
     }
     return Math.max(1, Math.floor(textarea.clientHeight / lineHeight) - 1);
+}
+
+function getEditorSnapshot(textarea = getEditorTextarea()) {
+    if (!textarea) return null;
+    return {
+        value: textarea.value,
+        selectionStart: textarea.selectionStart,
+        selectionEnd: textarea.selectionEnd,
+        scrollTop: textarea.scrollTop,
+    };
+}
+
+function restoreEditorSnapshot(snapshot) {
+    const textarea = getEditorTextarea();
+    if (!textarea || !snapshot) return;
+
+    textarea.value = snapshot.value;
+    textarea.focus();
+    textarea.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+    textarea.scrollTop = snapshot.scrollTop;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function recordEditorMutation(beforeSnapshot) {
+    const afterSnapshot = getEditorSnapshot();
+    if (!beforeSnapshot || !afterSnapshot || beforeSnapshot.value === afterSnapshot.value) {
+        return false;
+    }
+
+    editorUndoStack.push({ before: beforeSnapshot, after: afterSnapshot });
+    if (editorUndoStack.length > EDITOR_UNDO_LIMIT) {
+        editorUndoStack.shift();
+    }
+    editorRedoStack = [];
+    return true;
+}
+
+function undoEditorMutation() {
+    const entry = editorUndoStack[editorUndoStack.length - 1];
+    if (!entry) {
+        setEditorStatus('Nothing to undo.');
+        return;
+    }
+
+    const current = getEditorSnapshot();
+    if (!current || current.value !== entry.after.value) {
+        setEditorStatus('Undo unavailable after other edits.', true);
+        return;
+    }
+
+    editorUndoStack.pop();
+    editorRedoStack.push(entry);
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+    restoreEditorSnapshot(entry.before);
+    setEditorStatus('Undo complete. Alt+E to redo.');
+}
+
+function redoEditorMutation() {
+    const entry = editorRedoStack[editorRedoStack.length - 1];
+    if (!entry) {
+        setEditorStatus('Nothing to redo.');
+        return;
+    }
+
+    const current = getEditorSnapshot();
+    if (!current || current.value !== entry.before.value) {
+        setEditorStatus('Redo unavailable after other edits.', true);
+        return;
+    }
+
+    editorRedoStack.pop();
+    editorUndoStack.push(entry);
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+    restoreEditorSnapshot(entry.after);
+    setEditorStatus('Redo complete. Alt+U to undo.');
 }
 
 function setEditorStatus(message, isError = false) {
@@ -1593,10 +1675,12 @@ function replaceCurrentEditorMatch() {
     if (!match) return;
 
     const replacement = getEditorReplaceValue();
+    const beforeSnapshot = getEditorSnapshot(textarea);
     const { nextContent, cursor } = resolveEditorReplacement(textarea.value, match, replacement);
     textarea.value = nextContent;
     textarea.focus();
     textarea.setSelectionRange(cursor, cursor);
+    recordEditorMutation(beforeSnapshot);
     editorSearchIndex = -1;
     setEditorStatus('Ctrl+Enter to save · Esc to cancel');
     refreshEditorSearch({ revealCurrent: true });
@@ -1612,6 +1696,7 @@ function replaceAllEditorMatches() {
 
     const replacement = getEditorReplaceValue();
     const matchCount = editorSearchMatches.length;
+    const beforeSnapshot = getEditorSnapshot(textarea);
     let nextContent = textarea.value;
 
     for (let index = editorSearchMatches.length - 1; index >= 0; index -= 1) {
@@ -1622,6 +1707,7 @@ function replaceAllEditorMatches() {
     textarea.value = nextContent;
     textarea.focus();
     textarea.setSelectionRange(0, 0);
+    recordEditorMutation(beforeSnapshot);
     setEditorStatus(
         `Replaced ${matchCount} match${matchCount === 1 ? '' : 'es'} · Ctrl+Enter to save · Esc to cancel`
     );
@@ -2003,6 +2089,8 @@ function openEditorModal(title, content, options = {}) {
     editorCommandName = (options.editorCommand || '').toLowerCase();
     editorFilePath = options.filePath || '';
     editorNeedsPath = Boolean(options.needsPath);
+    editorUndoStack = [];
+    editorRedoStack = [];
 
     textarea.value = content;
     if (findInput) findInput.value = '';
@@ -2040,6 +2128,8 @@ function closeEditorModal() {
     editorFilePath = '';
     editorNeedsPath = false;
     editorCommandName = '';
+    editorUndoStack = [];
+    editorRedoStack = [];
     editorSearchMatches = [];
     editorSearchIndex = -1;
     editorSearchError = '';
@@ -2368,10 +2458,12 @@ function deleteEditorCharacter() {
     const end = textarea.selectionEnd;
     if (start === end && start >= textarea.value.length) return;
 
+    const beforeSnapshot = getEditorSnapshot(textarea);
     const deleteEnd = start === end ? start + 1 : end;
     textarea.value = textarea.value.slice(0, start) + textarea.value.slice(deleteEnd);
     textarea.setSelectionRange(start, start);
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    recordEditorMutation(beforeSnapshot);
 }
 
 async function requestEditorGotoLine() {
@@ -2408,6 +2500,16 @@ function handleEditorKeydown(e) {
 
     if (e.altKey && !e.ctrlKey && !e.metaKey) {
         const key = e.key.toLowerCase();
+        if (key === 'u' && !isFindReplaceField) {
+            e.preventDefault();
+            undoEditorMutation();
+            return;
+        }
+        if (key === 'e' && !isFindReplaceField) {
+            e.preventDefault();
+            redoEditorMutation();
+            return;
+        }
         if (key === 'w') {
             e.preventDefault();
             if (!getEditorFindQuery()) {
@@ -2480,6 +2582,7 @@ function handleEditorKeydown(e) {
         }
         if (key === 'k' && isTextareaFocused) {
             e.preventDefault();
+            const beforeSnapshot = getEditorSnapshot(textarea);
             const cursor = textarea.selectionStart;
             const { lineStart, lineEnd } = getEditorLineBounds(textarea.value, cursor);
             const hasTrailingNewline = lineEnd < textarea.value.length;
@@ -2488,15 +2591,18 @@ function handleEditorKeydown(e) {
             textarea.value = textarea.value.slice(0, lineStart) + textarea.value.slice(removeEnd);
             textarea.setSelectionRange(lineStart, lineStart);
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            recordEditorMutation(beforeSnapshot);
             return;
         }
         if (key === 'u' && isTextareaFocused && editorNanoCutBuffer) {
             e.preventDefault();
+            const beforeSnapshot = getEditorSnapshot(textarea);
             const cursor = textarea.selectionStart;
             textarea.value = textarea.value.slice(0, cursor) + editorNanoCutBuffer + textarea.value.slice(cursor);
             const nextCursor = cursor + editorNanoCutBuffer.length;
             textarea.setSelectionRange(nextCursor, nextCursor);
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            recordEditorMutation(beforeSnapshot);
             return;
         }
         if (key === 'a' && isTextareaFocused) {
