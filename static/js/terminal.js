@@ -1119,6 +1119,7 @@ function pagerSearchStep(delta) {
 
 const EDITOR_DIFF_CELL_LIMIT = 250000;
 const EDITOR_DIFF_CONTEXT_LINES = 2;
+const EDITOR_UNDO_LIMIT = 100;
 
 let editorOriginalContent = '';
 let editorSearchMatches = [];
@@ -1134,6 +1135,134 @@ let editorModalInitialized = false;
 let editorModalMode = 'wrapper';
 let editorFilePath = '';
 let editorNeedsPath = false;
+let editorNanoCutBuffer = '';
+let editorCommandName = '';
+let editorUndoStack = [];
+let editorRedoStack = [];
+
+function getEditorLineBounds(text, index) {
+    const safeIndex = Math.max(0, Math.min(index, text.length));
+    const lineStart = text.lastIndexOf('\n', Math.max(0, safeIndex - 1)) + 1;
+    const lineEndIdx = text.indexOf('\n', safeIndex);
+    const lineEnd = lineEndIdx === -1 ? text.length : lineEndIdx;
+    return { lineStart, lineEnd };
+}
+
+function getEditorCursorPosition(text, index) {
+    const safeIndex = Math.max(0, Math.min(index, text.length));
+    const beforeCursor = text.slice(0, safeIndex);
+    const lineIndex = beforeCursor.split('\n').length - 1;
+    const lineStart = beforeCursor.lastIndexOf('\n') + 1;
+    return {
+        lineIndex,
+        columnIndex: safeIndex - lineStart,
+        index: safeIndex,
+    };
+}
+
+function getEditorLineCount(text) {
+    return text ? text.split('\n').length : 1;
+}
+
+function getEditorIndexForLineColumn(text, lineIndex, columnIndex) {
+    const lines = text.split('\n');
+    const safeLineIndex = Math.max(0, Math.min(lineIndex, lines.length - 1));
+    const safeColumnIndex = Math.max(0, Math.min(columnIndex, lines[safeLineIndex].length));
+    let index = 0;
+    for (let i = 0; i < safeLineIndex; i += 1) {
+        index += lines[i].length + 1;
+    }
+    return index + safeColumnIndex;
+}
+
+function getEditorVisibleLineCount(textarea) {
+    const computed = window.getComputedStyle(textarea);
+    let lineHeight = Number.parseFloat(computed.lineHeight);
+    if (!Number.isFinite(lineHeight)) {
+        const fontSize = Number.parseFloat(computed.fontSize) || 13;
+        lineHeight = fontSize * 1.6;
+    }
+    return Math.max(1, Math.floor(textarea.clientHeight / lineHeight) - 1);
+}
+
+function getEditorSnapshot(textarea = getEditorTextarea()) {
+    if (!textarea) return null;
+    return {
+        value: textarea.value,
+        selectionStart: textarea.selectionStart,
+        selectionEnd: textarea.selectionEnd,
+        scrollTop: textarea.scrollTop,
+    };
+}
+
+function restoreEditorSnapshot(snapshot) {
+    const textarea = getEditorTextarea();
+    if (!textarea || !snapshot) return;
+
+    textarea.value = snapshot.value;
+    textarea.focus();
+    textarea.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+    textarea.scrollTop = snapshot.scrollTop;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function recordEditorMutation(beforeSnapshot) {
+    const afterSnapshot = getEditorSnapshot();
+    if (!beforeSnapshot || !afterSnapshot || beforeSnapshot.value === afterSnapshot.value) {
+        return false;
+    }
+
+    editorUndoStack.push({ before: beforeSnapshot, after: afterSnapshot });
+    if (editorUndoStack.length > EDITOR_UNDO_LIMIT) {
+        editorUndoStack.shift();
+    }
+    editorRedoStack = [];
+    return true;
+}
+
+function undoEditorMutation() {
+    const entry = editorUndoStack[editorUndoStack.length - 1];
+    if (!entry) {
+        setEditorStatus('Nothing to undo.');
+        return;
+    }
+
+    const current = getEditorSnapshot();
+    if (!current || current.value !== entry.after.value) {
+        setEditorStatus('Undo unavailable after other edits.', true);
+        return;
+    }
+
+    editorUndoStack.pop();
+    editorRedoStack.push(entry);
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+    restoreEditorSnapshot(entry.before);
+    setEditorStatus('Undo complete. Alt+E to redo.');
+}
+
+function redoEditorMutation() {
+    const entry = editorRedoStack[editorRedoStack.length - 1];
+    if (!entry) {
+        setEditorStatus('Nothing to redo.');
+        return;
+    }
+
+    const current = getEditorSnapshot();
+    if (!current || current.value !== entry.before.value) {
+        setEditorStatus('Redo unavailable after other edits.', true);
+        return;
+    }
+
+    editorRedoStack.pop();
+    editorUndoStack.push(entry);
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+    restoreEditorSnapshot(entry.after);
+    setEditorStatus('Redo complete. Alt+U to undo.');
+}
 
 function setEditorStatus(message, isError = false) {
     const hint = document.getElementById('editor-hint');
@@ -1546,10 +1675,12 @@ function replaceCurrentEditorMatch() {
     if (!match) return;
 
     const replacement = getEditorReplaceValue();
+    const beforeSnapshot = getEditorSnapshot(textarea);
     const { nextContent, cursor } = resolveEditorReplacement(textarea.value, match, replacement);
     textarea.value = nextContent;
     textarea.focus();
     textarea.setSelectionRange(cursor, cursor);
+    recordEditorMutation(beforeSnapshot);
     editorSearchIndex = -1;
     setEditorStatus('Ctrl+Enter to save · Esc to cancel');
     refreshEditorSearch({ revealCurrent: true });
@@ -1565,6 +1696,7 @@ function replaceAllEditorMatches() {
 
     const replacement = getEditorReplaceValue();
     const matchCount = editorSearchMatches.length;
+    const beforeSnapshot = getEditorSnapshot(textarea);
     let nextContent = textarea.value;
 
     for (let index = editorSearchMatches.length - 1; index >= 0; index -= 1) {
@@ -1575,6 +1707,7 @@ function replaceAllEditorMatches() {
     textarea.value = nextContent;
     textarea.focus();
     textarea.setSelectionRange(0, 0);
+    recordEditorMutation(beforeSnapshot);
     setEditorStatus(
         `Replaced ${matchCount} match${matchCount === 1 ? '' : 'es'} · Ctrl+Enter to save · Esc to cancel`
     );
@@ -1953,15 +2086,23 @@ function openEditorModal(title, content, options = {}) {
     editorDiffMode = false;
     editorDiffStats = { added: 0, removed: 0 };
     editorModalMode = options.mode || 'wrapper';
+    editorCommandName = (options.editorCommand || '').toLowerCase();
     editorFilePath = options.filePath || '';
     editorNeedsPath = Boolean(options.needsPath);
+    editorUndoStack = [];
+    editorRedoStack = [];
 
     textarea.value = content;
     if (findInput) findInput.value = '';
     if (replaceInput) replaceInput.value = '';
     if (diffView) diffView.innerHTML = '<div class="editor-diff-empty">No changes yet.</div>';
 
-    setEditorStatus('Ctrl+Enter to save · Esc to cancel');
+    const shortcutHint = 'Ctrl+Enter to save · Esc to cancel';
+    if (editorModalMode === 'direct' && editorCommandName && editorCommandName !== 'nano') {
+        setEditorStatus(`${editorCommandName} is not supported in this UI; using GUI editor + nano shortcuts. ${shortcutHint}`);
+    } else {
+        setEditorStatus(shortcutHint);
+    }
     setEditorBusy(false);
     updateEditorToolbarState();
     updateEditorSummary();
@@ -1986,6 +2127,9 @@ function closeEditorModal() {
     editorModalMode = 'wrapper';
     editorFilePath = '';
     editorNeedsPath = false;
+    editorCommandName = '';
+    editorUndoStack = [];
+    editorRedoStack = [];
     editorSearchMatches = [];
     editorSearchIndex = -1;
     editorSearchError = '';
@@ -1997,7 +2141,488 @@ function closeEditorModal() {
     document.getElementById('terminal-input')?.focus();
 }
 
+function editorContentChanged() {
+    const textarea = getEditorTextarea();
+    return Boolean(textarea && textarea.value !== editorOriginalContent);
+}
+
+function showEditorNanoExitModal() {
+    return new Promise((resolve) => {
+        const editorPopup = document.querySelector('.editor-popup');
+        if (!editorPopup) {
+            resolve(null);
+            return;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'editor-nano-modal-overlay';
+        overlay.innerHTML = `
+            <div class="editor-nano-modal" role="dialog" aria-modal="true" aria-labelledby="editor-nano-exit-title">
+                <div id="editor-nano-exit-title" class="editor-nano-modal-title">Save modified buffer?</div>
+                <div class="editor-nano-modal-summary">The editor content has unsaved changes.</div>
+                <div class="editor-nano-modal-actions">
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="cancel">Cancel</button>
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="discard">Don't Save</button>
+                    <button type="button" class="editor-btn editor-btn-save" data-action="save">Save</button>
+                </div>
+            </div>
+        `;
+        editorPopup.appendChild(overlay);
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', handleKeydown, true);
+            overlay.remove();
+            resolve(value);
+        };
+
+        const handleKeydown = (e) => {
+            const key = e.key.toLowerCase();
+            if ((e.ctrlKey && key === 'c') || e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup(null);
+            } else if ((e.ctrlKey && key === 'o') || key === 'y' || e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup('save');
+            } else if ((e.ctrlKey && key === 'x') || key === 'n') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup('discard');
+            }
+        };
+
+        overlay.addEventListener('click', (e) => {
+            const action = e.target.closest('[data-action]')?.dataset.action;
+            if (action) cleanup(action);
+        });
+        document.addEventListener('keydown', handleKeydown, true);
+        overlay.querySelector('[data-action="save"]')?.focus();
+    });
+}
+
+function showEditorNanoWriteModal(defaultPath = '', options = {}) {
+    const { showPath = false, requirePath = false } = options;
+    return new Promise((resolve) => {
+        const editorPopup = document.querySelector('.editor-popup');
+        if (!editorPopup) {
+            resolve(null);
+            return;
+        }
+
+        const overlay = document.createElement('div');
+        overlay.className = 'editor-nano-modal-overlay';
+        const inputHtml = showPath
+            ? '<input type="text" class="editor-nano-path-input" autocomplete="off" spellcheck="false">'
+            : '';
+        overlay.innerHTML = `
+            <div class="editor-nano-modal" role="dialog" aria-modal="true" aria-labelledby="editor-nano-write-title">
+                <div id="editor-nano-write-title" class="editor-nano-modal-title">File Name to Write</div>
+                <div class="editor-nano-modal-summary">${showPath ? 'Choose where this buffer should be saved.' : 'Write the current editor buffer.'}</div>
+                ${inputHtml}
+                <div class="editor-nano-modal-error hidden"></div>
+                <div class="editor-nano-modal-actions">
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="cancel">Cancel</button>
+                    <button type="button" class="editor-btn editor-btn-save" data-action="write">Write</button>
+                </div>
+            </div>
+        `;
+        editorPopup.appendChild(overlay);
+
+        const input = overlay.querySelector('.editor-nano-path-input');
+        const errorEl = overlay.querySelector('.editor-nano-modal-error');
+        if (input) input.value = defaultPath || '';
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', handleKeydown, true);
+            overlay.remove();
+            resolve(value);
+        };
+
+        const showError = (message) => {
+            if (!errorEl) return;
+            errorEl.textContent = message;
+            errorEl.classList.remove('hidden');
+        };
+
+        const submit = () => {
+            if (!showPath) {
+                cleanup(true);
+                return;
+            }
+            const value = input.value.trim();
+            if (requirePath && !value) {
+                showError('Choose a path before saving.');
+                input.focus();
+                return;
+            }
+            cleanup(value);
+        };
+
+        const handleKeydown = (e) => {
+            const key = e.key.toLowerCase();
+            if ((e.ctrlKey && (key === 'c' || key === 'x')) || e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup(null);
+            } else if ((e.ctrlKey && key === 'o') || e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                submit();
+            }
+        };
+
+        overlay.addEventListener('click', (e) => {
+            const action = e.target.closest('[data-action]')?.dataset.action;
+            if (action === 'cancel') cleanup(null);
+            if (action === 'write') submit();
+        });
+        input?.addEventListener('input', () => errorEl?.classList.add('hidden'));
+        document.addEventListener('keydown', handleKeydown, true);
+        if (input) {
+            input.focus();
+            input.select();
+        } else {
+            overlay.querySelector('[data-action="write"]')?.focus();
+        }
+    });
+}
+
+function showEditorNanoGotoModal() {
+    return new Promise((resolve) => {
+        const editorPopup = document.querySelector('.editor-popup');
+        if (!editorPopup) {
+            resolve(null);
+            return;
+        }
+
+        const textarea = getEditorTextarea();
+        const position = getEditorCursorPosition(textarea?.value || '', textarea?.selectionStart || 0);
+        const overlay = document.createElement('div');
+        overlay.className = 'editor-nano-modal-overlay';
+        overlay.innerHTML = `
+            <div class="editor-nano-modal" role="dialog" aria-modal="true" aria-labelledby="editor-nano-goto-title">
+                <div id="editor-nano-goto-title" class="editor-nano-modal-title">Enter line number, column number</div>
+                <div class="editor-nano-modal-summary">Use line,column or just a line number.</div>
+                <input type="text" class="editor-nano-path-input" autocomplete="off" spellcheck="false">
+                <div class="editor-nano-modal-error hidden"></div>
+                <div class="editor-nano-modal-actions">
+                    <button type="button" class="editor-btn editor-btn-cancel" data-action="cancel">Cancel</button>
+                    <button type="button" class="editor-btn editor-btn-save" data-action="go">Go</button>
+                </div>
+            </div>
+        `;
+        editorPopup.appendChild(overlay);
+
+        const input = overlay.querySelector('.editor-nano-path-input');
+        const errorEl = overlay.querySelector('.editor-nano-modal-error');
+        input.value = `${position.lineIndex + 1},${position.columnIndex + 1}`;
+
+        const cleanup = (value) => {
+            document.removeEventListener('keydown', handleKeydown, true);
+            overlay.remove();
+            resolve(value);
+        };
+
+        const showError = (message) => {
+            errorEl.textContent = message;
+            errorEl.classList.remove('hidden');
+        };
+
+        const submit = () => {
+            const raw = input.value.trim();
+            const match = raw.match(/^(\d+)(?:\s*[,:\s]\s*(\d+))?$/);
+            if (!match) {
+                showError('Enter a line number, optionally followed by a column.');
+                input.focus();
+                return;
+            }
+            const line = Number.parseInt(match[1], 10);
+            const column = match[2] ? Number.parseInt(match[2], 10) : 1;
+            if (line < 1 || column < 1) {
+                showError('Line and column must be 1 or greater.');
+                input.focus();
+                return;
+            }
+            cleanup({
+                line,
+                column,
+            });
+        };
+
+        const handleKeydown = (e) => {
+            const key = e.key.toLowerCase();
+            if ((e.ctrlKey && (key === 'c' || key === 'x')) || e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                cleanup(null);
+            } else if ((e.ctrlKey && (key === '_' || key === '-' || key === '/')) || e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                submit();
+            }
+        };
+
+        overlay.addEventListener('click', (e) => {
+            const action = e.target.closest('[data-action]')?.dataset.action;
+            if (action === 'cancel') cleanup(null);
+            if (action === 'go') submit();
+        });
+        input.addEventListener('input', () => errorEl.classList.add('hidden'));
+        document.addEventListener('keydown', handleKeydown, true);
+        input.focus();
+        input.select();
+    });
+}
+
+async function requestEditorWriteOut() {
+    if (editorModalMode === 'direct') {
+        const chosenPath = await showEditorNanoWriteModal(editorFilePath, {
+            showPath: true,
+            requirePath: editorNeedsPath,
+        });
+        if (chosenPath === null) {
+            getEditorTextarea()?.focus();
+            setEditorStatus('Save cancelled.');
+            return;
+        }
+        await submitEditorModal(true, { filePath: chosenPath, skipPathPrompt: true });
+        return;
+    }
+
+    const shouldWrite = await showEditorNanoWriteModal('', { showPath: false });
+    if (!shouldWrite) {
+        getEditorTextarea()?.focus();
+        setEditorStatus('Save cancelled.');
+        return;
+    }
+    await submitEditorModal(true);
+}
+
+async function requestEditorCancel(options = {}) {
+    const { confirmDiscard = false } = options;
+    if (confirmDiscard && editorContentChanged()) {
+        const action = await showEditorNanoExitModal();
+        if (action === 'save') {
+            await requestEditorWriteOut();
+        } else if (action === 'discard') {
+            await submitEditorModal(false);
+        } else {
+            getEditorTextarea()?.focus();
+            setEditorStatus('Exit cancelled.');
+        }
+        return;
+    }
+    await submitEditorModal(false);
+}
+
+function showEditorCursorPosition() {
+    const textarea = getEditorTextarea();
+    if (!textarea) return;
+
+    const text = textarea.value;
+    const position = getEditorCursorPosition(text, textarea.selectionStart);
+    const lineCount = getEditorLineCount(text);
+    const totalChars = text.length;
+    const percent = totalChars === 0 ? 0 : Math.round((position.index / totalChars) * 100);
+    setEditorStatus(
+        `line ${position.lineIndex + 1}/${lineCount}, column ${position.columnIndex + 1}, char ${position.index}/${totalChars} (${percent}%)`
+    );
+}
+
+function pageEditorTextarea(direction) {
+    const textarea = getEditorTextarea();
+    if (!textarea) return;
+
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+
+    const position = getEditorCursorPosition(textarea.value, textarea.selectionStart);
+    const lineOffset = getEditorVisibleLineCount(textarea) * direction;
+    const nextIndex = getEditorIndexForLineColumn(
+        textarea.value,
+        position.lineIndex + lineOffset,
+        position.columnIndex
+    );
+    textarea.focus();
+    textarea.setSelectionRange(nextIndex, nextIndex);
+    textarea.scrollBy({ top: textarea.clientHeight * direction });
+}
+
+function deleteEditorCharacter() {
+    const textarea = getEditorTextarea();
+    if (!textarea) return;
+
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    if (start === end && start >= textarea.value.length) return;
+
+    const beforeSnapshot = getEditorSnapshot(textarea);
+    const deleteEnd = start === end ? start + 1 : end;
+    textarea.value = textarea.value.slice(0, start) + textarea.value.slice(deleteEnd);
+    textarea.setSelectionRange(start, start);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    recordEditorMutation(beforeSnapshot);
+}
+
+async function requestEditorGotoLine() {
+    if (editorDiffMode) {
+        setEditorDiffMode(false);
+    }
+
+    const target = await showEditorNanoGotoModal();
+    const textarea = getEditorTextarea();
+    if (!target || !textarea) {
+        textarea?.focus();
+        return;
+    }
+
+    const nextIndex = getEditorIndexForLineColumn(
+        textarea.value,
+        target.line - 1,
+        target.column - 1
+    );
+    textarea.focus();
+    textarea.setSelectionRange(nextIndex, nextIndex);
+    const position = getEditorCursorPosition(textarea.value, nextIndex);
+    setEditorStatus(`Moved to line ${position.lineIndex + 1}, column ${position.columnIndex + 1}.`);
+}
+
 function handleEditorKeydown(e) {
+    const overlay = document.getElementById('editor-overlay');
+    if (!overlay || overlay.classList.contains('hidden')) return;
+
+    const activeEl = document.activeElement;
+    const textarea = getEditorTextarea();
+    const isFindReplaceField = activeEl?.id === 'editor-find-input' || activeEl?.id === 'editor-replace-input';
+    const isTextareaFocused = textarea && activeEl === textarea;
+
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (key === 'u' && !isFindReplaceField) {
+            e.preventDefault();
+            undoEditorMutation();
+            return;
+        }
+        if (key === 'e' && !isFindReplaceField) {
+            e.preventDefault();
+            redoEditorMutation();
+            return;
+        }
+        if (key === 'w') {
+            e.preventDefault();
+            if (!getEditorFindQuery()) {
+                setEditorPanelMode('find');
+                focusEditorSearchField('find');
+            } else {
+                stepEditorSearch(1);
+            }
+            return;
+        }
+    }
+
+    // Support common nano shortcuts when using the modal editor popup.
+    if (e.ctrlKey && !e.metaKey) {
+        const key = e.key.toLowerCase();
+        if (isFindReplaceField) {
+            return;
+        }
+        if (key === 'o') {
+            e.preventDefault();
+            requestEditorWriteOut();
+            return;
+        }
+        if (key === 'x') {
+            e.preventDefault();
+            requestEditorCancel({ confirmDiscard: true });
+            return;
+        }
+        if (key === 'w') {
+            e.preventDefault();
+            setEditorPanelMode('find');
+            focusEditorSearchField('find');
+            return;
+        }
+        if (key === '_' || key === '-' || key === '/') {
+            e.preventDefault();
+            requestEditorGotoLine();
+            return;
+        }
+        if (key === 'c' && isTextareaFocused) {
+            e.preventDefault();
+            showEditorCursorPosition();
+            return;
+        }
+        if (key === 'y' && isTextareaFocused) {
+            e.preventDefault();
+            pageEditorTextarea(-1);
+            return;
+        }
+        if (key === 'v' && isTextareaFocused) {
+            e.preventDefault();
+            pageEditorTextarea(1);
+            return;
+        }
+        if (key === 'd' && isTextareaFocused) {
+            e.preventDefault();
+            deleteEditorCharacter();
+            return;
+        }
+        if (key === '\\') {
+            e.preventDefault();
+            setEditorPanelMode('replace');
+            focusEditorSearchField('replace');
+            return;
+        }
+        if (key === 'g' && !isFindReplaceField) {
+            e.preventDefault();
+            stepEditorSearch(1);
+            return;
+        }
+        if (key === 'k' && isTextareaFocused) {
+            e.preventDefault();
+            const beforeSnapshot = getEditorSnapshot(textarea);
+            const cursor = textarea.selectionStart;
+            const { lineStart, lineEnd } = getEditorLineBounds(textarea.value, cursor);
+            const hasTrailingNewline = lineEnd < textarea.value.length;
+            const removeEnd = hasTrailingNewline ? lineEnd + 1 : lineEnd;
+            editorNanoCutBuffer = textarea.value.slice(lineStart, removeEnd);
+            textarea.value = textarea.value.slice(0, lineStart) + textarea.value.slice(removeEnd);
+            textarea.setSelectionRange(lineStart, lineStart);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            recordEditorMutation(beforeSnapshot);
+            return;
+        }
+        if (key === 'u' && isTextareaFocused) {
+            e.preventDefault();
+            if (!editorNanoCutBuffer) {
+                setEditorStatus('Nothing to uncut.');
+                return;
+            }
+            const beforeSnapshot = getEditorSnapshot(textarea);
+            const cursor = textarea.selectionStart;
+            textarea.value = textarea.value.slice(0, cursor) + editorNanoCutBuffer + textarea.value.slice(cursor);
+            const nextCursor = cursor + editorNanoCutBuffer.length;
+            textarea.setSelectionRange(nextCursor, nextCursor);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            recordEditorMutation(beforeSnapshot);
+            return;
+        }
+        if (key === 'a' && isTextareaFocused) {
+            e.preventDefault();
+            const { lineStart } = getEditorLineBounds(textarea.value, textarea.selectionStart);
+            textarea.setSelectionRange(lineStart, lineStart);
+            return;
+        }
+        if (key === 'e' && isTextareaFocused) {
+            e.preventDefault();
+            const { lineEnd } = getEditorLineBounds(textarea.value, textarea.selectionStart);
+            textarea.setSelectionRange(lineEnd, lineEnd);
+            return;
+        }
+    }
+
     if (e.key === 'Escape') {
         if (editorDiffMode) {
             e.preventDefault();
@@ -2018,15 +2643,15 @@ function handleEditorKeydown(e) {
     }
 }
 
-async function submitEditorModal(saved) {
+async function submitEditorModal(saved, options = {}) {
     if (!socket || !socket.id || !terminalToken) {
         setEditorStatus('Connection lost. Reconnect before trying again.', true);
         return;
     }
 
     const content = getEditorTextarea().value;
-    let filePath = editorFilePath;
-    if (saved && editorModalMode === 'direct' && editorNeedsPath) {
+    let filePath = options.filePath ?? editorFilePath;
+    if (saved && !options.skipPathPrompt && editorModalMode === 'direct' && editorNeedsPath) {
         const chosenPath = await showEditorSavePathModal(filePath);
         if (chosenPath === null) {
             getEditorTextarea()?.focus();

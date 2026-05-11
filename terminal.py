@@ -510,7 +510,7 @@ def init_terminal_socketio(socketio):
 
         direct_editor = get_direct_editor_request(command, context_cwd)
         if direct_editor:
-            title, content, file_path, needs_path, error = direct_editor
+            title, content, file_path, needs_path, error, editor_cmd = direct_editor
             if error:
                 emit("output", {"data": f"{command}\nCould not open editor: {error}\n"})
                 session.write("\n")
@@ -527,6 +527,7 @@ def init_terminal_socketio(socketio):
                     "title": title,
                     "content": content,
                     "mode": "direct",
+                    "editorCommand": editor_cmd,
                     "filePath": file_path or "",
                     "needsPath": needs_path,
                 },
@@ -1044,7 +1045,7 @@ def check_diff_editor_redirect(command: str, cwd: str | None = None) -> str | No
     return "/diff/"
 
 
-def get_direct_editor_request(command: str, cwd: str | None = None) -> tuple[str, str, str, bool, str | None] | None:
+def get_direct_editor_request(command: str, cwd: str | None = None) -> tuple[str, str, str, bool, str | None, str] | None:
     """Return modal editor data for direct editor commands."""
     parsed = parse_intercept_command(command)
     if not parsed:
@@ -1056,19 +1057,19 @@ def get_direct_editor_request(command: str, cwd: str | None = None) -> tuple[str
 
     target = _editor_file_path(parts, idx, cwd)
     if target is None:
-        return "Untitled", "", "", True, None
+        return "Untitled", "", "", True, None, parts[idx]
 
     is_file, error, status = check_path_is_file(target, allow_symlink=True)
     if is_file:
         success, content = read_file(target)
         if not success:
-            return target.name or str(target), "", str(target), False, content
+            return target.name or str(target), "", str(target), False, content, parts[idx]
     elif status == 404:
         content = ""
     else:
-        return target.name or str(target), "", str(target), False, error or "Could not open file"
+        return target.name or str(target), "", str(target), False, error or "Could not open file", parts[idx]
 
-    return target.name or str(target), content, str(target), False, None
+    return target.name or str(target), content, str(target), False, None, parts[idx]
 
 
 def check_task_manager_command(command: str) -> bool:
