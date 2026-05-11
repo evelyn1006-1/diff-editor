@@ -2594,8 +2594,12 @@ function handleEditorKeydown(e) {
             recordEditorMutation(beforeSnapshot);
             return;
         }
-        if (key === 'u' && isTextareaFocused && editorNanoCutBuffer) {
+        if (key === 'u' && isTextareaFocused) {
             e.preventDefault();
+            if (!editorNanoCutBuffer) {
+                setEditorStatus('Nothing to uncut.');
+                return;
+            }
             const beforeSnapshot = getEditorSnapshot(textarea);
             const cursor = textarea.selectionStart;
             textarea.value = textarea.value.slice(0, cursor) + editorNanoCutBuffer + textarea.value.slice(cursor);
