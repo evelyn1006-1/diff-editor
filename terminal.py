@@ -551,7 +551,7 @@ def init_terminal_socketio(socketio):
         if pager_result is not None:
             title, content = pager_result
             emit("output", {"data": f"{command}\nOpening in pager...\n"})
-            emit("pager_popup", {"title": title, "content": content})
+            emit("pager_popup", {"title": title, "content": content, "command": command})
             session.write("\n")
             return
 
@@ -1164,6 +1164,21 @@ def _has_shell_operators(command: str) -> bool:
 _PAGER_MAX_CHARS = 512 * 1024  # 512 KB
 
 
+def _tail_follow_to_snapshot_args(args: list[str]) -> tuple[list[str], bool]:
+    """Return (args_without_follow, follow_requested) for tail invocations."""
+    cleaned: list[str] = []
+    follow = False
+    for arg in args:
+        if arg in {"-f", "-F", "--follow"}:
+            follow = True
+            continue
+        if arg.startswith("--follow="):
+            follow = True
+            continue
+        cleaned.append(arg)
+    return cleaned, follow
+
+
 def _split_pipe_to_pager(command: str) -> tuple[str, str, list[str]] | None:
     """Return (producer_cmd, pager_cmd, pager_args) for simple pipelines to a pager."""
     try:
@@ -1400,6 +1415,17 @@ def get_pager_content(command: str, cwd: str, session_id: str = "", *, as_root: 
             if content is not None:
                 out = ("journalctl", content)
 
+    elif cmd == "tail":
+        args = parts[idx + 1:]
+        tail_args, follow_requested = _tail_follow_to_snapshot_args(args)
+        if follow_requested:
+            file_args = _pager_file_args(tail_args)
+            if file_args:
+                run_parts = parts[:idx + 1] + tail_args
+                content = _run_no_pager(run_parts, cwd, as_root=as_root)
+                if content is not None:
+                    out = (f"tail -f {' '.join(file_args)}", content)
+
     if out is None:
         return None
     title, content = out
@@ -1423,12 +1449,35 @@ def pager_request():
     if _socketio_ref:
         _socketio_ref.emit(
             "pager_popup",
-            {"title": title, "content": content},
+            {"title": title, "content": content, "command": ""},
             room=session_id,
             namespace="/terminal",
         )
 
     return jsonify({"ok": True})
+
+
+@terminal_bp.route("/terminal/pager_poll", methods=["POST"])
+def pager_poll():
+    """Re-run an interceptable pager command and return refreshed content."""
+    data = request.get_json(silent=True) or {}
+    session_id = str(data.get("session_id", "")).strip()
+    command = str(data.get("command", "")).strip()
+    if not session_id or not command:
+        return jsonify({"error": "missing session_id or command"}), 400
+    terminal_session_id = request.headers.get("X-Terminal-Session", "")
+    terminal_token = request.headers.get("X-Terminal-Token", "")
+    if terminal_session_id != session_id or not pty_manager.validate_token(terminal_session_id, terminal_token):
+        return jsonify({"error": "invalid or missing terminal session"}), 403
+    session = pty_manager.get_session(session_id)
+    if not session:
+        return jsonify({"error": "invalid session"}), 403
+    cwd = _safe_cwd_for_session(session.current_cwd)
+    result = get_pager_content(command, cwd, session_id, as_root=bool(getattr(session, "is_root", False)))
+    if result is None:
+        return jsonify({"error": "command is not pager-interceptable"}), 400
+    title, content = result
+    return jsonify({"ok": True, "title": title, "content": content})
 
 
 @terminal_bp.route("/terminal")
