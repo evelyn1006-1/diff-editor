@@ -1270,6 +1270,10 @@ textarea.copy-input:disabled {
     overflow: hidden;
 }
 
+.pdf-sidebar-collapsed .pdf-sidebar {
+    display: none;
+}
+
 .pdf-sidebar-title {
     font-weight: 700;
     padding: 0.6rem 0.75rem;
@@ -1306,6 +1310,10 @@ textarea.copy-input:disabled {
     gap: 0.35rem;
     flex-wrap: wrap;
     align-items: center;
+}
+
+.pdf-sidebar-toggle {
+    min-width: 5rem;
 }
 
 .pdf-view-btn {
@@ -1376,6 +1384,33 @@ textarea.copy-input:disabled {
 
 .pdf-text-layer ::selection {
     background: rgba(0, 110, 255, 0.3);
+}
+
+@media (max-width: 600px) {
+    .pdf-preview-container {
+        padding: 0.5rem;
+    }
+
+    .pdf-workspace {
+        gap: 0.5rem;
+    }
+
+    .pdf-sidebar {
+        width: 7.5rem;
+        min-width: 7.5rem;
+    }
+
+    .pdf-sidebar-title {
+        padding: 0.45rem 0.55rem;
+    }
+
+    .pdf-thumbs {
+        padding: 0.3rem;
+    }
+
+    .pdf-thumb-item {
+        padding: 0.4rem 0.45rem;
+    }
 }
 
 /* Scrollbar - Cute style */

@@ -348,12 +348,13 @@ async function renderPdfWorkspace(container, pdfUrl) {
     }
 
     wrapper.innerHTML = `
-        <div class="pdf-sidebar">
+        <div class="pdf-sidebar" id="pdf-sidebar">
             <div class="pdf-sidebar-title">Pages</div>
             <div class="pdf-thumbs" id="pdf-thumbs"></div>
         </div>
         <div class="pdf-main">
             <div class="pdf-toolbar">
+                <button type="button" class="pdf-view-btn pdf-sidebar-toggle" id="pdf-toggle-pages" aria-controls="pdf-sidebar" aria-expanded="true">Pages</button>
                 <button type="button" class="pdf-view-btn" id="pdf-zoom-out" title="Zoom out">−</button>
                 <span class="pdf-zoom-level" id="pdf-zoom-level">135%</span>
                 <button type="button" class="pdf-view-btn" id="pdf-zoom-in" title="Zoom in">+</button>
@@ -367,6 +368,18 @@ async function renderPdfWorkspace(container, pdfUrl) {
     const statusEl = document.getElementById('status');
     const sidebarEl = wrapper.querySelector('#pdf-thumbs');
     const pagesEl = wrapper.querySelector('#pdf-pages');
+    const pagesToggleBtn = wrapper.querySelector('#pdf-toggle-pages');
+
+    const setPdfSidebarVisible = (isVisible) => {
+        wrapper.classList.toggle('pdf-sidebar-collapsed', !isVisible);
+        pagesToggleBtn.setAttribute('aria-expanded', String(isVisible));
+        pagesToggleBtn.textContent = isVisible ? 'Hide pages' : 'Pages';
+        pagesToggleBtn.title = isVisible ? 'Hide page list' : 'Show page list';
+    };
+    setPdfSidebarVisible(!window.matchMedia('(max-width: 600px)').matches);
+    pagesToggleBtn.addEventListener('click', () => {
+        setPdfSidebarVisible(wrapper.classList.contains('pdf-sidebar-collapsed'));
+    });
 
     if (!window.pdfjsLib) {
         statusEl.textContent = 'PDF viewer library unavailable';
@@ -391,8 +404,18 @@ async function renderPdfWorkspace(container, pdfUrl) {
     }
 
     const zoomLevelEl = wrapper.querySelector('#pdf-zoom-level');
+    let pdfRenderGeneration = 0;
     const renderAllPages = async () => {
-        await renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl);
+        const renderGeneration = pdfRenderGeneration + 1;
+        pdfRenderGeneration = renderGeneration;
+        await renderPdfPages(
+            pdfDoc,
+            pagesEl,
+            sidebarEl,
+            zoomLevelEl,
+            pdfScale,
+            () => renderGeneration === pdfRenderGeneration,
+        );
     };
 
     wrapper.querySelector('#pdf-zoom-out').addEventListener('click', async () => {
@@ -417,15 +440,19 @@ async function renderPdfWorkspace(container, pdfUrl) {
     return true;
 }
 
-async function renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl) {
+async function renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl, renderScale, isCurrentRender) {
+    if (!isCurrentRender()) return;
+
     pagesEl.innerHTML = '';
     sidebarEl.innerHTML = '';
-    zoomLevelEl.textContent = `${Math.round(pdfScale * 100)}%`;
+    zoomLevelEl.textContent = `${Math.round(renderScale * 100)}%`;
 
     for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
         // eslint-disable-next-line no-await-in-loop
         const page = await pdfDoc.getPage(pageNumber);
-        const viewport = page.getViewport({ scale: pdfScale });
+        if (!isCurrentRender()) return;
+
+        const viewport = page.getViewport({ scale: renderScale });
 
         const pageWrap = document.createElement('div');
         pageWrap.className = 'pdf-page-wrap';
@@ -447,10 +474,13 @@ async function renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl) {
 
         // eslint-disable-next-line no-await-in-loop
         await page.render({ canvasContext: pageCanvas.getContext('2d'), viewport }).promise;
+        if (!isCurrentRender()) return;
 
         try {
             // eslint-disable-next-line no-await-in-loop
             const textContent = await page.getTextContent();
+            if (!isCurrentRender()) return;
+
             // eslint-disable-next-line no-await-in-loop
             await window.pdfjsLib.renderTextLayer({
                 textContentSource: textContent,
@@ -458,9 +488,12 @@ async function renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl) {
                 viewport,
                 textDivs: [],
             }).promise;
+            if (!isCurrentRender()) return;
         } catch {
             textLayer.remove();
         }
+
+        if (!isCurrentRender()) return;
 
         const thumbWrap = document.createElement('button');
         thumbWrap.type = 'button';
