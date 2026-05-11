@@ -947,14 +947,18 @@ function stopPagerPolling() {
 }
 
 async function pollPagerOnce() {
-    if (!pagerPollCommand || !socket?.id) return;
+    if (!pagerPollCommand || !socket?.id || !terminalToken) return;
     const overlay = document.getElementById('pager-overlay');
     if (!overlay || overlay.classList.contains('hidden')) return;
     const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
     try {
         const res = await fetch(`${basePath}/terminal/pager_poll`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Terminal-Session': socket.id,
+                'X-Terminal-Token': terminalToken,
+            },
             body: JSON.stringify({ session_id: socket.id, command: pagerPollCommand }),
         });
         if (!res.ok) return;

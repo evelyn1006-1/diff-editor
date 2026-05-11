@@ -1465,6 +1465,10 @@ def pager_poll():
     command = str(data.get("command", "")).strip()
     if not session_id or not command:
         return jsonify({"error": "missing session_id or command"}), 400
+    terminal_session_id = request.headers.get("X-Terminal-Session", "")
+    terminal_token = request.headers.get("X-Terminal-Token", "")
+    if terminal_session_id != session_id or not pty_manager.validate_token(terminal_session_id, terminal_token):
+        return jsonify({"error": "invalid or missing terminal session"}), 403
     session = pty_manager.get_session(session_id)
     if not session:
         return jsonify({"error": "invalid session"}), 403
