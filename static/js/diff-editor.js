@@ -12,6 +12,7 @@ let isImageFile = false;
 let isPdfFile = false;
 let isTextboxMode = false;
 let savedScrollInfo = null;
+let previewNetworkEnabled = false;
 let pdfScale = 1.35;
 const PDF_MIN_SCALE = 0.5;
 const PDF_MAX_SCALE = 3.0;
@@ -187,15 +188,22 @@ async function initDiffEditor() {
             runBtn.classList.remove('hidden');
             runBtn.addEventListener('click', runFile);
         }
+        const renderBtn = document.getElementById('btn-render');
+        if (['html', 'markdown'].includes(fileLanguage)) {
+            renderBtn.classList.remove('hidden');
+            renderBtn.addEventListener('click', () => renderPreviewFile({ network: false }));
+        }
 
         // Run terminal modal controls
         const runTerminalOverlay = document.getElementById('run-terminal-overlay');
         const runTerminalFrame = document.getElementById('run-terminal-frame');
         const runTerminalRestore = document.getElementById('btn-run-terminal-restore');
+        const previewNetworkBtn = document.getElementById('btn-preview-network');
 
         function closeRunTerminal() {
             runTerminalOverlay.classList.add('hidden');
             runTerminalRestore.classList.add('hidden');
+            previewNetworkBtn.classList.add('hidden');
             runTerminalFrame.src = 'about:blank';
         }
 
@@ -212,6 +220,9 @@ async function initDiffEditor() {
         document.getElementById('btn-run-terminal-close').addEventListener('click', closeRunTerminal);
         document.getElementById('btn-run-terminal-minimize').addEventListener('click', minimizeRunTerminal);
         runTerminalRestore.addEventListener('click', restoreRunTerminal);
+        previewNetworkBtn.addEventListener('click', () => {
+            renderPreviewFile({ network: !previewNetworkEnabled });
+        });
         document.getElementById('btn-run-terminal-popout').addEventListener('click', () => {
             const src = runTerminalFrame.src;
             if (src) window.open(src, '_blank');
@@ -1273,6 +1284,58 @@ function shellQuote(value) {
     return `'${String(value).replace(/'/g, "'\"'\"'")}'`;
 }
 
+function renderedFileUrl(filePath, options = {}) {
+    const normalizedPath = String(filePath).replace(/^\/+/, '');
+    const encodedPath = normalizedPath.split('/').map(encodeURIComponent).join('/');
+    const basePath = window.location.pathname.startsWith('/diff/') ? '/diff' : '';
+    const query = options.network ? '?network=1' : '';
+    return `${basePath}/render-file/${encodedPath}${query}`;
+}
+
+async function saveBeforeAction(button, actionLabel) {
+    const statusEl = document.getElementById('status');
+    const newContent = getCurrentModifiedContent();
+    const hasUnsavedChanges = newContent !== currentContent;
+
+    if (!hasUnsavedChanges) return true;
+
+    statusEl.textContent = `Saving before ${actionLabel}...`;
+    statusEl.className = 'status';
+
+    try {
+        const response = await fetch('api/file', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({
+                path: FILE_PATH,
+                content: newContent,
+            }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            statusEl.textContent = data.error || 'Save failed';
+            statusEl.className = 'status error';
+            button.disabled = false;
+            return false;
+        }
+
+        currentContent = newContent;
+        isModified = false;
+        updateStatus();
+        return true;
+    } catch (err) {
+        statusEl.textContent = `Error: ${err.message}`;
+        statusEl.className = 'status error';
+        button.disabled = false;
+        return false;
+    }
+}
+
 async function runFile() {
     const statusEl = document.getElementById('status');
     const runBtn = document.getElementById('btn-run');
@@ -1369,55 +1432,22 @@ async function runFile() {
 
     runBtn.disabled = true;
 
-    // Save file first if there are unsaved changes
-    const newContent = getCurrentModifiedContent();
-    const hasUnsavedChanges = newContent !== currentContent;
-
-    if (hasUnsavedChanges) {
-        statusEl.textContent = 'Saving before run...';
-        statusEl.className = 'status';
-
-        try {
-            const response = await fetch('api/file', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-Token': CSRF_TOKEN,
-                },
-                body: JSON.stringify({
-                    path: FILE_PATH,
-                    content: newContent,
-                }),
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                statusEl.textContent = data.error || 'Save failed';
-                statusEl.className = 'status error';
-                runBtn.disabled = false;
-                return;
-            }
-
-            // Update state
-            currentContent = newContent;
-            isModified = false;
-        } catch (err) {
-            statusEl.textContent = `Error: ${err.message}`;
-            statusEl.className = 'status error';
-            runBtn.disabled = false;
-            return;
-        }
-    }
+    if (!await saveBeforeAction(runBtn, 'run')) return;
 
     // Close any existing run terminal session before starting a new one
     const overlay = document.getElementById('run-terminal-overlay');
     const frame = document.getElementById('run-terminal-frame');
     const restoreBtn = document.getElementById('btn-run-terminal-restore');
+    const titleEl = overlay.querySelector('.run-terminal-title');
+    const previewNetworkBtn = document.getElementById('btn-preview-network');
     if (frame.src && frame.src !== window.location.href) {
         frame.src = 'about:blank';
     }
+    frame.removeAttribute('sandbox');
+    previewNetworkBtn.classList.add('hidden');
     restoreBtn.classList.add('hidden');
+    restoreBtn.textContent = '▶ Terminal';
+    titleEl.textContent = 'Run Output';
 
     // Open inline terminal modal with the run command
     const terminalUrl = `/terminal?cmd=${encodeURIComponent(runCommand)}`;
@@ -1426,6 +1456,59 @@ async function runFile() {
 
     runBtn.disabled = false;
     statusEl.textContent = 'Running...';
+    statusEl.className = 'status';
+}
+
+function updatePreviewNetworkButton(button, networkEnabled) {
+    if (!button) return;
+    button.classList.remove('hidden');
+    button.classList.toggle('enabled', networkEnabled);
+    button.textContent = networkEnabled ? 'Network' : 'Safe';
+    button.setAttribute('aria-pressed', networkEnabled ? 'true' : 'false');
+    button.title = networkEnabled
+        ? 'External preview resources are allowed'
+        : 'External preview resources are blocked';
+}
+
+async function renderPreviewFile(options = {}) {
+    const statusEl = document.getElementById('status');
+    const renderBtn = document.getElementById('btn-render');
+    const networkEnabled = options.network === true;
+
+    if (!diffEditor) return;
+
+    renderBtn.disabled = true;
+
+    if (!await saveBeforeAction(renderBtn, 'render')) return;
+
+    const overlay = document.getElementById('run-terminal-overlay');
+    const frame = document.getElementById('run-terminal-frame');
+    const restoreBtn = document.getElementById('btn-run-terminal-restore');
+    const titleEl = overlay.querySelector('.run-terminal-title');
+    const previewNetworkBtn = document.getElementById('btn-preview-network');
+    if (frame.src && frame.src !== window.location.href) {
+        frame.src = 'about:blank';
+    }
+    frame.setAttribute(
+        'sandbox',
+        networkEnabled
+            ? 'allow-scripts allow-forms allow-modals allow-popups allow-downloads'
+            : 'allow-scripts'
+    );
+    previewNetworkEnabled = networkEnabled;
+    updatePreviewNetworkButton(previewNetworkBtn, networkEnabled);
+    restoreBtn.classList.add('hidden');
+    restoreBtn.textContent = '▶ Preview';
+    titleEl.textContent = fileLanguage === 'markdown' ? 'Markdown Preview' : 'HTML Preview';
+
+    frame.src = renderedFileUrl(FILE_PATH, { network: networkEnabled });
+    overlay.classList.remove('hidden');
+
+    renderBtn.disabled = false;
+    const modeLabel = networkEnabled ? 'network' : 'safe';
+    statusEl.textContent = fileLanguage === 'markdown'
+        ? `Rendered Markdown preview (${modeLabel})`
+        : `Rendered HTML preview (${modeLabel})`;
     statusEl.className = 'status';
 }
 

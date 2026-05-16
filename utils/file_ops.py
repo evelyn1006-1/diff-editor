@@ -1056,8 +1056,8 @@ IMAGE_EXIF_ORIENTATION_LABELS = {
 
 EDITOR_LANGUAGE_BY_SUFFIX = {
     ".py": "python", ".js": "javascript", ".ts": "typescript",
-    ".jsx": "javascript", ".tsx": "typescript", ".html": "html",
-    ".css": "css", ".scss": "scss", ".json": "json", ".md": "markdown",
+    ".jsx": "javascript", ".tsx": "typescript", ".html": "html", ".htm": "html",
+    ".css": "css", ".scss": "scss", ".json": "json", ".md": "markdown", ".markdown": "markdown",
     ".yaml": "yaml", ".yml": "yaml", ".xml": "xml", ".sql": "sql",
     ".sh": "shell", ".bash": "shell", ".zsh": "shell",
     ".rs": "rust", ".go": "go", ".java": "java", ".c": "c",

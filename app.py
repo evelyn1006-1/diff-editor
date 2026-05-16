@@ -2,9 +2,11 @@
 Diff Editor - A web-based side-by-side file diff and editing tool.
 """
 
+import ast
 import difflib
 import fcntl
 import hashlib
+import html
 import ipaddress
 import io
 import json
@@ -21,9 +23,22 @@ import threading
 import time
 import datetime
 from pathlib import Path
+from urllib.parse import quote, urlencode, urlsplit
 
-from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, session, url_for, Response, send_file
+from dotenv import dotenv_values, load_dotenv
+from flask import (
+    Flask,
+    Response,
+    get_flashed_messages,
+    jsonify,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
+from jinja2 import ChainableUndefined, Environment, FileSystemLoader, Undefined, select_autoescape
+from jinja2.utils import htmlsafe_json_dumps
 from werkzeug.middleware.proxy_fix import ProxyFix
 from openai import OpenAI
 
@@ -254,6 +269,378 @@ def get_run_tooling_status(language: str) -> tuple[dict[str, object], int]:
         with RUN_TOOLING_CACHE_LOCK:
             RUN_TOOLING_CACHE[normalized] = dict(status)
     return status, http_status
+
+
+class PreviewConfig(dict):
+    """Dict that also supports Flask-style config attribute access in previews."""
+
+    def __getattr__(self, key: str):
+        if key in self:
+            return self[key]
+        return PreviewUndefined(name=f"config.{key}")
+
+
+class PreviewUndefined(ChainableUndefined):
+    """Undefined value that renders as empty data for best-effort previews."""
+
+    def __call__(self, *args, **kwargs):
+        return args[1] if len(args) > 1 else ""
+
+    def __getitem__(self, key):
+        return self
+
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 0
+
+    def __bool__(self):
+        return False
+
+    def __str__(self):
+        return ""
+
+    def __html__(self):
+        return ""
+
+    def __int__(self):
+        return 0
+
+    def __float__(self):
+        return 0.0
+
+    def __eq__(self, other):
+        return other in (None, "", False)
+
+    def get(self, key=None, default=""):
+        return default or ""
+
+    def keys(self):
+        return []
+
+    def values(self):
+        return []
+
+    def items(self):
+        return []
+
+
+def _preview_json_value(value):
+    if isinstance(value, Undefined):
+        return None
+    if isinstance(value, dict):
+        return {str(_preview_json_value(key)): _preview_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_preview_json_value(item) for item in value]
+    return value
+
+
+def _preview_tojson(value, indent=None):
+    return htmlsafe_json_dumps(_preview_json_value(value), dumps=json.dumps, indent=indent)
+
+
+def _safe_markdown_attr(value: str) -> str:
+    return html.escape(html.unescape(value).strip(), quote=True)
+
+
+def _safe_markdown_url(value: str) -> str:
+    normalized = html.unescape(value).strip()
+    parsed = urlsplit(normalized)
+    if parsed.scheme and parsed.scheme.lower() not in {"http", "https", "mailto", "tel"}:
+        return "#"
+    return html.escape(normalized, quote=True)
+
+
+def _render_markdown_inline(text: str) -> str:
+    placeholders: list[str] = []
+
+    def stash(value: str) -> str:
+        placeholders.append(value)
+        return f"\x00{len(placeholders) - 1}\x00"
+
+    def render_image(match: re.Match) -> str:
+        title = match.group(3)
+        title_attr = f' title="{_safe_markdown_attr(title)}"' if title else ""
+        return stash(
+            f'<img src="{_safe_markdown_url(match.group(2))}" alt="{_safe_markdown_attr(match.group(1))}"'
+            f"{title_attr}>"
+        )
+
+    def render_link(match: re.Match) -> str:
+        title = match.group(3)
+        title_attr = f' title="{_safe_markdown_attr(title)}"' if title else ""
+        return stash(f'<a href="{_safe_markdown_url(match.group(2))}"{title_attr}>{match.group(1)}</a>')
+
+    escaped = html.escape(text, quote=True)
+    escaped = re.sub(
+        r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+&quot;([^&]*)&quot;)?\)",
+        render_image,
+        escaped,
+    )
+    escaped = re.sub(
+        r"\[([^\]]+)\]\(([^)\s]+)(?:\s+&quot;([^&]*)&quot;)?\)",
+        render_link,
+        escaped,
+    )
+    escaped = re.sub(r"`([^`]+)`", lambda match: stash(f"<code>{match.group(1)}</code>"), escaped)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"(?<![\w*])\*([^*]+)\*(?![\w*])", r"<em>\1</em>", escaped)
+    escaped = re.sub(r"(?<![\w_])_([^_]+)_(?![\w_])", r"<em>\1</em>", escaped)
+
+    for index, value in enumerate(placeholders):
+        escaped = escaped.replace(f"\x00{index}\x00", value)
+    return escaped
+
+
+def _wrap_markdown_preview(body_html: str, title: str) -> str:
+    title_html = html.escape(title)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title_html}</title>
+  <style>
+    :root {{ color-scheme: light; }}
+    body {{ margin: 0; background: #f8fafc; color: #1f2937; font: 16px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+    main {{ max-width: 860px; margin: 0 auto; padding: 2rem clamp(1rem, 4vw, 3rem) 4rem; background: #fff; min-height: 100vh; box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.25); }}
+    h1, h2, h3, h4, h5, h6 {{ line-height: 1.2; margin: 1.7em 0 0.55em; color: #111827; }}
+    h1 {{ margin-top: 0; font-size: 2rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.35rem; }}
+    a {{ color: #0f766e; }}
+    img {{ max-width: 100%; height: auto; }}
+    pre {{ overflow: auto; padding: 1rem; border-radius: 0.5rem; background: #111827; color: #f9fafb; }}
+    code {{ border-radius: 0.25rem; background: #eef2f7; padding: 0.1rem 0.25rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }}
+    pre code {{ background: transparent; padding: 0; }}
+    blockquote {{ margin: 1rem 0; padding-left: 1rem; border-left: 4px solid #cbd5e1; color: #475569; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border: 1px solid #d1d5db; padding: 0.4rem 0.6rem; }}
+  </style>
+</head>
+<body>
+  <main>
+{body_html}
+  </main>
+</body>
+</html>"""
+
+
+def _render_markdown_document(markdown_text: str, title: str) -> str:
+    # Keep previews deterministic and raw HTML inert regardless of optional packages.
+    lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    rendered: list[str] = []
+    paragraph: list[str] = []
+    list_type: str | None = None
+    in_code = False
+    code_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            rendered.append(f"<p>{_render_markdown_inline(' '.join(paragraph))}</p>")
+            paragraph.clear()
+
+    def close_list() -> None:
+        nonlocal list_type
+        if list_type:
+            rendered.append(f"</{list_type}>")
+            list_type = None
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        fence_match = re.match(r"^```", line)
+        if fence_match:
+            if in_code:
+                rendered.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                code_lines.clear()
+                in_code = False
+            else:
+                flush_paragraph()
+                close_list()
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(raw_line)
+            continue
+
+        if not line.strip():
+            flush_paragraph()
+            close_list()
+            continue
+
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading:
+            flush_paragraph()
+            close_list()
+            level = len(heading.group(1))
+            rendered.append(f"<h{level}>{_render_markdown_inline(heading.group(2).strip())}</h{level}>")
+            continue
+
+        if re.match(r"^[-*_]\s*[-*_]\s*[-*_][-*_\s]*$", line):
+            flush_paragraph()
+            close_list()
+            rendered.append("<hr>")
+            continue
+
+        quote = re.match(r"^>\s?(.*)$", line)
+        if quote:
+            flush_paragraph()
+            close_list()
+            rendered.append(f"<blockquote>{_render_markdown_inline(quote.group(1))}</blockquote>")
+            continue
+
+        unordered = re.match(r"^\s*[-*+]\s+(.+)$", line)
+        ordered = re.match(r"^\s*\d+\.\s+(.+)$", line)
+        if unordered or ordered:
+            flush_paragraph()
+            next_list_type = "ul" if unordered else "ol"
+            if list_type != next_list_type:
+                close_list()
+                rendered.append(f"<{next_list_type}>")
+                list_type = next_list_type
+            rendered.append(f"<li>{_render_markdown_inline((unordered or ordered).group(1))}</li>")
+            continue
+
+        close_list()
+        paragraph.append(line.strip())
+
+    if in_code:
+        rendered.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+    flush_paragraph()
+    close_list()
+
+    body_html = "\n".join(rendered)
+    return _wrap_markdown_preview(body_html, title)
+
+
+def _eval_preview_config_expr(node: ast.AST, names: dict[str, object], env_values: dict[str, object]) -> object:
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return names.get(node.id, PreviewUndefined(name=node.id))
+    if isinstance(node, ast.List):
+        return [_eval_preview_config_expr(item, names, env_values) for item in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(_eval_preview_config_expr(item, names, env_values) for item in node.elts)
+    if isinstance(node, ast.Set):
+        return {_eval_preview_config_expr(item, names, env_values) for item in node.elts}
+    if isinstance(node, ast.Dict):
+        return {
+            _eval_preview_config_expr(key, names, env_values): _eval_preview_config_expr(value, names, env_values)
+            for key, value in zip(node.keys, node.values)
+            if key is not None
+        }
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        value = _eval_preview_config_expr(node.operand, names, env_values)
+        return -value
+    if isinstance(node, ast.BinOp):
+        left = _eval_preview_config_expr(node.left, names, env_values)
+        right = _eval_preview_config_expr(node.right, names, env_values)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Sub):
+            return left - right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.FloorDiv):
+            return left // right
+        if isinstance(node.op, ast.Div):
+            return left / right
+    if isinstance(node, ast.Call):
+        func = node.func
+        args = [_eval_preview_config_expr(arg, names, env_values) for arg in node.args]
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            owner = func.value.id
+            if owner == "os" and func.attr == "getenv":
+                key = str(args[0]) if args else ""
+                default = args[1] if len(args) > 1 else None
+                return os.getenv(key, env_values.get(key, default))
+            owner_value = names.get(owner)
+            if func.attr == "keys" and hasattr(owner_value, "keys"):
+                return owner_value.keys()
+            if func.attr == "values" and hasattr(owner_value, "values"):
+                return owner_value.values()
+            if func.attr == "items" and hasattr(owner_value, "items"):
+                return owner_value.items()
+        if isinstance(func, ast.Name):
+            if func.id == "int":
+                return int(args[0])
+            if func.id == "str":
+                return str(args[0])
+            if func.id == "float":
+                return float(args[0])
+            if func.id == "bool":
+                return bool(args[0])
+            if func.id == "list":
+                return list(args[0])
+            if func.id == "set":
+                return set(args[0])
+            if func.id == "tuple":
+                return tuple(args[0])
+            if func.id == "dict":
+                return dict(args[0]) if args else {}
+    raise ValueError(f"Unsupported config expression: {ast.dump(node, include_attributes=False)}")
+
+
+def _assign_preview_name(target: ast.AST, value: object, names: dict[str, object]) -> None:
+    if isinstance(target, ast.Name):
+        names[target.id] = value
+
+
+def _load_project_preview_config(project_root: Path, base_config: dict[str, object]) -> PreviewConfig:
+    preview_config = PreviewConfig(base_config)
+    app_file = project_root / "app.py"
+    if not app_file.exists():
+        return preview_config
+
+    try:
+        source = app_file.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return preview_config
+
+    env_values = dict(dotenv_values(project_root / ".env"))
+    names: dict[str, object] = {}
+
+    for stmt in tree.body:
+        try:
+            if isinstance(stmt, ast.Assign):
+                value = _eval_preview_config_expr(stmt.value, names, env_values)
+                for target in stmt.targets:
+                    _assign_preview_name(target, value, names)
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                value = _eval_preview_config_expr(stmt.value, names, env_values)
+                _assign_preview_name(stmt.target, value, names)
+        except Exception:
+            continue
+
+    for func in [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for stmt in ast.walk(func):
+            try:
+                if (
+                    isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Call)
+                    and isinstance(stmt.value.func, ast.Attribute)
+                    and stmt.value.func.attr == "update"
+                    and isinstance(stmt.value.func.value, ast.Attribute)
+                    and stmt.value.func.value.attr == "config"
+                ):
+                    for keyword in stmt.value.keywords:
+                        if keyword.arg:
+                            preview_config[keyword.arg] = _eval_preview_config_expr(keyword.value, names, env_values)
+                elif (
+                    isinstance(stmt, ast.Assign)
+                    and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Subscript)
+                    and isinstance(stmt.targets[0].value, ast.Attribute)
+                    and stmt.targets[0].value.attr == "config"
+                ):
+                    key = _eval_preview_config_expr(stmt.targets[0].slice, names, env_values)
+                    preview_config[str(key)] = _eval_preview_config_expr(stmt.value, names, env_values)
+            except Exception:
+                continue
+
+    return preview_config
 
 
 def create_app() -> Flask:
@@ -733,7 +1120,7 @@ def create_app() -> Flask:
             "worker-src 'self' blob: https://cdnjs.cloudflare.com; "
             "frame-ancestors 'self'"
         )
-        response.headers["Content-Security-Policy"] = csp
+        response.headers.setdefault("Content-Security-Policy", csp)
         return response
 
     @app.after_request
@@ -1196,6 +1583,137 @@ def create_app() -> Flask:
             mimetype="application/pdf",
             headers={
                 "Cache-Control": "no-store",
+                "Content-Disposition": f'inline; filename="{path.name}"',
+            },
+        )
+
+    @app.get("/diff/render-file/<path:file_path>")
+    @app.get("/render-file/<path:file_path>")
+    def render_file(file_path):
+        path, error = resolve_request_path(f"/{file_path}", "path")
+        if error:
+            return jsonify({"error": error}), 400
+
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return jsonify({"error": error}), status
+
+        size = get_file_size(path)
+        if size is not None and size > MAX_FILE_SIZE:
+            return jsonify({"error": f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)"}), 400
+
+        success, content_bytes = read_file_bytes(path)
+        if not success:
+            return jsonify({"error": content_bytes}), 500
+
+        network_preview = request.args.get("network", "").strip().lower() in {"1", "true", "yes", "on"}
+        if network_preview:
+            preview_csp = (
+                "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; "
+                "default-src 'self' https: data: blob:; "
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https: blob:; "
+                "style-src 'self' 'unsafe-inline' https:; "
+                "img-src 'self' https: data: blob:; "
+                "font-src 'self' https: data:; "
+                "connect-src 'self' https:; "
+                "media-src 'self' https: data: blob:; "
+                "frame-src 'self' https:; "
+                "form-action 'self' https:; "
+                "base-uri 'none'"
+            )
+        else:
+            preview_csp = (
+                "sandbox allow-scripts; "
+                "default-src 'none'; "
+                "script-src 'self' 'unsafe-inline' blob:; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; "
+                "font-src 'self' data:; "
+                "connect-src 'none'; "
+                "media-src 'self' data: blob:; "
+                "frame-src 'none'; "
+                "form-action 'none'; "
+                "base-uri 'none'"
+            )
+
+        mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if path.suffix.lower() in {".md", ".markdown"}:
+            content = content_bytes.decode("utf-8", errors="replace")
+            content_bytes = _render_markdown_document(content, path.name).encode("utf-8")
+            mime_type = "text/html"
+
+        template_root = next((parent for parent in path.parents if parent.name == "templates"), None)
+        if (
+            template_root is not None
+            and mime_type == "text/html"
+            and path.suffix.lower() in {".html", ".htm"}
+            and any(marker in content_bytes for marker in (b"{%", b"{{", b"{#"))
+        ):
+            template_name = path.relative_to(template_root).as_posix()
+            static_root = template_root.parent / "static"
+            route_prefix = request.script_root.rstrip("/") or ("/diff" if request.path.startswith("/diff/") else "")
+
+            def preview_file_url(target: Path) -> str:
+                normalized = str(target).lstrip("/")
+                encoded_path = "/".join(quote(part) for part in normalized.split("/"))
+                return f"{route_prefix}/render-file/{encoded_path}"
+
+            def preview_url_for(endpoint: str, **values) -> str:
+                if endpoint.endswith("static"):
+                    filename = str(values.pop("filename", "")).lstrip("/\\")
+                    static_target = static_root / filename
+                    url = preview_file_url(static_target)
+                else:
+                    url = f"#{endpoint}"
+
+                query_values = {k: v for k, v in values.items() if not k.startswith("_") and v is not None}
+                if query_values:
+                    url = f"{url}?{urlencode(query_values, doseq=True)}"
+                return url
+
+            def preview_static_url(filename: str) -> str:
+                return preview_url_for("static", filename=filename)
+
+            template_env = Environment(
+                loader=FileSystemLoader(str(template_root)),
+                autoescape=select_autoescape(("html", "htm", "xml")),
+                undefined=PreviewUndefined,
+            )
+            template_env.filters["basename"] = lambda value: Path(str(value)).name
+            template_env.filters["tojson"] = _preview_tojson
+            project_root = template_root.parent
+            preview_config = _load_project_preview_config(project_root, dict(app.config))
+            template_env.globals.update(
+                config=preview_config,
+                get_flashed_messages=get_flashed_messages,
+                request=request,
+                session=session,
+                csrf_token=lambda: "",
+                static_url=preview_static_url,
+                url_for=preview_url_for,
+            )
+            try:
+                content_bytes = template_env.get_template(template_name).render(
+                    file_path=str(path),
+                    path=str(path),
+                ).encode("utf-8")
+            except Exception as err:
+                return Response(
+                    f"Template render failed: {err}",
+                    status=500,
+                    mimetype="text/plain",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "Content-Security-Policy": "sandbox; default-src 'none'; base-uri 'none'",
+                    },
+                )
+
+        return Response(
+            content_bytes,
+            mimetype=mime_type,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": preview_csp,
                 "Content-Disposition": f'inline; filename="{path.name}"',
             },
         )
