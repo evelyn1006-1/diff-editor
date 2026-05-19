@@ -338,7 +338,7 @@ compliance with these terms, and take practical steps to correct past
 violations, within 30 days of receiving notice. Otherwise, all your
 licenses end immediately.
 
-# Revised Versions of this License
+## Revised Versions of this License
 
 Princess Evelyn may publish revised and/or new versions of Princess
 Evelyn's License (PEL) from time to time. Such new versions will be similar
