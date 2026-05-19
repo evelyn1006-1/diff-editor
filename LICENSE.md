@@ -137,10 +137,14 @@ either way remain required attributions.
 For purposes of this license, a Creative Commons-style attribution means an
 attribution given in any reasonable manner appropriate to the medium,
 means, and context that:
-1. Identifies, in substance, the same credited person or project as the original required attribution;
-2. Is reasonably visible to end users who directly interact with the relevant interface;
+1. Identifies, in substance, the same credited person or project as the
+   original required attribution;
+2. Is reasonably visible to end users who directly interact with the
+   relevant interface;
 3. Is not hidden, obscured, or made unreasonably difficult to locate; and
-4. Does not state or imply that the credited person or project endorses you, your work, your modifications, your distribution, your deployment, or your use of the software.
+4. Does not state or imply that the credited person or project endorses
+   you, your work, your modifications, your distribution, your deployment,
+   or your use of the software.
 
 A CC-style attribution may appear in any reasonable attribution area,
 including an About, Credits, Acknowledgments, footer, settings, help,
@@ -179,7 +183,7 @@ a share-alike requirement.
 ## Permitted alternative licenses
 
 The following licenses are permitted alternatives to this license:
-- GNU Affero General Public License (AGPL) version 3 or later. 
+- GNU Affero General Public License (AGPL) version 3 or later.
 
 You may distribute the software under a permitted alternative license,
 provided that you include the [Attribution
@@ -224,11 +228,13 @@ the GNU General Public License version 3 (GPLv3) or later, or the GNU
 Affero General Public License version 3 or later (AGPLv3), instead of these
 terms, if:
 
-1. The component does not include, adapt, or derive from any part of the software's user interface.
+1. The component does not include, adapt, or derive from any part of the
+   software's user interface.
 
 2. The component does not include any required attributions.
 
-3. The component is reasonably separable from the software as a whole and can be used independently for a general software purpose.
+3. The component is reasonably separable from the software as a whole and
+   can be used independently for a general software purpose.
 
 This additional license applies only to the separated component. It does
 not apply to the software as a whole, any modified version of it, or any
@@ -253,20 +259,28 @@ you have or can give appropriate copyright permission.
 For material you add to the software, you may supplement the terms of this
 license with the following terms:
 
-a) Disclaiming warranty or limiting liability differently from the terms of
-this License (see [No Liability](#no-liability)); or b) Requiring
-preservation of permitted (see later in this section) legal notices or
-author attributions in that material, in addition to what is included in
-these terms; or c) Prohibiting misrepresentation of the origin of that
-material, or requiring that modified versions of such material be marked in
-reasonable ways as different from the original version; or d) Limiting the
-use for publicity purposes of names of licensors or authors of the
-material; or e) Declining to grant rights under trademark law for use of
-some trade names, trademarks, or service marks; or f) Requiring
-indemnification of licensors and authors of that material by anyone who
-distributes the material (or modified versions of it) with contractual
-assumptions of liability to the recipient, for any liability that these
-contractual assumptions directly impose on those licensors and authors.
+(a) Disclaiming warranty or limiting liability differently from the terms
+of this License (see [No Liability](#no-liability)); or
+
+(b) Requiring preservation of permitted (see later in this section) legal
+notices or author attributions in that material, in addition to what is
+included in these terms; or
+
+(c) Prohibiting misrepresentation of the origin of that material, or
+requiring that modified versions of such material be marked in reasonable
+ways as different from the original version; or
+
+(d) Limiting the use for publicity purposes of names of licensors or
+authors of the material; or
+
+(e) Declining to grant rights under trademark law for use of some trade
+names, trademarks, or service marks; or
+
+(f) Requiring indemnification of licensors and authors of that material by
+anyone who distributes the material (or modified versions of it) with
+contractual assumptions of liability to the recipient, for any liability
+that these contractual assumptions directly impose on those licensors and
+authors.
 
 For (b), you must not require the preservation of an unreasonable amount of
 notices or attributions, nor may you require that the wording, formatting,
