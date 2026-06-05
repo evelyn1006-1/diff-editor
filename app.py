@@ -416,6 +416,9 @@ def _wrap_markdown_preview(body_html: str, title: str) -> str:
     blockquote {{ margin: 1rem 0; padding-left: 1rem; border-left: 4px solid #cbd5e1; color: #475569; }}
     table {{ border-collapse: collapse; width: 100%; }}
     th, td {{ border: 1px solid #d1d5db; padding: 0.4rem 0.6rem; }}
+    th.align-left, td.align-left {{ text-align: left; }}
+    th.align-center, td.align-center {{ text-align: center; }}
+    th.align-right, td.align-right {{ text-align: right; }}
   </style>
 </head>
 <body>
@@ -424,6 +427,92 @@ def _wrap_markdown_preview(body_html: str, title: str) -> str:
   </main>
 </body>
 </html>"""
+
+
+def _split_markdown_table_row(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return None
+
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|") and not stripped.endswith(r"\|"):
+        stripped = stripped[:-1]
+
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in stripped:
+        if escaped:
+            if char == "|":
+                current.append("|")
+            else:
+                current.extend(("\\", char))
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "|":
+            cells.append("".join(current).strip())
+            current.clear()
+        else:
+            current.append(char)
+
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    if len(cells) < 2:
+        return None
+    return cells
+
+
+def _parse_markdown_table_separator(line: str) -> list[str] | None:
+    cells = _split_markdown_table_row(line)
+    if cells is None:
+        return None
+
+    alignments: list[str] = []
+    for cell in cells:
+        marker = re.sub(r"\s+", "", cell)
+        if not re.fullmatch(r":?-{3,}:?", marker):
+            return None
+        if marker.startswith(":") and marker.endswith(":"):
+            alignments.append("center")
+        elif marker.endswith(":"):
+            alignments.append("right")
+        elif marker.startswith(":"):
+            alignments.append("left")
+        else:
+            alignments.append("")
+    return alignments
+
+
+def _normalize_markdown_table_cells(cells: list[str], width: int) -> list[str]:
+    if len(cells) >= width:
+        return cells[:width]
+    return cells + [""] * (width - len(cells))
+
+
+def _render_markdown_table(header: list[str], alignments: list[str], rows: list[list[str]]) -> str:
+    def cell_class(index: int) -> str:
+        alignment = alignments[index]
+        return f' class="align-{alignment}"' if alignment else ""
+
+    normalized_header = _normalize_markdown_table_cells(header, len(alignments))
+    rendered_header = "".join(
+        f"<th{cell_class(index)}>{_render_markdown_inline(cell)}</th>"
+        for index, cell in enumerate(normalized_header)
+    )
+    rendered_rows = []
+    for row in rows:
+        normalized_row = _normalize_markdown_table_cells(row, len(alignments))
+        rendered_cells = "".join(
+            f"<td{cell_class(index)}>{_render_markdown_inline(cell)}</td>"
+            for index, cell in enumerate(normalized_row)
+        )
+        rendered_rows.append(f"<tr>{rendered_cells}</tr>")
+
+    body_html = "\n<tbody>\n" + "\n".join(rendered_rows) + "\n</tbody>" if rendered_rows else ""
+    return f"<table>\n<thead><tr>{rendered_header}</tr></thead>{body_html}\n</table>"
 
 
 def _render_markdown_document(markdown_text: str, title: str) -> str:
@@ -446,7 +535,9 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
             rendered.append(f"</{list_type}>")
             list_type = None
 
-    for raw_line in lines:
+    index = 0
+    while index < len(lines):
+        raw_line = lines[index]
         line = raw_line.rstrip()
         fence_match = re.match(r"^```", line)
         if fence_match:
@@ -458,14 +549,17 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
                 flush_paragraph()
                 close_list()
                 in_code = True
+            index += 1
             continue
         if in_code:
             code_lines.append(raw_line)
+            index += 1
             continue
 
         if not line.strip():
             flush_paragraph()
             close_list()
+            index += 1
             continue
 
         heading = re.match(r"^(#{1,6})\s+(.+)$", line)
@@ -474,12 +568,14 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
             close_list()
             level = len(heading.group(1))
             rendered.append(f"<h{level}>{_render_markdown_inline(heading.group(2).strip())}</h{level}>")
+            index += 1
             continue
 
         if re.match(r"^[-*_]\s*[-*_]\s*[-*_][-*_\s]*$", line):
             flush_paragraph()
             close_list()
             rendered.append("<hr>")
+            index += 1
             continue
 
         quote = re.match(r"^>\s?(.*)$", line)
@@ -487,7 +583,28 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
             flush_paragraph()
             close_list()
             rendered.append(f"<blockquote>{_render_markdown_inline(quote.group(1))}</blockquote>")
+            index += 1
             continue
+
+        table_header = _split_markdown_table_row(line)
+        if table_header is not None and index + 1 < len(lines):
+            table_alignments = _parse_markdown_table_separator(lines[index + 1].rstrip())
+            if table_alignments is not None and len(table_alignments) == len(table_header):
+                flush_paragraph()
+                close_list()
+                table_rows: list[list[str]] = []
+                index += 2
+                while index < len(lines):
+                    row_line = lines[index].rstrip()
+                    if not row_line.strip():
+                        break
+                    row_cells = _split_markdown_table_row(row_line)
+                    if row_cells is None:
+                        break
+                    table_rows.append(row_cells)
+                    index += 1
+                rendered.append(_render_markdown_table(table_header, table_alignments, table_rows))
+                continue
 
         unordered = re.match(r"^\s*[-*+]\s+(.+)$", line)
         ordered = re.match(r"^\s*\d+\.\s+(.+)$", line)
@@ -499,10 +616,12 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
                 rendered.append(f"<{next_list_type}>")
                 list_type = next_list_type
             rendered.append(f"<li>{_render_markdown_inline((unordered or ordered).group(1))}</li>")
+            index += 1
             continue
 
         close_list()
         paragraph.append(line.strip())
+        index += 1
 
     if in_code:
         rendered.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
