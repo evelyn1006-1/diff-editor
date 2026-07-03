@@ -245,6 +245,14 @@ def compute_run_tooling_status(language: str) -> tuple[dict[str, object], int]:
             "error": "Magma execution requires a `magma` interpreter in PATH.",
         }, 200
 
+    if normalized == "pfd":
+        if command_exists("pfdsim"):
+            return {"available": True}, 200
+        return {
+            "available": False,
+            "error": "PFD execution requires `pfdsim` in PATH.",
+        }, 200
+
     return {"error": "Unsupported language"}, 400
 
 

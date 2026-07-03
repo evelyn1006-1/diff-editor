@@ -133,7 +133,7 @@ diff-editor-terminal/
 - `gunicorn` with `geventwebsocket` worker for production serving
 - `gevent` / `flask-socketio` for terminal WebSockets
 - Passwordless `sudo` (`sudo -n`) for elevated-access workflows to work
-- Optional: `gcc`, `g++`, `go`, `javac`/`jar`, `rustc`, `csc`/`mcs`, `node`, `ruby`, `perl`, `bf`, `magma` depending on which languages you want to compile or run
+- Optional: `gcc`, `g++`, `go`, `javac`/`jar`, `rustc`, `csc`/`mcs`, `node`, `ruby`, `perl`, `bf`, `magma`, `pfdsim` depending on which languages you want to compile or run
 - Optional: `certbot` and `nginx` for the TLS certificate management features
 - Optional: Codex CLI or an OpenAI API key for AI code review
 

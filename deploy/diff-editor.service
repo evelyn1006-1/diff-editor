@@ -6,6 +6,7 @@ After=network.target
 User=evelyn
 Group=www-data
 WorkingDirectory=/home/evelyn/diff-editor-terminal
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/evelyn/.local/bin"
 ExecStart=/usr/local/bin/gunicorn --config /home/evelyn/diff-editor-terminal/gunicorn.conf.py wsgi:app
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always

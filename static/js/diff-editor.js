@@ -183,7 +183,7 @@ async function initDiffEditor() {
 
         // Run button - show for runnable file types
         const runBtn = document.getElementById('btn-run');
-        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java', 'ruby', 'perl', 'rust', 'csharp', 'brainfuck', 'magma'];
+        const runnableLanguages = ['python', 'javascript', 'shell', 'go', 'c', 'cpp', 'java', 'ruby', 'perl', 'rust', 'csharp', 'brainfuck', 'magma', 'pfd'];
         if (runnableLanguages.includes(fileLanguage)) {
             runBtn.classList.remove('hidden');
             runBtn.addEventListener('click', runFile);
@@ -370,6 +370,12 @@ async function renderPdfWorkspace(container, pdfUrl) {
                 <span class="pdf-zoom-level" id="pdf-zoom-level">135%</span>
                 <button type="button" class="pdf-view-btn" id="pdf-zoom-in" title="Zoom in">+</button>
                 <button type="button" class="pdf-view-btn" id="pdf-fit-width" title="Fit width">Fit width</button>
+                <div class="pdf-page-jump">
+                    <label for="pdf-page-number">Page</label>
+                    <input type="number" class="pdf-page-number" id="pdf-page-number" min="1" step="1" value="1" inputmode="numeric">
+                    <span class="pdf-page-count" id="pdf-page-count"></span>
+                    <button type="button" class="pdf-view-btn" id="pdf-jump-page">Go</button>
+                </div>
             </div>
             <div class="pdf-pages" id="pdf-pages"></div>
         </div>
@@ -415,18 +421,72 @@ async function renderPdfWorkspace(container, pdfUrl) {
     }
 
     const zoomLevelEl = wrapper.querySelector('#pdf-zoom-level');
+    const pageNumberInput = wrapper.querySelector('#pdf-page-number');
+    const pageCountEl = wrapper.querySelector('#pdf-page-count');
+    const jumpPageBtn = wrapper.querySelector('#pdf-jump-page');
+    pageNumberInput.max = String(pdfDoc.numPages);
+    pageNumberInput.setAttribute('aria-label', `Page number, 1 to ${pdfDoc.numPages}`);
+    pageCountEl.textContent = `of ${pdfDoc.numPages}`;
+
+    let requestedPageNumber = null;
+    let pdfPageRenderer = null;
+    const navigateToPage = (pageNumber, focusInput = false) => {
+        requestedPageNumber = pageNumber;
+        pageNumberInput.value = String(pageNumber);
+        scrollToPdfPage(pagesEl, pageNumber);
+        pdfPageRenderer?.renderPage(pageNumber);
+
+        if (focusInput) {
+            pageNumberInput.focus();
+            pageNumberInput.select();
+        }
+    };
+
+    const jumpToPage = () => {
+        const pageNumber = pageNumberInput.valueAsNumber;
+        if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > pdfDoc.numPages) {
+            pageNumberInput.setCustomValidity(`Enter a page from 1 to ${pdfDoc.numPages}`);
+            pageNumberInput.reportValidity();
+            return;
+        }
+
+        pageNumberInput.setCustomValidity('');
+        navigateToPage(pageNumber, true);
+    };
+    pageNumberInput.addEventListener('input', () => pageNumberInput.setCustomValidity(''));
+    pageNumberInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            jumpToPage();
+        }
+    });
+    jumpPageBtn.addEventListener('click', jumpToPage);
+
     let pdfRenderGeneration = 0;
     const renderAllPages = async () => {
         const renderGeneration = pdfRenderGeneration + 1;
         pdfRenderGeneration = renderGeneration;
-        await renderPdfPages(
+        pdfPageRenderer?.destroy();
+        pdfPageRenderer = null;
+
+        const renderer = await createPdfPageRenderer(
             pdfDoc,
             pagesEl,
             sidebarEl,
             zoomLevelEl,
             pdfScale,
             () => renderGeneration === pdfRenderGeneration,
+            (pageNumber) => navigateToPage(pageNumber),
         );
+        if (renderGeneration !== pdfRenderGeneration) {
+            renderer?.destroy();
+            return;
+        }
+
+        pdfPageRenderer = renderer;
+        if (requestedPageNumber !== null) {
+            navigateToPage(requestedPageNumber);
+        }
     };
 
     wrapper.querySelector('#pdf-zoom-out').addEventListener('click', async () => {
@@ -451,70 +511,176 @@ async function renderPdfWorkspace(container, pdfUrl) {
     return true;
 }
 
-async function renderPdfPages(pdfDoc, pagesEl, sidebarEl, zoomLevelEl, renderScale, isCurrentRender) {
+function scrollToPdfPage(pagesEl, pageNumber) {
+    const pageEl = pagesEl.querySelector(`[data-page="${pageNumber}"]`);
+    if (!pageEl) return false;
+
+    const distance = Math.abs(pageEl.offsetTop - pagesEl.scrollTop);
+    const behavior = distance > pagesEl.clientHeight * 5 ? 'auto' : 'smooth';
+    pageEl.scrollIntoView({ behavior, block: 'start' });
+    return true;
+}
+
+async function createPdfPageRenderer(
+    pdfDoc,
+    pagesEl,
+    sidebarEl,
+    zoomLevelEl,
+    renderScale,
+    isCurrentRender,
+    onPageRequested,
+) {
     if (!isCurrentRender()) return;
 
     pagesEl.innerHTML = '';
     sidebarEl.innerHTML = '';
     zoomLevelEl.textContent = `${Math.round(renderScale * 100)}%`;
 
+    const firstPage = await pdfDoc.getPage(1);
+    if (!isCurrentRender()) return;
+
+    const defaultViewport = firstPage.getViewport({ scale: renderScale });
+    const defaultWidth = Math.floor(defaultViewport.width);
+    const defaultHeight = Math.floor(defaultViewport.height);
+    const pageWraps = new Map();
+
     for (let pageNumber = 1; pageNumber <= pdfDoc.numPages; pageNumber += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        const page = await pdfDoc.getPage(pageNumber);
-        if (!isCurrentRender()) return;
-
-        const viewport = page.getViewport({ scale: renderScale });
-
         const pageWrap = document.createElement('div');
         pageWrap.className = 'pdf-page-wrap';
         pageWrap.dataset.page = String(pageNumber);
+        pageWrap.style.width = `${defaultWidth}px`;
+        pageWrap.style.height = `${defaultHeight}px`;
 
-        const pageCanvas = document.createElement('canvas');
-        pageCanvas.className = 'pdf-page-canvas';
-        pageCanvas.width = Math.floor(viewport.width);
-        pageCanvas.height = Math.floor(viewport.height);
-
-        const textLayer = document.createElement('div');
-        textLayer.className = 'pdf-text-layer textLayer';
-        textLayer.style.width = `${Math.floor(viewport.width)}px`;
-        textLayer.style.height = `${Math.floor(viewport.height)}px`;
-
-        pageWrap.appendChild(pageCanvas);
-        pageWrap.appendChild(textLayer);
+        const loadingEl = document.createElement('div');
+        loadingEl.className = 'pdf-page-loading';
+        loadingEl.textContent = `Page ${pageNumber}`;
+        pageWrap.appendChild(loadingEl);
         pagesEl.appendChild(pageWrap);
+        pageWraps.set(pageNumber, pageWrap);
 
-        // eslint-disable-next-line no-await-in-loop
-        await page.render({ canvasContext: pageCanvas.getContext('2d'), viewport }).promise;
-        if (!isCurrentRender()) return;
-
-        try {
-            // eslint-disable-next-line no-await-in-loop
-            const textContent = await page.getTextContent();
-            if (!isCurrentRender()) return;
-
-            // eslint-disable-next-line no-await-in-loop
-            await window.pdfjsLib.renderTextLayer({
-                textContentSource: textContent,
-                container: textLayer,
-                viewport,
-                textDivs: [],
-            }).promise;
-            if (!isCurrentRender()) return;
-        } catch {
-            textLayer.remove();
-        }
-
-        if (!isCurrentRender()) return;
-
-        const thumbWrap = document.createElement('button');
-        thumbWrap.type = 'button';
-        thumbWrap.className = 'pdf-thumb-item';
-        thumbWrap.textContent = `Page ${pageNumber}`;
-        thumbWrap.addEventListener('click', () => {
-            pageWrap.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        });
-        sidebarEl.appendChild(thumbWrap);
+        const pageButton = document.createElement('button');
+        pageButton.type = 'button';
+        pageButton.className = 'pdf-thumb-item';
+        pageButton.dataset.page = String(pageNumber);
+        pageButton.textContent = `Page ${pageNumber}`;
+        sidebarEl.appendChild(pageButton);
     }
+
+    let destroyed = false;
+    const pagePromises = new Map();
+    const activeRenderTasks = new Set();
+
+    const renderPage = (pageNumber) => {
+        if (destroyed || !pageWraps.has(pageNumber)) return Promise.resolve();
+        if (pagePromises.has(pageNumber)) return pagePromises.get(pageNumber);
+
+        const renderPromise = (async () => {
+            const page = pageNumber === 1 ? firstPage : await pdfDoc.getPage(pageNumber);
+            if (destroyed) return;
+
+            const viewport = page.getViewport({ scale: renderScale });
+            const width = Math.floor(viewport.width);
+            const height = Math.floor(viewport.height);
+            const pageWrap = pageWraps.get(pageNumber);
+            pageWrap.style.width = `${width}px`;
+            pageWrap.style.height = `${height}px`;
+            pageWrap.innerHTML = '';
+
+            const pageCanvas = document.createElement('canvas');
+            pageCanvas.className = 'pdf-page-canvas';
+            pageCanvas.width = width;
+            pageCanvas.height = height;
+
+            const textLayer = document.createElement('div');
+            textLayer.className = 'pdf-text-layer textLayer';
+            textLayer.style.width = `${width}px`;
+            textLayer.style.height = `${height}px`;
+
+            pageWrap.appendChild(pageCanvas);
+            pageWrap.appendChild(textLayer);
+
+            const pageRenderTask = page.render({
+                canvasContext: pageCanvas.getContext('2d'),
+                viewport,
+            });
+            activeRenderTasks.add(pageRenderTask);
+            try {
+                await pageRenderTask.promise;
+            } finally {
+                activeRenderTasks.delete(pageRenderTask);
+            }
+            if (destroyed) return;
+
+            try {
+                const textContent = await page.getTextContent();
+                if (destroyed) return;
+
+                const textRenderTask = window.pdfjsLib.renderTextLayer({
+                    textContentSource: textContent,
+                    container: textLayer,
+                    viewport,
+                    textDivs: [],
+                });
+                activeRenderTasks.add(textRenderTask);
+                try {
+                    await textRenderTask.promise;
+                } finally {
+                    activeRenderTasks.delete(textRenderTask);
+                }
+            } catch {
+                textLayer.remove();
+            }
+        })().catch((err) => {
+            if (destroyed || err?.name === 'RenderingCancelledException') return;
+
+            const pageWrap = pageWraps.get(pageNumber);
+            if (pageWrap) {
+                pageWrap.innerHTML = '';
+                const errorEl = document.createElement('div');
+                errorEl.className = 'pdf-page-loading pdf-page-error';
+                errorEl.textContent = `Page ${pageNumber} failed to render`;
+                pageWrap.appendChild(errorEl);
+            }
+        });
+        pagePromises.set(pageNumber, renderPromise);
+        return renderPromise;
+    };
+
+    const handleSidebarClick = (event) => {
+        const pageButton = event.target.closest('.pdf-thumb-item[data-page]');
+        if (!pageButton || !sidebarEl.contains(pageButton)) return;
+        onPageRequested(Number(pageButton.dataset.page));
+    };
+    sidebarEl.addEventListener('click', handleSidebarClick);
+
+    let observer = null;
+    if ('IntersectionObserver' in window) {
+        observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (entry.isIntersecting) {
+                    renderPage(Number(entry.target.dataset.page));
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, {
+            root: pagesEl,
+            rootMargin: '100% 0px',
+        });
+        pageWraps.forEach((pageWrap) => observer.observe(pageWrap));
+    }
+
+    renderPage(1);
+
+    return {
+        renderPage,
+        destroy() {
+            destroyed = true;
+            observer?.disconnect();
+            sidebarEl.removeEventListener('click', handleSidebarClick);
+            activeRenderTasks.forEach((task) => task.cancel?.());
+            activeRenderTasks.clear();
+        },
+    };
 }
 
 function updateStatus() {
@@ -1425,6 +1591,9 @@ async function runFile() {
             break;
         case 'magma':
             runCommand = `magma ${quotedFilePath}`;
+            break;
+        case 'pfd':
+            runCommand = `pfdsim ${quotedFilePath}`;
             break;
         default:
             return;

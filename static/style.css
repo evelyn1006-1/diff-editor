@@ -1336,6 +1336,31 @@ textarea.copy-input:disabled {
     font-variant-numeric: tabular-nums;
 }
 
+.pdf-page-jump {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-left: 0.25rem;
+    font-size: 0.9rem;
+}
+
+.pdf-page-number {
+    width: 4.5rem;
+    min-height: 2rem;
+    box-sizing: border-box;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.3rem 0.4rem;
+    background: #fff;
+    font: inherit;
+    font-variant-numeric: tabular-nums;
+}
+
+.pdf-page-count {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
 .pdf-pages {
     overflow: auto;
     padding-right: 0.25rem;
@@ -1350,6 +1375,19 @@ textarea.copy-input:disabled {
     border-radius: 8px;
     overflow: hidden;
     background: #fff;
+}
+
+.pdf-page-loading {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    color: var(--text-muted, #777);
+    font-weight: 700;
+}
+
+.pdf-page-error {
+    color: #b42318;
 }
 
 .pdf-page-canvas,

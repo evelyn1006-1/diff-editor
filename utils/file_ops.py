@@ -1068,7 +1068,7 @@ EDITOR_LANGUAGE_BY_SUFFIX = {
     ".php": "php", ".swift": "swift", ".kt": "kotlin",
     ".nginx": "nginx", ".conf": "ini", ".ini": "ini",
     ".toml": "toml", ".env": "dotenv", ".txt": "plaintext",
-    ".bf": "brainfuck", ".mag": "magma",
+    ".bf": "brainfuck", ".mag": "magma", ".pfd": "pfd",
 }
 
 SHEBANG_LANGUAGE_MAP = {
