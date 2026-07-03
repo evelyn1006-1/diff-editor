@@ -89,6 +89,7 @@ from utils.file_ops import (
     parse_hex_view,
     permanently_delete_path,
     read_file_bytes,
+    read_file_head,
     rename_path,
     resolve_request_path,
     stat_path,
@@ -777,6 +778,7 @@ def create_app() -> Flask:
 
     DEFAULT_ROOT = os.environ.get("DEFAULT_ROOT", "/home/evelyn")
     MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024))
+    MAX_PDF_FILE_SIZE = int(os.environ.get("MAX_PDF_FILE_SIZE", 250 * 1024 * 1024))
     AI_REVIEW_COOLDOWN_SECONDS = max(0.0, float(os.environ.get("AI_REVIEW_COOLDOWN_SECONDS", "10")))
     AI_REVIEW_COOLDOWN_FILE = Path(
         os.environ.get("AI_REVIEW_COOLDOWN_FILE", "/tmp/diff-editor-ai-review-cooldown.txt")
@@ -1415,9 +1417,34 @@ def create_app() -> Flask:
         if not ok:
             return jsonify({"error": error}), status
 
+        head_success, head_bytes = read_file_head(path)
+        head_bytes = head_bytes if head_success and isinstance(head_bytes, bytes) else b""
+        head_image_mime = detect_image_mime(path, head_bytes)
+        is_pdf = not head_image_mime and (
+            mimetypes.guess_type(path.name)[0] == "application/pdf"
+            or head_bytes.startswith(b"%PDF-")
+        )
+
         size = get_file_size(path)
-        if size is not None and size > MAX_FILE_SIZE:
-            return jsonify({"error": f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)"}), 400
+        size_limit = MAX_PDF_FILE_SIZE if is_pdf else MAX_FILE_SIZE
+        if size is not None and size > size_limit:
+            return jsonify({"error": f"File too large (max {size_limit // 1024 // 1024}MB)"}), 400
+
+        if is_pdf:
+            git_root = find_git_root(path)
+            is_git_tracked = is_tracked_by_git(path, git_root) if git_root else False
+            return jsonify({
+                "path": str(path),
+                "content": "",
+                "original": "",
+                "language": "plaintext",
+                "is_image": False,
+                "is_pdf": True,
+                "is_binary": False,
+                "pdf_url": url_for("file_pdf", path=str(path)),
+                "is_git": is_git_tracked,
+                "writable": False,
+            })
 
         success, content_bytes = read_file_bytes(path)
         if not success:
@@ -1438,23 +1465,6 @@ def create_app() -> Flask:
                 "is_git": is_git_tracked,
                 "writable": False,
             })
-        is_pdf = (mimetypes.guess_type(path.name)[0] == "application/pdf") or content_bytes.startswith(b"%PDF-")
-        if is_pdf:
-            git_root = find_git_root(path)
-            is_git_tracked = is_tracked_by_git(path, git_root) if git_root else False
-            return jsonify({
-                "path": str(path),
-                "content": "",
-                "original": "",
-                "language": "plaintext",
-                "is_image": False,
-                "is_pdf": True,
-                "is_binary": False,
-                "pdf_url": url_for("file_pdf", path=str(path)),
-                "is_git": is_git_tracked,
-                "writable": False,
-            })
-
         git_root = find_git_root(path)
         original_bytes = content_bytes
         is_git_tracked = False
@@ -1685,17 +1695,35 @@ def create_app() -> Flask:
         if not ok:
             return jsonify({"error": error}), status
 
+        head_success, head_bytes = read_file_head(path)
+        if not head_success:
+            return jsonify({"error": head_bytes}), 500
+
+        is_pdf = (
+            mimetypes.guess_type(path.name)[0] == "application/pdf"
+            or head_bytes.startswith(b"%PDF-")
+        )
+        if not is_pdf:
+            return jsonify({"error": "Not a PDF file"}), 400
+
         size = get_file_size(path)
-        if size is not None and size > MAX_FILE_SIZE:
-            return jsonify({"error": f"File too large (max {MAX_FILE_SIZE // 1024 // 1024}MB)"}), 400
+        if size is not None and size > MAX_PDF_FILE_SIZE:
+            return jsonify({"error": f"File too large (max {MAX_PDF_FILE_SIZE // 1024 // 1024}MB)"}), 400
+
+        if os.access(path, os.R_OK):
+            response = send_file(
+                path,
+                mimetype="application/pdf",
+                as_attachment=False,
+                download_name=path.name,
+                conditional=True,
+            )
+            response.headers["Cache-Control"] = "no-store"
+            return response
 
         success, content_bytes = read_file_bytes(path)
         if not success:
             return jsonify({"error": content_bytes}), 500
-
-        is_pdf = (mimetypes.guess_type(path.name)[0] == "application/pdf") or content_bytes.startswith(b"%PDF-")
-        if not is_pdf:
-            return jsonify({"error": "Not a PDF file"}), 400
 
         return Response(
             content_bytes,

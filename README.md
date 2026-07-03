@@ -157,7 +157,8 @@ Environment variables are loaded from `.env` via `python-dotenv`. All variables 
 |---|---|---|
 | `FLASK_SECRET_KEY` | (random) | Session and CSRF signing key. Set explicitly in production. |
 | `DEFAULT_ROOT` | `/home/evelyn` | Starting directory shown in the file browser. |
-| `MAX_FILE_SIZE` | `10485760` (10 MB) | Maximum file size accepted by the editor and image/PDF APIs. |
+| `MAX_FILE_SIZE` | `10485760` (10 MB) | Maximum file size accepted by the editor and image APIs. |
+| `MAX_PDF_FILE_SIZE` | `262144000` (250 MB) | Maximum PDF size accepted by the editor and PDF API. |
 | `EDITOR_BIND` | `127.0.0.1:8005` | Bind address for the editor gunicorn process. |
 | `TERMINAL_BIND` | `127.0.0.1:8006` | Bind address for the terminal gunicorn process. |
 | `TERMINAL_SERVER_URL` | `http://127.0.0.1:8006` | Base URL the editor wrapper and pager wrapper post back to. |
