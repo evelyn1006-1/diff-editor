@@ -581,6 +581,9 @@ async function createPdfPageRenderer(
             const viewport = page.getViewport({ scale: renderScale });
             const width = Math.floor(viewport.width);
             const height = Math.floor(viewport.height);
+            const outputScale = Math.max(1, window.devicePixelRatio || 1);
+            const canvasWidth = Math.floor(width * outputScale);
+            const canvasHeight = Math.floor(height * outputScale);
             const pageWrap = pageWraps.get(pageNumber);
             pageWrap.style.width = `${width}px`;
             pageWrap.style.height = `${height}px`;
@@ -588,8 +591,10 @@ async function createPdfPageRenderer(
 
             const pageCanvas = document.createElement('canvas');
             pageCanvas.className = 'pdf-page-canvas';
-            pageCanvas.width = width;
-            pageCanvas.height = height;
+            pageCanvas.width = canvasWidth;
+            pageCanvas.height = canvasHeight;
+            pageCanvas.style.width = `${width}px`;
+            pageCanvas.style.height = `${height}px`;
 
             const textLayer = document.createElement('div');
             textLayer.className = 'pdf-text-layer textLayer';
@@ -599,10 +604,15 @@ async function createPdfPageRenderer(
             pageWrap.appendChild(pageCanvas);
             pageWrap.appendChild(textLayer);
 
-            const pageRenderTask = page.render({
+            const renderContext = {
                 canvasContext: pageCanvas.getContext('2d'),
                 viewport,
-            });
+            };
+            if (outputScale !== 1) {
+                renderContext.transform = [outputScale, 0, 0, outputScale, 0, 0];
+            }
+
+            const pageRenderTask = page.render(renderContext);
             activeRenderTasks.add(pageRenderTask);
             try {
                 await pageRenderTask.promise;
