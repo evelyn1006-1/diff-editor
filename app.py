@@ -1796,6 +1796,9 @@ def create_app() -> Flask:
             content = content_bytes.decode("utf-8", errors="replace")
             content_bytes = _render_markdown_document(content, path.name).encode("utf-8")
             mime_type = "text/html"
+            # Markdown escapes raw HTML. Permit authenticated image requests in
+            # standalone previews while keeping scripts disabled by the sandbox.
+            preview_csp = preview_csp.replace("sandbox allow-scripts", "sandbox allow-same-origin", 1)
 
         template_root = next((parent for parent in path.parents if parent.name == "templates"), None)
         if (
