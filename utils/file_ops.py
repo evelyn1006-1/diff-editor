@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from stat import S_ISDIR, S_ISREG
+from stat import S_ISDIR, S_ISLNK, S_ISREG
 
 HOME_DIR = Path.home()
 RECYCLE_BIN = Path("/var/tmp/RECYCLE_BIN")
@@ -168,7 +168,7 @@ def permanently_delete_path(path: Path | str) -> tuple[bool, str]:
     trash_name = normalized.name
 
     try:
-        if normalized.is_dir() and not normalized.is_symlink():
+        if S_ISDIR(normalized.lstat().st_mode):
             shutil.rmtree(normalized)
         else:
             normalized.unlink()
@@ -185,12 +185,9 @@ def permanently_delete_path(path: Path | str) -> tuple[bool, str]:
             _remove_recycle_metadata(trash_name)
         return True, "Permanently deleted"
 
-    rm_args = ["sudo", "-n", "rm"]
-    if normalized.is_dir() and not normalized.is_symlink():
-        rm_args.append("-rf")
-    else:
-        rm_args.append("-f")
-    rm_args.append(str(normalized))
+    # The type may itself be hidden by a protected parent. rm -rf handles both
+    # directories and files, and removes symlinks without following them.
+    rm_args = ["sudo", "-n", "rm", "-rf", "--", str(normalized)]
 
     try:
         result = subprocess.run(
@@ -232,22 +229,25 @@ def list_directory_entries(path: Path) -> list[dict]:
         entries = []
         for entry in path.iterdir():
             try:
-                entries.append({
-                    "name": entry.name,
-                    "path": str(entry),
-                    "is_dir": entry.is_dir(),
-                    "is_symlink": entry.is_symlink(),
-                    "symlink_target": str(os.readlink(entry)) if entry.is_symlink() else None,
-                })
-            except PermissionError:
-                entries.append({
-                    "name": entry.name,
-                    "path": str(entry),
-                    "is_dir": False,
-                    "is_symlink": False,
-                    "symlink_target": None,
-                    "error": "Permission denied",
-                })
+                entry_stat = entry.lstat()
+            except FileNotFoundError:
+                continue  # An entry can disappear while a live folder is listed.
+            is_link = S_ISLNK(entry_stat.st_mode)
+            try:
+                is_dir = S_ISDIR(entry.stat().st_mode if is_link else entry_stat.st_mode)
+            except FileNotFoundError:
+                is_dir = False  # A dangling symlink is still a valid entry.
+            except OSError as e:
+                if e.errno != errno.ELOOP:
+                    raise
+                is_dir = False  # List cyclic links without descending into them.
+            entries.append({
+                "name": entry.name,
+                "path": str(entry),
+                "is_dir": is_dir,
+                "is_symlink": is_link,
+                "symlink_target": str(os.readlink(entry)) if is_link else None,
+            })
         return entries
     except PermissionError:
         pass
@@ -304,6 +304,26 @@ def _sudo_test(flag: str, path: Path) -> bool:
         timeout=5,
     )
     return result.returncode == 0
+
+
+def resolve_path_with_sudo(path: Path) -> Path:
+    """Resolve symlinks for operation guards, including across protected parents."""
+    path = _normalize_path(path)
+    try:
+        resolved = path.resolve()
+        # Non-strict resolve can silently leave inaccessible symlinks unresolved.
+        if os.access(path.parent, os.X_OK) and os.access(resolved.parent, os.X_OK):
+            return resolved
+    except PermissionError:
+        pass
+
+    result = subprocess.run(
+        ["sudo", "-n", "readlink", "-m", "--", str(path)],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode != 0:
+        raise PermissionError(result.stderr.strip() or "sudo path resolution failed")
+    return Path(result.stdout.removesuffix("\n"))
 
 
 def read_file_bytes(path: Path) -> tuple[bool, bytes | str]:

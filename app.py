@@ -91,6 +91,7 @@ from utils.file_ops import (
     read_file_bytes,
     read_file_head,
     rename_path,
+    resolve_path_with_sudo,
     resolve_request_path,
     stat_path,
     write_file,
@@ -2295,12 +2296,26 @@ def create_app() -> Flask:
 
     def _symlink_points_to_target(source: Path, target: Path) -> bool:
         """Detect the destructive case where copying a symlink would overwrite its referent."""
-        if not source.is_symlink():
+        ok, info = stat_path(source)
+        if not ok:
+            raise OSError(info)
+        if not info["is_symlink"]:
             return False
-        try:
-            return _normalize_absolute_pathname(source.resolve()) == _normalize_absolute_pathname(target)
-        except OSError:
-            return False
+        return resolve_path_with_sudo(source) == resolve_path_with_sudo(target)
+
+    def _prepare_operation_target(target: Path, overwrite: bool) -> tuple[bool, str | None, int | None]:
+        """Check collisions and recycle an explicitly overwritten target, using sudo if needed."""
+        exists, error, status = check_path_exists(target)
+        if not exists:
+            return (True, None, None) if status == 404 else (False, error, status)
+        if not overwrite:
+            return False, "A file or directory with that name already exists", 409
+        if _is_protected_path(target):
+            return False, "Cannot overwrite a protected system path", 403
+        ok, message = delete_path(target)
+        if not ok:
+            return False, f"Failed to remove existing target: {message}", 500
+        return True, None, None
 
     def _activation_result(
         message: str | None = None,
@@ -2585,7 +2600,10 @@ def create_app() -> Flask:
             dest_dir, error = resolve_request_path(dest_dir_str, "directory")
             if error:
                 return jsonify({"error": error}), 400
-            if not dest_dir.is_dir():
+            ok, error, status = check_path_is_directory(dest_dir)
+            if not ok:
+                if status == 403:
+                    return jsonify({"error": error}), status
                 if create_dirs:
                     ok, msg = ensure_directory(dest_dir)
                     if not ok:
@@ -2598,20 +2616,18 @@ def create_app() -> Flask:
         target = Path(os.path.abspath(dest_dir / new_name))
         if _normalize_absolute_pathname(target) == _normalize_absolute_pathname(path):
             return jsonify({"error": "Source and destination are the same file"}), 400
-        if _symlink_points_to_target(path, target):
-            return jsonify({"error": "Cannot overwrite a file via a symlink source"}), 400
-        if target.exists() or target.is_symlink():
-            if overwrite:
-                if _is_protected_path(target):
-                    return jsonify({"error": "Cannot overwrite a protected system path"}), 403
-                if target.is_dir() and not target.is_symlink():
-                    ok, msg = delete_directory(target)
-                else:
-                    ok, msg = delete_path(target)
-                if not ok:
-                    return jsonify({"error": f"Failed to remove existing target: {msg}"}), 500
-            else:
-                return jsonify({"error": "A file with that name already exists"}), 409
+        try:
+            if _symlink_points_to_target(path, target):
+                return jsonify({"error": "Cannot overwrite a file via a symlink source"}), 400
+            if resolve_path_with_sudo(path) == resolve_path_with_sudo(target):
+                return jsonify({"error": "Source and destination are the same file"}), 400
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+            return jsonify({"error": str(e)}), 400
+        ok, error, status = _prepare_operation_target(target, overwrite)
+        if not ok:
+            return jsonify({"error": error}), status
 
         if as_symlink:
             success, message = create_symlink(path, target)
@@ -2662,16 +2678,18 @@ def create_app() -> Flask:
         activate = bool(data.get("activate", False))
         overwrite = bool(data.get("overwrite", False))
 
-        if not path.exists():
-            return jsonify({"error": "Directory not found"}), 404
-        if not path.is_dir():
-            return jsonify({"error": "Not a directory"}), 400
+        ok, error, status = check_path_is_directory(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         if dest_dir_str:
             dest_dir, error = resolve_request_path(dest_dir_str, "directory")
             if error:
                 return jsonify({"error": error}), 400
-            if not dest_dir.is_dir():
+            ok, error, status = check_path_is_directory(dest_dir)
+            if not ok:
+                if status == 403:
+                    return jsonify({"error": error}), status
                 if create_dirs:
                     ok, msg = ensure_directory(dest_dir)
                     if not ok:
@@ -2682,25 +2700,25 @@ def create_app() -> Flask:
             dest_dir = path.parent
 
         target = Path(os.path.abspath(dest_dir / new_name))
-        resolved_path = path.resolve()
         if _normalize_absolute_pathname(target) == _normalize_absolute_pathname(path):
             return jsonify({"error": "Source and destination are the same directory"}), 400
-        if _symlink_points_to_target(path, target):
-            return jsonify({"error": "Cannot overwrite a directory via a symlink source"}), 400
-        if not path.is_symlink() and str(target.resolve()).startswith(str(resolved_path) + "/"):
+        try:
+            if _symlink_points_to_target(path, target):
+                return jsonify({"error": "Cannot overwrite a directory via a symlink source"}), 400
+            resolved_path = resolve_path_with_sudo(path)
+            resolved_target = resolve_path_with_sudo(target)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+            return jsonify({"error": str(e)}), 400
+        ok, source_info = stat_path(path)
+        if not ok:
+            return jsonify({"error": source_info}), 500
+        if source_info["is_dir"] and (resolved_path == resolved_target or resolved_path in resolved_target.parents):
             return jsonify({"error": "Cannot copy a directory into itself"}), 400
-        if target.exists() or target.is_symlink():
-            if overwrite:
-                if _is_protected_path(target):
-                    return jsonify({"error": "Cannot overwrite a protected system path"}), 403
-                if target.is_dir() and not target.is_symlink():
-                    ok, msg = delete_directory(target)
-                else:
-                    ok, msg = delete_path(target)
-                if not ok:
-                    return jsonify({"error": f"Failed to remove existing target: {msg}"}), 500
-            else:
-                return jsonify({"error": "A file or directory with that name already exists"}), 409
+        ok, error, status = _prepare_operation_target(target, overwrite)
+        if not ok:
+            return jsonify({"error": error}), status
 
         if as_symlink:
             success, message = create_symlink(path, target)
@@ -2754,7 +2772,10 @@ def create_app() -> Flask:
             dest_dir, error = resolve_request_path(dest_dir_str, "directory")
             if error:
                 return jsonify({"error": error}), 400
-            if not dest_dir.is_dir():
+            ok, error, status = check_path_is_directory(dest_dir)
+            if not ok:
+                if status == 403:
+                    return jsonify({"error": error}), status
                 if create_dirs:
                     ok, msg = ensure_directory(dest_dir)
                     if not ok:
@@ -2765,23 +2786,23 @@ def create_app() -> Flask:
             dest_dir = path.parent
 
         target = Path(os.path.abspath(dest_dir / new_name))
-        resolved_path = path.resolve()
-        if target.resolve() == resolved_path:
+        try:
+            resolved_path = resolve_path_with_sudo(path)
+            resolved_target = resolve_path_with_sudo(target)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+            return jsonify({"error": str(e)}), 400
+        if resolved_target == resolved_path:
             return jsonify({"error": "Source and destination are the same path"}), 400
-        if path.is_dir() and not path.is_symlink() and str(target.resolve()).startswith(str(resolved_path) + "/"):
+        ok, source_info = stat_path(path)
+        if not ok:
+            return jsonify({"error": source_info}), 500
+        if source_info["is_dir"] and resolved_path in resolved_target.parents:
             return jsonify({"error": "Cannot move a directory into itself"}), 400
-        if target.exists() or target.is_symlink():
-            if overwrite:
-                if _is_protected_path(target):
-                    return jsonify({"error": "Cannot overwrite a protected system path"}), 403
-                if target.is_dir() and not target.is_symlink():
-                    ok, msg = delete_directory(target)
-                else:
-                    ok, msg = delete_path(target)
-                if not ok:
-                    return jsonify({"error": f"Failed to remove existing target: {msg}"}), 500
-            else:
-                return jsonify({"error": "A file or directory with that name already exists"}), 409
+        ok, error, status = _prepare_operation_target(target, overwrite)
+        if not ok:
+            return jsonify({"error": error}), status
 
         success, message = rename_path(path, target)
         if not success:
@@ -2805,27 +2826,33 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "Directory not found"}), 404
-        if not path.is_dir():
-            return jsonify({"error": "Not a directory"}), 400
+        ok, error, status = check_path_is_directory(path)
+        if not ok:
+            return jsonify({"error": error}), status
 
         files = []
         dirs = []
         try:
-            for entry in sorted(path.rglob("*")):
-                rel = str(entry.relative_to(path))
-                if entry.is_dir():
-                    dirs.append(rel + "/")
-                else:
-                    files.append(rel)
+            pending = [path]
+            while pending:
+                for info in list_directory_entries(pending.pop()):
+                    if info.get("error"):
+                        raise PermissionError(info["error"])
+                    entry = Path(info["path"])
+                    rel = str(entry.relative_to(path))
+                    if info["is_dir"]:
+                        dirs.append(rel + "/")
+                        if not info["is_symlink"]:
+                            pending.append(entry)
+                    else:
+                        files.append(rel)
         except PermissionError:
             return jsonify({"error": "Permission denied"}), 403
 
         return jsonify({
             "path": str(path),
-            "files": files,
-            "dirs": dirs,
+            "files": sorted(files),
+            "dirs": sorted(dirs),
             "total_files": len(files),
             "total_dirs": len(dirs),
         })
@@ -2848,10 +2875,9 @@ def create_app() -> Flask:
         if error:
             return jsonify({"error": error}), 400
 
-        if not path.exists():
-            return jsonify({"error": "Directory not found"}), 404
-        if not path.is_dir():
-            return jsonify({"error": "Not a directory"}), 400
+        ok, error, status = check_path_is_directory(path)
+        if not ok:
+            return jsonify({"error": error}), status
         if is_recycle_bin_root(path):
             return jsonify({"error": "Cannot delete the recycle bin itself"}), 403
         if _is_protected_path(path):
