@@ -292,3 +292,142 @@ def test_preview_lists_dangling_and_cyclic_links(client, workspace):
     data = assert_ok(client.get("/api/dir/preview", query_string={"path": str(source)}))
     assert data["files"] == ["cycle", "dangling"]
     assert data["dirs"] == []
+
+
+@pytest.mark.parametrize("item", ["private/source.txt", "private/nested", "public"])
+@pytest.mark.parametrize("mode", ["0000", "600", "0755", "1777", "4751", "2750"])
+def test_metadata_permissions_edit_selected_item_only(client, workspace, item, mode):
+    root, _ = workspace
+    path = root / item
+    child = path / ("data.txt" if item == "private/nested" else "locked/hidden.txt")
+    child_mode = file_ops.stat_path(child)[1]["permissions_octal"] if item != "private/source.txt" else None
+    data = assert_ok(client.post("/api/file/info", json={"path": str(path), "permissions": mode}))
+    assert data["info"]["permissions_octal"] == f"{int(mode, 8):04o}"
+    assert file_ops.stat_path(path)[1]["permissions_octal"] == f"{int(mode, 8):04o}"
+    if child_mode is not None:
+        assert file_ops.stat_path(child)[1]["permissions_octal"] == child_mode
+
+
+@pytest.mark.parametrize("payload", [
+    {"owner": "root", "group": "root"},
+    {"owner": "0", "group": "0"},
+    {"owner": "424242", "group": "424243"},
+    {"owner": "424242"},
+    {"group": "424243"},
+])
+@pytest.mark.parametrize("item", ["private/source.txt", "private/nested", "public"])
+def test_metadata_ownership_names_and_numeric_ids(client, workspace, payload, item):
+    root, _ = workspace
+    path = root / item
+    before = file_ops.stat_path(path)[1]
+    data = assert_ok(client.post("/api/file/info", json={"path": str(path), **payload}))
+    expected = {"0": "root", "root": "root", "424242": "424242", "424243": "424243"}
+    for field in ("owner", "group"):
+        expected_value = expected[payload[field]] if field in payload else before[field]
+        assert data["info"][field] == expected_value
+    # Unknown numeric IDs must remain editable, including through sudo stat.
+    refreshed = assert_ok(client.get("/api/file/info", query_string={"path": str(path)}))
+    assert refreshed["owner"] == data["info"]["owner"]
+    assert refreshed["group"] == data["info"]["group"]
+
+
+@pytest.mark.parametrize("payload", [
+    {"permissions": "888"}, {"permissions": "77777"}, {"permissions": "0o755"},
+    {"permissions": "644; id"}, {"permissions": 644}, {"permissions": None},
+    {"owner": ""}, {"owner": "-1"}, {"owner": "4294967295"}, {"owner": None},
+    {"owner": 0}, {"group": "4294967295"},
+    {"owner": "0", "group": "no_such_diff_editor_group_93852"},
+    {"owner": "no_such_diff_editor_owner_93852"},
+    {"permissions": "600", "owner": "0"}, {"recursive": True}, {},
+])
+def test_metadata_rejects_invalid_edits_without_mutation(client, workspace, payload):
+    root, _ = workspace
+    path = root / "private/source.txt"
+    before = file_ops.stat_path(path)[1]
+    response = client.post("/api/file/info", json={"path": str(path), **payload})
+    assert response.status_code == 400, response.get_json()
+    assert file_ops.stat_path(path)[1] == before
+
+
+def test_metadata_requires_csrf_and_existing_path(client, workspace):
+    root, _ = workspace
+    path = root / "private/source.txt"
+    response = client.post("/api/file/info", headers={"X-CSRF-Token": "invalid"},
+                           json={"path": str(path), "permissions": "0000"})
+    assert response.status_code == 403
+    assert file_ops.stat_path(path)[1]["permissions_octal"] == "0644"
+    response = client.post("/api/file/info", json={"path": str(root / "missing"), "permissions": "600"})
+    assert response.status_code == 404
+    response = client.post("/api/file/info", json=["not an object"])
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_metadata_symlink_ownership_preserves_target(client, workspace, dangling):
+    root, _ = workspace
+    path = root / "private/alias"
+    target = root / "private/nested"
+    if dangling:
+        subprocess.run(["sudo", "-n", "ln", "-sfn", "missing", str(path)], check=True, capture_output=True)
+    before = file_ops.stat_path(target)[1]
+    data = assert_ok(client.post("/api/file/info", json={"path": str(path), "owner": "424242"}))
+    assert data["info"]["owner"] == "424242"
+    assert data["info"]["is_symlink"]
+    assert file_ops.stat_path(target)[1] == before
+    response = client.post("/api/file/info", json={"path": str(path), "permissions": "600"})
+    assert response.status_code == 400, response.get_json()
+    assert file_ops.stat_path(target)[1] == before
+
+
+@pytest.mark.parametrize("payload", [{"permissions": "600"}, {"owner": str(os.getuid()), "group": str(os.getgid())}])
+def test_metadata_ordinary_edits_avoid_sudo(client, workspace, monkeypatch, payload):
+    root, _ = workspace
+    path = root / "public"
+
+    def unexpected_command(*args, **kwargs):
+        pytest.fail(f"Unexpected escalation: {args}")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", unexpected_command)
+        assert_ok(client.post("/api/file/info", json={"path": str(path), **payload}))
+
+
+@pytest.mark.parametrize("failure", ["denied", "timeout"])
+def test_metadata_reports_failed_sudo_without_mutating(client, workspace, monkeypatch, failure):
+    root, _ = workspace
+    path = root / "private/nested"
+    before = file_ops.stat_path(path)[1]
+    real_run = subprocess.run
+
+    def fail_mutation(command, **kwargs):
+        if "chmod" in command:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(command, 10)
+            return subprocess.CompletedProcess(command, 1, "", "sudo denied")
+        return real_run(command, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", fail_mutation)
+        response = client.post("/api/file/info", json={"path": str(path), "permissions": "600"})
+        assert response.status_code == 500
+        expected_error = "denied" if failure == "denied" else "timed out"
+        assert expected_error in response.get_json()["error"].lower()
+        assert file_ops.stat_path(path)[1] == before
+
+
+def test_metadata_ownership_refreshes_cleared_special_bits(client, workspace):
+    root, _ = workspace
+    path = root / "private/source.txt"
+    assert_ok(client.post("/api/file/info", json={"path": str(path), "permissions": "4755"}))
+    data = assert_ok(client.post("/api/file/info", json={"path": str(path), "owner": "424242"}))
+    assert data["info"]["permissions_octal"] == "0755"
+
+
+def test_make_executable_uses_shared_permissions_setter(workspace):
+    root, _ = workspace
+    target = root / "private/source.txt"
+    link = root / "executable-link"
+    link.symlink_to(target)
+    file_ops.make_executable(link)
+    assert file_ops.stat_path(target)[1]["permissions_octal"] == "0755"
+    assert link.is_symlink()

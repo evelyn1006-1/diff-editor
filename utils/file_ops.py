@@ -704,17 +704,86 @@ def copy_file(path: Path, target: Path) -> tuple[bool, str]:
         return False, str(e)
 
 
-def make_executable(path: Path) -> None:
-    """Make a file executable. Uses sudo chmod if needed."""
-    path = Path(os.path.abspath(path))
+def _change_path_metadata(path: Path, operation: str, values: list[int]) -> tuple[bool, str]:
+    """Apply one metadata syscall without following the final symlink, escalating if needed."""
+    path = _normalize_path(path)
     try:
-        path.chmod(path.stat().st_mode | 0o111)
+        getattr(os, operation)(path, *values, follow_symlinks=False)
+        return True, "Updated"
     except PermissionError:
-        subprocess.run(
-            ["sudo", "-n", "chmod", "+x", str(path)],
-            stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
+        pass
+    except (OSError, NotImplementedError) as e:
+        return False, str(e)
+
+    script = (
+        "import os, sys\n"
+        "try:\n"
+        "    getattr(os, sys.argv[1])(sys.argv[2], *map(int, sys.argv[3:]), follow_symlinks=False)\n"
+        "except (OSError, NotImplementedError) as error:\n"
+        "    sys.exit(str(error))\n"
+    )
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", sys.executable, "-c", script, operation, str(path), *map(str, values)],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
         )
-    except OSError:
+        if result.returncode != 0:
+            return False, result.stderr.strip() or f"sudo {operation} failed"
+        return True, "Updated (with sudo)"
+    except subprocess.TimeoutExpired:
+        return False, "Metadata update timed out"
+    except OSError as e:
+        return False, str(e)
+
+
+def set_path_permissions(path: Path, permissions: str) -> tuple[bool, str]:
+    """Set a selected item's octal mode; symlink modes cannot be edited on Linux."""
+    if not isinstance(permissions, str) or not re.fullmatch(r"[0-7]{3,4}", permissions.strip()):
+        raise ValueError("Permissions must be 3 or 4 octal digits (for example, 755 or 0644)")
+    ok, info = stat_path(path)
+    if not ok:
+        return False, info
+    if info["is_symlink"]:
+        raise ValueError("Symlink permissions cannot be changed; edit the target instead")
+    return _change_path_metadata(path, "chmod", [int(permissions.strip(), 8)])
+
+
+def set_path_ownership(path: Path, *, owner: str | None = None, group: str | None = None) -> tuple[bool, str]:
+    """Change an item's owner/group by name or numeric ID, preserving symlink targets."""
+    import grp
+    import pwd
+
+    def resolve_identity(value: str | None, kind: str) -> int:
+        if value is None:
+            return -1  # Leave this identity unchanged in chown.
+        if not isinstance(value, str) or not value.strip() or "\x00" in value:
+            raise ValueError(f"Specify a valid {kind} name or numeric ID")
+        value = value.strip()
+        if re.fullmatch(r"[0-9]+", value):
+            identity = int(value)
+            if identity > 2**32 - 2:
+                raise ValueError(f"{kind.capitalize()} ID is out of range")
+            return identity
+        try:
+            return pwd.getpwnam(value).pw_uid if kind == "owner" else grp.getgrnam(value).gr_gid
+        except KeyError:
+            raise ValueError(f"Unknown {kind}: {value}") from None
+
+    if owner is None and group is None:
+        raise ValueError("Specify an owner or group")
+    uid = resolve_identity(owner, "owner")
+    gid = resolve_identity(group, "group")
+    return _change_path_metadata(path, "chown", [uid, gid])
+
+
+def make_executable(path: Path) -> None:
+    """Make a file executable using the shared sudo-aware permissions setter."""
+    try:
+        target = resolve_path_with_sudo(path)
+        ok, info = stat_path(target)
+        if ok:
+            set_path_permissions(target, f"{int(info['permissions_octal'], 8) | 0o111:04o}")
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
         pass
 
 
@@ -876,7 +945,15 @@ def stat_path(path: Path) -> tuple[bool, dict | str]:
             pass
         return None
 
-    def _build(mode: int, size: int, mtime: float, owner: str, group: str) -> dict:
+    def _build(mode: int, size: int, mtime: float, uid: int, gid: int) -> dict:
+        try:
+            owner = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            owner = str(uid)
+        try:
+            group = grp.getgrgid(gid).gr_name
+        except KeyError:
+            group = str(gid)
         is_link = S_ISLNK(mode)
         return {
             "size": size,
@@ -896,15 +973,7 @@ def stat_path(path: Path) -> tuple[bool, dict | str]:
     # Try direct lstat
     try:
         s = path.lstat()
-        try:
-            owner = pwd.getpwuid(s.st_uid).pw_name
-        except KeyError:
-            owner = str(s.st_uid)
-        try:
-            group = grp.getgrgid(s.st_gid).gr_name
-        except KeyError:
-            group = str(s.st_gid)
-        return True, _build(s.st_mode, s.st_size, s.st_mtime, owner, group)
+        return True, _build(s.st_mode, s.st_size, s.st_mtime, s.st_uid, s.st_gid)
     except PermissionError:
         pass
     except OSError as e:
@@ -913,7 +982,7 @@ def stat_path(path: Path) -> tuple[bool, dict | str]:
     # Sudo fallback
     try:
         result = subprocess.run(
-            ["sudo", "-n", "stat", "--printf", "%f\n%s\n%Y\n%U\n%G", str(path)],
+            ["sudo", "-n", "stat", "--printf", "%f\n%s\n%Y\n%u\n%g", str(path)],
             stdin=subprocess.DEVNULL, capture_output=True, timeout=10,
         )
         if result.returncode == 0:
@@ -922,7 +991,7 @@ def stat_path(path: Path) -> tuple[bool, dict | str]:
                 mode = int(lines[0], 16)
                 size = int(lines[1])
                 mtime = float(lines[2])
-                return True, _build(mode, size, mtime, lines[3], lines[4])
+                return True, _build(mode, size, mtime, int(lines[3]), int(lines[4]))
         error = result.stderr.decode("utf-8", errors="replace")
         return False, f"stat failed: {error}"
     except subprocess.TimeoutExpired:

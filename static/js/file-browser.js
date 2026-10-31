@@ -2325,7 +2325,8 @@ async function showInfoModal(path) {
 
     const dialog = overlay.querySelector('.modal-dialog');
 
-    function close() { overlay.remove(); }
+    let saving = false;
+    function close() { if (!saving) overlay.remove(); }
     function bindClose() {
         overlay.querySelector('.btn-modal-cancel')?.addEventListener('click', close);
     }
@@ -2367,9 +2368,34 @@ async function showInfoModal(path) {
 
     rows.push([
         'Permissions',
-        `<span class="info-mono">${escapeHtml(data.permissions)}</span> <span class="info-secondary">${escapeHtml(data.permissions_octal)}</span>`,
+        data.is_symlink
+            ? `<span class="info-mono">${escapeHtml(data.permissions)} ${escapeHtml(data.permissions_octal)}</span>
+                <div class="info-secondary">Symlink permissions cannot be changed.</div>`
+            : `<form class="info-edit-form" data-edit="permissions">
+                <div class="info-edit-controls">
+                    <input class="copy-input info-mode-input" name="permissions" aria-label="Permissions (octal)"
+                        value="${escapeHtml(data.permissions_octal)}" pattern="[0-7]{3,4}" maxlength="4"
+                        inputmode="numeric" title="3 or 4 octal digits, for example 755 or 0644" required>
+                    <button class="btn-modal btn-modal-copy" type="submit">Save permissions</button>
+                </div>
+                <div class="info-mono" data-permissions-symbolic>${escapeHtml(data.permissions)}</div>
+                <div class="info-edit-status" role="status" aria-live="polite"></div>
+            </form>`,
     ]);
-    rows.push(['Owner', `${escapeHtml(data.owner)} <span class="info-secondary">:</span> ${escapeHtml(data.group)}`]);
+    rows.push(['Owner', `<form class="info-edit-form" data-edit="ownership">
+        <div class="info-edit-controls">
+            <label class="info-owner-field">Owner
+                <input class="copy-input" name="owner" value="${escapeHtml(data.owner)}" required
+                    placeholder="Name or UID" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="info-owner-field">Group
+                <input class="copy-input" name="group" value="${escapeHtml(data.group)}" required
+                    placeholder="Name or GID" autocomplete="off" spellcheck="false">
+            </label>
+            <button class="btn-modal btn-modal-copy" type="submit">Save owner</button>
+        </div>
+        <div class="info-edit-status" role="status" aria-live="polite"></div>
+    </form>`]);
     rows.push(['Modified', escapeHtml(data.modified)]);
 
     // Render modal with basic info + loading placeholder for extended
@@ -2395,6 +2421,51 @@ async function showInfoModal(path) {
         </div>
     `;
     bindClose();
+
+    dialog.querySelectorAll('.info-edit-form').forEach(form => {
+        const status = form.querySelector('.info-edit-status');
+        form.addEventListener('input', () => { status.textContent = ''; });
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            if (saving || !form.reportValidity()) return;
+            const payload = { path: data.path, ...Object.fromEntries(new FormData(form)) };
+            const controls = dialog.querySelectorAll('.info-edit-form input, .info-edit-form button, .btn-modal-cancel');
+            saving = true;
+            controls.forEach(control => { control.disabled = true; });
+            status.classList.remove('error');
+            status.textContent = 'Saving…';
+            try {
+                const response = await fetch('api/file/info', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': CSRF_TOKEN },
+                    body: JSON.stringify(payload),
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || 'Failed to save metadata');
+                const previous = data;
+                data = { ...data, ...result.info };
+                const edited = form.dataset.edit;
+                const modeInput = dialog.querySelector('[name="permissions"]');
+                if (modeInput && (edited === 'permissions' || modeInput.value === previous.permissions_octal)) {
+                    modeInput.value = data.permissions_octal;
+                }
+                for (const name of ['owner', 'group']) {
+                    const input = dialog.querySelector(`[name="${name}"]`);
+                    if (edited === 'ownership' || input.value === previous[name]) input.value = data[name];
+                }
+                const symbolic = dialog.querySelector('[data-permissions-symbolic]');
+                if (symbolic) symbolic.textContent = data.permissions;
+                status.textContent = 'Saved.';
+                if (currentPath) loadDirectory(currentPath);
+            } catch (err) {
+                status.classList.add('error');
+                status.textContent = err.message;
+            } finally {
+                saving = false;
+                controls.forEach(control => { control.disabled = false; });
+            }
+        });
+    });
 
     // Phase 2: fetch extended info (may be slow)
     try {

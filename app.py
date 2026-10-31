@@ -93,6 +93,8 @@ from utils.file_ops import (
     rename_path,
     resolve_path_with_sudo,
     resolve_request_path,
+    set_path_ownership,
+    set_path_permissions,
     stat_path,
     write_file,
     write_file_bytes,
@@ -3035,6 +3037,43 @@ def create_app() -> Flask:
             result["mime_type"] = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
         return jsonify(result)
+
+    @app.post("/api/file/info")
+    def update_file_info():
+        if not validate_csrf_token(request.headers.get("X-CSRF-Token", "")):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not data:
+            return jsonify({"error": "No data provided"}), 400
+        if data.keys() - {"path", "permissions", "owner", "group"}:
+            return jsonify({"error": "Unknown metadata field"}), 400
+        ownership_fields = data.keys() & {"owner", "group"}
+        # Each Save performs one syscall, so a failed second operation cannot
+        # leave an apparently failed combined save partly applied.
+        if ("permissions" in data) == bool(ownership_fields):
+            return jsonify({"error": "Update either permissions or ownership in one request"}), 400
+        if any(not isinstance(data[field], str) for field in ownership_fields):
+            return jsonify({"error": "Owner and group must be names or numeric IDs"}), 400
+
+        path, error = resolve_request_path(data.get("path", ""))
+        if error:
+            return jsonify({"error": error}), 400
+        ok, error, status = check_path_exists(path)
+        if not ok:
+            return jsonify({"error": error}), status
+        try:
+            if "permissions" in data:
+                success, message = set_path_permissions(path, data["permissions"])
+            else:
+                success, message = set_path_ownership(path, **{field: data[field] for field in ownership_fields})
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        if not success:
+            return jsonify({"error": message}), 500
+        success, info = stat_path(path)
+        if not success:
+            return jsonify({"error": f"Updated, but failed to refresh metadata: {info}"}), 500
+        return jsonify({"success": True, "message": message, "info": info})
 
     @app.get("/api/file/info/extended")
     def file_info_extended():

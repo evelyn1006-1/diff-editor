@@ -964,6 +964,47 @@ main {
     opacity: 0.7;
 }
 
+.info-edit-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.45rem;
+}
+
+.info-edit-controls .copy-input {
+    margin-bottom: 0;
+}
+
+.info-edit-controls .info-mode-input {
+    width: 5.5rem;
+}
+
+.info-owner-field {
+    flex: 1;
+    min-width: 6rem;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.info-edit-controls button {
+    flex-shrink: 0;
+    padding: 0.45rem 0.65rem;
+}
+
+.info-edit-status {
+    margin-top: 0.3rem;
+    color: var(--text-secondary);
+    word-break: normal;
+}
+
+.info-edit-status:empty {
+    display: none;
+}
+
+.info-edit-status.error {
+    color: var(--error);
+}
+
 .info-loading {
     font-family: 'Comic Neue', sans-serif;
     font-size: 0.9rem;
