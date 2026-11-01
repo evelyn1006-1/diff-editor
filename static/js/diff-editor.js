@@ -5,6 +5,7 @@
 let diffEditor = null;
 let originalContent = '';
 let currentContent = '';
+let fileRevision = null;
 let isModified = false;
 let wordWrapEnabled = false;
 let fileLanguage = 'plaintext';
@@ -63,6 +64,7 @@ async function initDiffEditor() {
 
         originalContent = data.original;
         currentContent = data.content;
+        fileRevision = data.revision ?? null;
         fileLanguage = data.language;
         isImageFile = Boolean(data.is_image);
         isPdfFile = Boolean(data.is_pdf);
@@ -704,6 +706,20 @@ function updateStatus() {
     }
 }
 
+async function persistFileContent(content) {
+    const response = await fetch('api/file', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': CSRF_TOKEN,
+        },
+        body: JSON.stringify({ path: FILE_PATH, content, revision: fileRevision }),
+    });
+    const data = await response.json();
+    if (response.ok) fileRevision = data.revision ?? null;
+    return { response, data };
+}
+
 async function saveFile() {
     const statusEl = document.getElementById('status');
     const saveBtn = document.getElementById('btn-save');
@@ -717,19 +733,7 @@ async function saveFile() {
     saveBtn.disabled = true;
 
     try {
-        const response = await fetch('api/file', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': CSRF_TOKEN,
-            },
-            body: JSON.stringify({
-                path: FILE_PATH,
-                content: newContent,
-            }),
-        });
-
-        const data = await response.json();
+        const { response, data } = await persistFileContent(newContent);
 
         if (!response.ok) {
             statusEl.textContent = data.error || 'Save failed';
@@ -1479,19 +1483,7 @@ async function saveBeforeAction(button, actionLabel) {
     statusEl.className = 'status';
 
     try {
-        const response = await fetch('api/file', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': CSRF_TOKEN,
-            },
-            body: JSON.stringify({
-                path: FILE_PATH,
-                content: newContent,
-            }),
-        });
-
-        const data = await response.json();
+        const { response, data } = await persistFileContent(newContent);
 
         if (!response.ok) {
             statusEl.textContent = data.error || 'Save failed';

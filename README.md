@@ -28,6 +28,22 @@ It combines a Git-aware Monaco editor with a mobile-friendly PTY terminal, a bui
 - Auto-refresh for log files (`.log`, `.jsonl`, `.err`, `.out`, `.trace`, and more) every 1.5 seconds
 - Save with Ctrl+S; wrap toggle; keyboard-driven workflow
 
+### Python Notebooks
+
+- `.ipynb` files open as stacked code, Markdown, and raw cells; add, delete, reorder, change cell types, and undo cell actions
+- Markdown cells show their rendered preview by default. **Edit** reveals the source; **Done** renders the latest text again. New Markdown cells open ready to edit
+- Mobile uses touch-sized controls and editable textareas; desktop can use Monaco, with a textbox fallback when its CDN is unavailable
+- Display saved text, errors, HTML tables, SVG, raster images, Markdown, JSON, and LaTeX; preserve notebook/cell metadata, attachments, and other MIME outputs when saving
+- Markdown previews reuse the existing renderer and support embedded attachments and local images
+- **Execute All & Save** starts one fresh Python kernel, executes cells in order, saves outputs, and shuts the kernel down
+- Choose the editor's default Python, an installed Python kernel, or a Python executable/virtualenv directory (the selected environment needs `ipykernel`)
+- Execution runs in the notebook's directory as the service account, automatically using sudo when the notebook, directory, or selected interpreter requires it. Elevated workers also manage kernel shutdown with the necessary privileges; recovery files remain owned by the editor account
+- Each cell has a configurable timeout (600 seconds by default; 0 disables it). The first failing or timed-out cell stops the run; partial outputs and its traceback are saved
+- Execution jobs survive page refreshes and editor worker reloads without keeping an interactive kernel session. A changed file is preserved and the executed result remains downloadable
+- Saves detect stale revisions instead of silently overwriting another editor's changes; **JSON / Git diff** opens the regular diff view
+- Notebook tools are optional: without them, files open in the regular editor with a warning and remain editable
+- HTML/SVG outputs are static sandboxed previews; JavaScript and interactive widget execution are not enabled. Their original MIME data is preserved
+
 ### AI Code Review
 - Dual provider support: Codex CLI (streaming JSON events) or OpenAI SDK (Responses API or Chat Completions)
 - Review existing changes with contextual prompts: normal review, or custom prompts with presets for Security, Design, and Explain
@@ -136,6 +152,7 @@ diff-editor-terminal/
 - Optional: `gcc`, `g++`, `go`, `javac`/`jar`, `rustc`, `csc`/`mcs`, `node`, `ruby`, `perl`, `bf`, `magma`, `pfdsim` depending on which languages you want to compile or run
 - Optional: `certbot` and `nginx` for the TLS certificate management features
 - Optional: Codex CLI or an OpenAI API key for AI code review
+- Optional: install `requirements-notebook.txt` for notebook editing and execution
 
 The frontend loads Monaco Editor, the Socket.IO client, and PDF.js from CDNs (jsDelivr, cdnjs), so an internet connection is expected unless you vendor those assets.
 
@@ -147,7 +164,21 @@ cd /home/evelyn/diff-editor-terminal
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+# Optional notebook support, in the same Python environment as the editor:
+pip install -r requirements-notebook.txt
 ```
+
+The notebook view can also run code in another environment that has `ipykernel`
+installed. Select an installed Python kernel, or enter that environment's directory
+or Python executable. The editor's notebook libraries do not need to be installed
+again in each selected environment.
+
+`MAX_NOTEBOOK_SIZE` sets the notebook size limit in bytes (default 100 MiB).
+Execution results above this limit remain downloadable without replacing the
+editable notebook. Finished jobs and their recovery downloads reappear on refresh.
+`NOTEBOOK_JOB_ROOT` optionally changes the private execution directory (default
+`/tmp/diff-editor-notebooks-<uid>`). Each run preserves its worker log and executed
+notebook there for recovery; these files are temporary and are not version history.
 
 ## Configuration
 

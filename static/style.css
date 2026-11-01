@@ -286,6 +286,14 @@ button:disabled {
 }
 
 /* Main content */
+.editor-warning {
+    flex-shrink: 0;
+    padding: 0.6rem 1rem;
+    color: #7a4800;
+    background: #fff3cd;
+    border-bottom: 1px solid #e6b85c;
+}
+
 main {
     flex: 1;
     overflow: hidden;

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{{ file_path | basename }} - Notebook{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="{{ static_url('notebook.css') }}">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css">
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js" onload="window.dispatchEvent(new Event('notebook-math-ready'))"></script>
+{% endblock %}
+{% block nav %}
+<span class="file-path" title="{{ file_path }}">{{ file_path | basename }}</span>
+<button id="notebook-save" class="btn-primary" disabled>Save</button>
+<button id="notebook-run" class="btn-primary" disabled>Execute All &amp; Save</button>
+{% endblock %}
+{% block content %}
+<div class="notebook-workspace">
+    <div class="notebook-toolbar">
+        <label>Environment
+            <select id="notebook-environment" aria-label="Python environment" disabled>
+                <option value="default">Default Python</option>
+            </select>
+        </label>
+        <label id="notebook-python-field" class="hidden">Python or virtualenv path
+            <input id="notebook-python" placeholder="/path/to/.venv or /path/to/python" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off">
+        </label>
+        <label>Cell timeout (seconds; 0 = unlimited)
+            <input id="notebook-timeout" type="number" min="0" max="86400" value="600" inputmode="numeric">
+        </label>
+        <button id="notebook-editor-mode" disabled>Use code editor</button>
+        <a href="{{ url_for('diff_view', file=file_path, raw='1') }}">JSON / Git diff</a>
+    </div>
+    <div class="notebook-feedback">
+        <span id="notebook-status" role="status" aria-live="polite">Loading notebook…</span>
+        <a id="notebook-result" class="hidden">Download executed notebook</a>
+        <button id="notebook-reload" class="hidden">Reload from disk</button>
+    </div>
+    <div id="notebook-cells" aria-label="Notebook cells"></div>
+    <div class="notebook-add-controls">
+        <button data-add-cell="code" disabled>+ Code</button>
+        <button data-add-cell="markdown" disabled>+ Markdown</button>
+        <button data-add-cell="raw" disabled>+ Raw</button>
+        <button id="notebook-undo" disabled>Undo cell action</button>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>window.FILE_PATH = {{ file_path | tojson }};</script>
+<script src="{{ static_url('js/notebook.js') }}"></script>
+{% endblock %}

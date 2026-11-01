@@ -25,6 +25,7 @@
 {% endblock %}
 
 {% block content %}
+{% if editor_warning %}<div class="editor-warning" role="status">{{ editor_warning }}</div>{% endif %}
 <div id="editor-container"></div>
 <div id="run-terminal-overlay" class="run-terminal-overlay hidden">
     <div class="run-terminal-popup">

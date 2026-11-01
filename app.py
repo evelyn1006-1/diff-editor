@@ -7,6 +7,7 @@ import difflib
 import fcntl
 import hashlib
 import html
+import importlib
 import ipaddress
 import io
 import json
@@ -23,7 +24,7 @@ import threading
 import time
 import datetime
 from pathlib import Path
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from dotenv import dotenv_values, load_dotenv
 from flask import (
@@ -41,6 +42,7 @@ from jinja2 import ChainableUndefined, Environment, FileSystemLoader, Undefined,
 from jinja2.utils import htmlsafe_json_dumps
 from werkzeug.middleware.proxy_fix import ProxyFix
 from openai import OpenAI
+from app_runtime import notebook_size_limit
 
 load_dotenv()
 
@@ -364,7 +366,7 @@ def _safe_markdown_url(value: str) -> str:
     return html.escape(normalized, quote=True)
 
 
-def _render_markdown_inline(text: str) -> str:
+def _render_markdown_inline(text: str, image_urls: dict[str, str] | None = None) -> str:
     placeholders: list[str] = []
 
     def stash(value: str) -> str:
@@ -374,8 +376,12 @@ def _render_markdown_inline(text: str) -> str:
     def render_image(match: re.Match) -> str:
         title = match.group(3)
         title_attr = f' title="{_safe_markdown_attr(title)}"' if title else ""
+        source = (image_urls or {}).get(match.group(2))
+        if source is None:
+            source = (image_urls or {}).get(unquote(match.group(2)))
+        source = html.escape(source, quote=True) if source is not None else _safe_markdown_url(match.group(2))
         return stash(
-            f'<img src="{_safe_markdown_url(match.group(2))}" alt="{_safe_markdown_attr(match.group(1))}"'
+            f'<img src="{source}" alt="{_safe_markdown_attr(match.group(1))}"'
             f"{title_attr}>"
         )
 
@@ -504,21 +510,21 @@ def _normalize_markdown_table_cells(cells: list[str], width: int) -> list[str]:
     return cells + [""] * (width - len(cells))
 
 
-def _render_markdown_table(header: list[str], alignments: list[str], rows: list[list[str]]) -> str:
+def _render_markdown_table(header: list[str], alignments: list[str], rows: list[list[str]], image_urls=None) -> str:
     def cell_class(index: int) -> str:
         alignment = alignments[index]
         return f' class="align-{alignment}"' if alignment else ""
 
     normalized_header = _normalize_markdown_table_cells(header, len(alignments))
     rendered_header = "".join(
-        f"<th{cell_class(index)}>{_render_markdown_inline(cell)}</th>"
+        f"<th{cell_class(index)}>{_render_markdown_inline(cell, image_urls)}</th>"
         for index, cell in enumerate(normalized_header)
     )
     rendered_rows = []
     for row in rows:
         normalized_row = _normalize_markdown_table_cells(row, len(alignments))
         rendered_cells = "".join(
-            f"<td{cell_class(index)}>{_render_markdown_inline(cell)}</td>"
+            f"<td{cell_class(index)}>{_render_markdown_inline(cell, image_urls)}</td>"
             for index, cell in enumerate(normalized_row)
         )
         rendered_rows.append(f"<tr>{rendered_cells}</tr>")
@@ -527,7 +533,7 @@ def _render_markdown_table(header: list[str], alignments: list[str], rows: list[
     return f"<table>\n<thead><tr>{rendered_header}</tr></thead>{body_html}\n</table>"
 
 
-def _render_markdown_document(markdown_text: str, title: str) -> str:
+def _render_markdown_document(markdown_text: str, title: str, image_urls=None) -> str:
     # Keep previews deterministic and raw HTML inert regardless of optional packages.
     lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     rendered: list[str] = []
@@ -538,7 +544,7 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
 
     def flush_paragraph() -> None:
         if paragraph:
-            rendered.append(f"<p>{_render_markdown_inline(' '.join(paragraph))}</p>")
+            rendered.append(f"<p>{_render_markdown_inline(' '.join(paragraph), image_urls)}</p>")
             paragraph.clear()
 
     def close_list() -> None:
@@ -579,7 +585,7 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
             flush_paragraph()
             close_list()
             level = len(heading.group(1))
-            rendered.append(f"<h{level}>{_render_markdown_inline(heading.group(2).strip())}</h{level}>")
+            rendered.append(f"<h{level}>{_render_markdown_inline(heading.group(2).strip(), image_urls)}</h{level}>")
             index += 1
             continue
 
@@ -594,7 +600,7 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
         if quote:
             flush_paragraph()
             close_list()
-            rendered.append(f"<blockquote>{_render_markdown_inline(quote.group(1))}</blockquote>")
+            rendered.append(f"<blockquote>{_render_markdown_inline(quote.group(1), image_urls)}</blockquote>")
             index += 1
             continue
 
@@ -615,7 +621,7 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
                         break
                     table_rows.append(row_cells)
                     index += 1
-                rendered.append(_render_markdown_table(table_header, table_alignments, table_rows))
+                rendered.append(_render_markdown_table(table_header, table_alignments, table_rows, image_urls))
                 continue
 
         unordered = re.match(r"^\s*[-*+]\s+(.+)$", line)
@@ -627,7 +633,7 @@ def _render_markdown_document(markdown_text: str, title: str) -> str:
                 close_list()
                 rendered.append(f"<{next_list_type}>")
                 list_type = next_list_type
-            rendered.append(f"<li>{_render_markdown_inline((unordered or ordered).group(1))}</li>")
+            rendered.append(f"<li>{_render_markdown_inline((unordered or ordered).group(1), image_urls)}</li>")
             index += 1
             continue
 
@@ -789,6 +795,7 @@ def create_app() -> Flask:
 
     DEFAULT_ROOT = os.environ.get("DEFAULT_ROOT", "/home/evelyn")
     MAX_FILE_SIZE = int(os.environ.get("MAX_FILE_SIZE", 10 * 1024 * 1024))
+    MAX_NOTEBOOK_SIZE = notebook_size_limit()
     MAX_PDF_FILE_SIZE = int(os.environ.get("MAX_PDF_FILE_SIZE", 250 * 1024 * 1024))
     AI_REVIEW_COOLDOWN_SECONDS = max(0.0, float(os.environ.get("AI_REVIEW_COOLDOWN_SECONDS", "10")))
     AI_REVIEW_COOLDOWN_FILE = Path(
@@ -1247,7 +1254,7 @@ def create_app() -> Flask:
             "default-src 'self'; "
             "script-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com 'unsafe-inline'; "
             "style-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com 'unsafe-inline'; "
-            "font-src 'self' https://cdn.jsdelivr.net; "
+            "font-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
             "img-src 'self' data:; "
             "worker-src 'self' blob: https://cdnjs.cloudflare.com; "
             "frame-ancestors 'self'"
@@ -1326,7 +1333,148 @@ def create_app() -> Flask:
         if not ok:
             return render_template("index.html", default_root=DEFAULT_ROOT, error=f"{error}: {file_path}"), status
 
-        return render_template("diff.html", file_path=str(path))
+        warning = None
+        if path.suffix.lower() == ".ipynb":
+            operations, warning = notebook_tools()
+            if operations is not None and request.args.get("raw") != "1":
+                return render_template("notebook.html", file_path=str(path))
+        return render_template("diff.html", file_path=str(path), editor_warning=warning)
+
+    def notebook_tools():
+        try:
+            return importlib.import_module("utils.notebook_ops"), None
+        except ImportError:
+            return None, ("Notebook tools are unavailable. Opened as regular JSON. "
+                          "Install nbformat, nbclient, and ipykernel in the editor's Python environment to enable notebook features.")
+
+    def notebook_scope():
+        # Derive from the already-established session token: independent tabs
+        # must not race to write different job namespaces into the same cookie.
+        return hashlib.sha256(("notebook:" + generate_csrf_token()).encode()).hexdigest()[:32]
+
+    def notebook_path(raw):
+        path, error = resolve_request_path(raw)
+        if error:
+            return None, error, 400
+        if path.suffix.lower() != ".ipynb":
+            return None, "Select an .ipynb notebook", 400
+        ok, error, status = check_path_is_file(path)
+        if not ok:
+            return None, error, status
+        size = get_file_size(path)
+        if size is not None and size > MAX_NOTEBOOK_SIZE:
+            return None, f"Notebook too large (max {MAX_NOTEBOOK_SIZE // 1024 // 1024}MB)", 400
+        return path, None, None
+
+    @app.get("/api/notebook")
+    def get_notebook():
+        operations, error = notebook_tools()
+        if operations is None:
+            return jsonify({"error": error}), 503
+        path, error, status = notebook_path(request.args.get("path", ""))
+        if error:
+            return jsonify({"error": error}), status
+        try:
+            notebook, revision = operations.read_notebook(path)
+            return jsonify({"notebook": notebook, "revision": revision, "empty": get_file_size(path) == 0,
+                            "environments": operations.environments(),
+                            "job": operations.latest_job(notebook_scope(), path)})
+        except ValueError as exception:
+            return jsonify({"error": str(exception)}), 400
+        except OSError as exception:
+            return jsonify({"error": str(exception)}), 500
+
+    @app.post("/api/notebook/execute")
+    def execute_notebook():
+        if not validate_csrf_token(request.headers.get("X-CSRF-Token", "")):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+        operations, error = notebook_tools()
+        if operations is None:
+            return jsonify({"error": error}), 503
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "No data provided"}), 400
+        path, error, status = notebook_path(data.get("path", ""))
+        if error:
+            return jsonify({"error": error}), status
+        timeout = data.get("timeout", 600)
+        if type(timeout) is not int or timeout < 0 or timeout > 86400:
+            return jsonify({"error": "Cell timeout must be between 0 (unlimited) and 86400 seconds"}), 400
+        try:
+            notebook = operations.validate_notebook(data.get("notebook"))
+            environment = operations.resolve_environment(data.get("environment", "default"), data.get("python_path", ""))
+            state = operations.start_execution(notebook_scope(), path, notebook, data.get("revision"),
+                                               environment, timeout, MAX_NOTEBOOK_SIZE, data.get("request_id"))
+            return jsonify(state), 202
+        except operations.NotebookConflict as exception:
+            return jsonify({"error": str(exception)}), 409
+        except (ValueError, subprocess.TimeoutExpired) as exception:
+            return jsonify({"error": str(exception)}), 400
+        except OSError as exception:
+            return jsonify({"error": str(exception)}), 500
+
+    @app.get("/api/notebook/jobs/<job_id>")
+    def notebook_job(job_id):
+        operations, error = notebook_tools()
+        if operations is None:
+            return jsonify({"error": error}), 503
+        try:
+            state = operations.job_status(notebook_scope(), job_id)
+        except ValueError:
+            state = None
+        if state is None:
+            return jsonify({"error": "Notebook execution not found"}), 404
+        return jsonify(state)
+
+    @app.get("/api/notebook/jobs/<job_id>/result")
+    def notebook_job_result(job_id):
+        operations, error = notebook_tools()
+        if operations is None:
+            return jsonify({"error": error}), 503
+        try:
+            state = operations.job_status(notebook_scope(), job_id)
+        except ValueError:
+            state = None
+        if state is None or not state["result_available"]:
+            return jsonify({"error": "No execution result is available"}), 404
+        return send_file(operations.job_directory(notebook_scope(), job_id) / "result.ipynb",
+                         as_attachment=True, download_name=Path(state["path"]).stem + ".executed.ipynb",
+                         mimetype="application/x-ipynb+json")
+
+    @app.post("/api/notebook/markdown")
+    def notebook_markdown():
+        if not validate_csrf_token(request.headers.get("X-CSRF-Token", "")):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get("source"), str):
+            return jsonify({"error": "Specify Markdown source"}), 400
+        path, error, status = notebook_path(data.get("path", ""))
+        if error:
+            return jsonify({"error": error}), status
+        images = {}
+        attachments = data.get("attachments", {})
+        if not isinstance(attachments, dict):
+            return jsonify({"error": "Invalid attachments"}), 400
+        for name, bundle in attachments.items():
+            if not isinstance(bundle, dict):
+                continue
+            for mime in ("image/png", "image/jpeg", "image/gif", "image/svg+xml"):
+                value = bundle.get(mime)
+                if isinstance(value, list) and all(isinstance(part, str) for part in value):
+                    value = "".join(value)
+                if not isinstance(value, str):
+                    continue
+                if mime == "image/svg+xml" and value.lstrip().startswith("<"):
+                    images[f"attachment:{name}"] = f"data:{mime}," + quote(value)
+                elif re.fullmatch(r"[A-Za-z0-9+/=\s]*", value):
+                    images[f"attachment:{name}"] = f"data:{mime};base64," + re.sub(r"\s", "", value)
+                break
+        for match in re.finditer(r"!\[[^\]]*\]\(([^)\s]+)", data["source"]):
+            source = match.group(1)
+            if not urlsplit(source).scheme:
+                image_path = path.parent / unquote(urlsplit(source).path)
+                images[source] = url_for("file_image", path=str(image_path))
+        return jsonify({"html": _render_markdown_document(data["source"], "Notebook Markdown", images)})
 
     @app.get("/api/browse")
     def browse_directory():
@@ -1437,7 +1585,7 @@ def create_app() -> Flask:
         )
 
         size = get_file_size(path)
-        size_limit = MAX_PDF_FILE_SIZE if is_pdf else MAX_FILE_SIZE
+        size_limit = MAX_PDF_FILE_SIZE if is_pdf else MAX_NOTEBOOK_SIZE if path.suffix.lower() == ".ipynb" else MAX_FILE_SIZE
         if size is not None and size > size_limit:
             return jsonify({"error": f"File too large (max {size_limit // 1024 // 1024}MB)"}), 400
 
@@ -1493,6 +1641,11 @@ def create_app() -> Flask:
         )
 
         language = detect_language_for_path(path, content=content, is_binary=is_binary)
+        notebook_revision = {}
+        if path.suffix.lower() == ".ipynb":
+            operations, _ = notebook_tools()
+            if operations is not None:
+                notebook_revision["revision"] = operations.revision(content_bytes)
 
         return jsonify({
             "path": str(path),
@@ -1504,6 +1657,7 @@ def create_app() -> Flask:
             "is_binary": is_binary,
             "is_git": is_git_tracked,
             "writable": is_writable_by_user(path),
+            **notebook_revision,
         })
 
     @app.get("/api/run-tooling")
@@ -3170,6 +3324,20 @@ def create_app() -> Flask:
 
         if detect_image_mime(path, existing_bytes):
             return jsonify({"error": "Image files are preview-only"}), 400
+
+        if path.suffix.lower() == ".ipynb":
+            operations, _ = notebook_tools()
+            if operations is not None:
+                try:
+                    notebook = operations.parse_notebook(content)
+                    revision = operations.save_notebook(path, notebook, data.get("revision"), MAX_NOTEBOOK_SIZE)
+                    return jsonify({"success": True, "message": "Notebook saved", "revision": revision})
+                except operations.NotebookConflict as exception:
+                    return jsonify({"error": str(exception)}), 409
+                except (ValueError, TypeError) as exception:
+                    return jsonify({"error": str(exception)}), 400
+                except OSError as exception:
+                    return jsonify({"error": str(exception)}), 500
 
         if is_likely_binary(existing_bytes):
             parse_ok, parsed_or_error = parse_hex_view(content)

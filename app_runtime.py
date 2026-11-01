@@ -5,6 +5,12 @@ import os
 DEFAULT_EDITOR_BIND = "127.0.0.1:8005"
 DEFAULT_TERMINAL_BIND = "127.0.0.1:8006"
 
+
+def notebook_size_limit() -> int:
+    """Use the same size limit in web and detached notebook workers."""
+    return int(os.environ.get("MAX_NOTEBOOK_SIZE", 100 * 1024 * 1024))
+
+
 # Gunicorn binds to this address, and the editor wrapper posts back to the
 # matching HTTP URL unless a more specific override is provided.
 EDITOR_BIND = os.environ.get("EDITOR_BIND", DEFAULT_EDITOR_BIND)
