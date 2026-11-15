@@ -1473,7 +1473,7 @@ def pager_poll():
     session = pty_manager.get_session(session_id)
     if not session:
         return jsonify({"error": "invalid session"}), 403
-    cwd = _safe_cwd_for_session(session.current_cwd)
+    cwd = get_session_cwd(session)
     result = get_pager_content(command, cwd, session_id, as_root=bool(getattr(session, "is_root", False)))
     if result is None:
         return jsonify({"error": "command is not pager-interceptable"}), 400
