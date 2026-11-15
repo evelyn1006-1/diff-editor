@@ -13,6 +13,13 @@ def isolated_file_backups(tmp_path, monkeypatch):
     monkeypatch.setenv("FILE_BACKUP_ROOT", str(tmp_path / "save-backups"))
 
 
+@pytest.fixture(autouse=True)
+def same_process_editor_routes(monkeypatch):
+    # Test servers expose editor and terminal routes at the root, unlike the
+    # nginx deployment configured through .env.
+    monkeypatch.delenv("EDITOR_URL_PREFIX", raising=False)
+
+
 @pytest.fixture
 def offline_monaco():
     """Supply model interfaces while exercising real editor handlers offline."""

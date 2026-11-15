@@ -187,7 +187,7 @@
                     <span id="editor-hint" class="editor-hint">Ctrl+Enter to save &nbsp;·&nbsp; Esc to cancel</span>
                     <div class="editor-actions">
                         <button id="editor-cancel" class="editor-btn editor-btn-cancel">Cancel</button>
-                        <button id="editor-save" class="editor-btn editor-btn-save" data-backups-url="{{ url_for('file_backups') }}">Save</button>
+                        <button id="editor-save" class="editor-btn editor-btn-save" data-backups-url="{{ editor_url_for('file_backups') }}">Save</button>
                     </div>
                 </div>
             </div>
@@ -272,7 +272,7 @@
         window.TERMINAL_CWD = {{ cwd | default('') | tojson }};
         window.TERMINAL_ROOT = {{ root_terminal | default(false) | tojson }};
         window.CSRF_TOKEN = {{ csrf_token() | tojson }};
-        window.RECOVERY_URLS = {{ {'preview': url_for('recover_file', action='preview'), 'restore': url_for('recover_file', action='restore')} | tojson }};
+        window.RECOVERY_URLS = {{ {'preview': editor_url_for('recover_file', action='preview'), 'restore': editor_url_for('recover_file', action='restore')} | tojson }};
     </script>
     <script src="{{ static_url('js/save-guard.js') }}"></script>
     <script src="{{ static_url('js/recovery-preview.js') }}"></script>

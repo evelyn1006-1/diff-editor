@@ -249,6 +249,7 @@ Environment variables are loaded from `.env` via `python-dotenv`. All variables 
 | `EDITOR_BIND` | `127.0.0.1:8005` | Bind address for the editor gunicorn process. |
 | `TERMINAL_BIND` | `127.0.0.1:8006` | Bind address for the terminal gunicorn process. |
 | `TERMINAL_SERVER_URL` | `http://127.0.0.1:8006` | Base URL the editor wrapper and pager wrapper post back to. |
+| `EDITOR_URL_PREFIX` | (none) | Public path prefix of the editor (for example `/diff`). The terminal page uses it for Backups and recovery requests; leave it unset when the terminal process is reached directly. |
 | **AI Review** | | |
 | `AI_REVIEW_PROVIDER` | `codex_cli` | `codex_cli` or `openai_sdk`. |
 | `AI_REVIEW_MODEL` | `gpt-5.3-codex` | Model name passed to codex or the OpenAI SDK. |

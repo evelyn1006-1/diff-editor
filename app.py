@@ -1311,6 +1311,19 @@ def create_app() -> Flask:
 
     app.jinja_env.globals["static_url"] = static_url
 
+    # Pages served by the terminal process (nginx /terminal, no forwarded
+    # prefix) reach editor routes only through the editor's public prefix.
+    editor_url_prefix = os.environ.get("EDITOR_URL_PREFIX", "").rstrip("/")
+
+    def editor_url_for(endpoint: str, **values) -> str:
+        """Build an editor-route URL that works from either process's pages."""
+        url = url_for(endpoint, **values)
+        if not editor_url_prefix:
+            return url
+        return editor_url_prefix + url[len(request.script_root):]
+
+    app.jinja_env.globals["editor_url_for"] = editor_url_for
+
     @app.get("/")
     def index():
         # Allow ?path= parameter to override the default starting directory
