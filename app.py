@@ -76,6 +76,7 @@ from utils.file_ops import (
     detect_language_for_path,
     ensure_directory,
     extract_zip_archive,
+    file_backup_path,
     file_revision,
     get_extended_file_info,
     get_recycle_metadata,
@@ -85,6 +86,7 @@ from utils.file_ops import (
     is_recycle_bin_root,
     is_writable_by_user,
     list_directory_entries,
+    list_file_backups,
     check_path_is_file,
     check_path_is_directory,
     check_path_exists,
@@ -782,6 +784,7 @@ def _load_project_preview_config(project_root: Path, base_config: dict[str, obje
 
 
 def create_app() -> Flask:
+    from utils import recovery_ops
     app = Flask(__name__)
 
     app.config.update(
@@ -3286,6 +3289,85 @@ def create_app() -> Flask:
         payload = {"success": True}
         payload.update(result)
         return jsonify(payload)
+
+    @app.get("/backups")
+    def file_backups():
+        path, error = resolve_request_path(request.args.get("path", ""))
+        if error:
+            return render_template("backups.html", file_path="", backups=[], error=error), 400
+        try:
+            backups = list_file_backups(path)
+            return render_template("backups.html", file_path=str(path), backups=backups)
+        except OSError as exception:
+            return render_template("backups.html", file_path=str(path), backups=[], error=str(exception)), 500
+
+    @app.get("/api/file/backups/<backup_id>")
+    def download_file_backup(backup_id):
+        path, error = resolve_request_path(request.args.get("path", ""))
+        if error:
+            return jsonify({"error": error}), 400
+        try:
+            backup = file_backup_path(path, backup_id)
+        except (ValueError, FileNotFoundError):
+            return jsonify({"error": "Backup not found"}), 404
+        except OSError as exception:
+            return jsonify({"error": str(exception)}), 500
+        response = send_file(backup, as_attachment=True,
+                             download_name=path.stem + ".backup" + path.suffix,
+                             mimetype="application/octet-stream")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/file/recovery/<action>")
+    def recover_file(action):
+        if action not in {"preview", "restore"}:
+            return jsonify({"error": "Unknown recovery action"}), 404
+        if not validate_csrf_token(request.headers.get("X-CSRF-Token", "")):
+            return jsonify({"error": "Invalid CSRF token"}), 403
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "Specify a recovery version"}), 400
+        path, error = resolve_request_path(data.get("path", ""))
+        if error:
+            return jsonify({"error": error}), 400
+        limit = MAX_NOTEBOOK_SIZE if path.suffix.lower() == ".ipynb" else MAX_PDF_FILE_SIZE if path.suffix.lower() == ".pdf" else MAX_FILE_SIZE
+        operations = None
+        if data.get("source") == "draft" and path.suffix.lower() == ".ipynb" and data.get("kind") != "terminal":
+            operations, _ = notebook_tools()
+        try:
+            target = resolve_path_with_sudo(path)
+            if action == "restore" and data.get("target") != str(target):
+                raise FileConflict("The file target changed. Preview it again before restoring.")
+            candidate = recovery_ops.candidate_bytes(path, data, limit, operations)
+            if action == "preview":
+                state = recovery_ops.preview(recovery_ops.read_current(target, limit), candidate)
+                response = jsonify({**state, "path": str(path), "target": str(target)})
+                response.headers["Cache-Control"] = "no-store"
+                return response
+            if data.get("candidate_revision") != file_revision(candidate):
+                raise FileConflict("The selected recovery version changed. Preview it again before restoring.")
+            exists = data.get("exists")
+            if type(exists) is not bool:
+                return jsonify({"error": "Preview the current file before restoring"}), 400
+            if exists:
+                saved, message = write_file_bytes(target, candidate, expected_revision=data.get("revision"))
+            else:
+                if data.get("revision") is not None:
+                    return jsonify({"error": "Invalid missing-file revision"}), 400
+                saved, message = write_file_bytes(target, candidate, expected_missing=True)
+            if not saved:
+                return jsonify({"error": message}), 500
+            return jsonify({"success": True, "message": "Version restored to file", "path": str(path),
+                            "revision": file_revision(candidate), "created": not exists,
+                            "editor_url": url_for("diff_view", file=str(path))})
+        except FileConflict as exception:
+            return jsonify({"error": str(exception)}), 409
+        except FileNotFoundError:
+            return jsonify({"error": "Recovery version not found"}), 404
+        except (ValueError, TypeError, UnicodeError) as exception:
+            return jsonify({"error": str(exception)}), 400
+        except (OSError, subprocess.TimeoutExpired) as exception:
+            return jsonify({"error": str(exception)}), 500
 
     @app.post("/api/file")
     def save_file():

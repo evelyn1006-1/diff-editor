@@ -20,7 +20,9 @@
     </main>
     <script>
         window.CSRF_TOKEN = {{ csrf_token() | tojson }};
+        window.RECOVERY_URLS = {{ {'preview': url_for('recover_file', action='preview'), 'restore': url_for('recover_file', action='restore')} | tojson }};
     </script>
+    <script src="{{ static_url('js/recovery-preview.js') }}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Save Backups{% endblock %}
+{% block nav %}<span class="file-path" title="{{ file_path }}">Save backups: {{ file_path | basename }}</span>{% endblock %}
+{% block content %}
+<div class="save-backups">
+    <h1>Previous saved versions</h1>
+    <p>Preview a saved version, compare it with the current file, or restore it directly. Restoring backs up the current disk contents first.</p>
+    {% if error %}<p class="error-box" role="alert">{{ error }}</p>{% endif %}
+    <div id="backup-versions">
+    {% if backups %}
+    <table>
+        <thead><tr><th>Backed up at (UTC)</th><th>Size</th><th></th></tr></thead>
+        <tbody>{% for backup in backups %}
+            <tr><td><time>{{ backup.created }}</time></td><td>{{ backup.size }} bytes</td>
+                <td><a href="{{ url_for('download_file_backup', path=file_path, backup_id=backup.id) }}">Download version</a>
+                    <button type="button" data-backup-id="{{ backup.id }}" data-action="preview">Preview / compare</button>
+                    <button type="button" data-backup-id="{{ backup.id }}" data-action="restore">Restore to file</button></td></tr>
+        {% endfor %}</tbody>
+    </table>
+    {% else %}<p>No previous versions have been backed up for this file yet.</p>{% endif %}
+    </div>
+    <div id="backup-preview"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>window.FILE_PATH = {{ file_path | tojson }};</script>
+<script src="{{ static_url('js/backups.js') }}"></script>
+{% endblock %}

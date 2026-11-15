@@ -286,6 +286,16 @@ button:disabled {
 }
 
 /* Main content */
+.save-backups { overflow: auto; width: 100%; padding: 1rem; }
+.save-backups table { border-collapse: collapse; }
+.save-backups th, .save-backups td { padding: 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
+.save-backups a { color: var(--accent); }
+.recovery-preview { border: 1px solid var(--border); border-radius: 10px; background: var(--panel-bg); padding: 0.8rem; margin: 0.6rem 0; overflow-wrap: anywhere; }
+.recovery-preview p { margin: 0.4rem 0; }
+.recovery-preview-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.6rem 0; }
+.recovery-preview-content { max-height: 50vh; overflow: auto; white-space: pre; font: 13px/1.5 monospace; background: var(--bg-primary); padding: 0.7rem; }
+.recovery-preview a { color: var(--accent); }
+
 .editor-warning {
     flex-shrink: 0;
     padding: 0.6rem 1rem;

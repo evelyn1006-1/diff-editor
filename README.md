@@ -189,6 +189,25 @@ not unsaved drafts, and persist until explicitly removed; there is no automatic
 pruning. Files are updated in place to preserve symlinks, hard links, ownership,
 and file attributes; an interrupted overwrite can be recovered from its backup.
 
+Saved versions and browser drafts have **Preview / compare** and **Restore to file**
+actions. Preview shows the selected contents; comparison shows the changes against
+the current disk file. Binary contents use the existing hex view, and notebooks
+are compared as JSON. Preview is limited to 64 KiB / 2,000 text lines or 4 KiB of
+binary data, with truncation shown explicitly; restoring uses the complete version
+within the configured file-size limits.
+
+**Restore to file** asks for confirmation, preserves the current disk contents as
+a new backup, and rejects stale comparisons or changed recovery versions. Missing
+files can be recreated privately (mode 0600); creation is exclusive, so a file
+created by another process is preserved. Existing files keep their metadata.
+The resolved target is checked as well, so retargeted symlinks require a fresh
+comparison. Saved-file backups restore their exact bytes; browser drafts use the
+normal text, hex, and notebook decoding. Other unsaved editor edits stay intact.
+If the editor already matches the restored draft, its saved revision is updated;
+otherwise, use **Open restored file** to load the restored contents in a new tab.
+Restoring a draft preserves its base revision so a newer disk file is not silently
+overwritten. **Save** is still required to write the file.
+
 Clients saving through `POST /api/file` must include the `revision` returned by
 `GET /api/file`; stale or missing revisions receive HTTP 409. Hex editors should
 also send the returned `is_binary` flag so the representation stays consistent
