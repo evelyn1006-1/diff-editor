@@ -15,7 +15,6 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
 
 import nbformat
 from jupyter_client import AsyncKernelManager
@@ -25,9 +24,14 @@ from nbclient.exceptions import CellExecutionError, CellTimeoutError
 
 from app_runtime import notebook_size_limit
 from utils.file_ops import (
+    EDITOR_GID,
+    EDITOR_UID,
+    FileConflict as NotebookConflict,
     check_path_is_directory,
     check_path_is_file,
+    file_revision as revision,
     read_file_bytes,
+    require_file_revision as _require_revision,
     resolve_path_with_sudo,
     write_file_bytes,
 )
@@ -35,18 +39,8 @@ from utils.file_ops import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # sudo supplies the original account IDs. Elevated workers share that account's
 # private job store instead of creating a separate root-owned execution history.
-EDITOR_UID = int(os.environ.get("SUDO_UID", os.getuid())) if os.geteuid() == 0 else os.getuid()
-EDITOR_GID = int(os.environ.get("SUDO_GID", os.getgid())) if os.geteuid() == 0 else os.getgid()
 JOB_ROOT = Path(os.environ.get("NOTEBOOK_JOB_ROOT", str(Path(tempfile.gettempdir()) / f"diff-editor-notebooks-{EDITOR_UID}")))
 ACTIVE_STATES = {"queued", "running"}
-
-
-class NotebookConflict(ValueError):
-    """The on-disk file changed since the editor's last read."""
-
-
-def revision(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
 
 
 def validate_notebook(notebook: object) -> dict:
@@ -103,42 +97,13 @@ def _path_key(path: Path) -> str:
     return hashlib.sha256(os.fsencode(resolve_path_with_sudo(path))).hexdigest()
 
 
-@contextmanager
-def _save_lock(path: Path):
-    with (_root() / f"{_path_key(path)}.save.lock").open("a") as lock:
-        if os.geteuid() == 0:
-            os.fchown(lock.fileno(), EDITOR_UID, EDITOR_GID)
-        # A save can yield to another gevent request while sudo reads/writes.
-        # Waiting in flock would block that request's entire worker, including
-        # the save holding the lock. Sleep cooperatively between attempts.
-        while True:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                time.sleep(0.01)
-        yield
-
-
-def _require_revision(expected_revision: str) -> None:
-    if not isinstance(expected_revision, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_revision):
-        raise NotebookConflict("Reload the notebook before saving or executing it; your edits are still here.")
-
-
 def save_notebook(path: Path, notebook: dict, expected_revision: str, max_size: int) -> str:
     content = serialize_notebook(notebook)
     if len(content) > max_size:
         raise ValueError("Notebook exceeds the size limit")
-    _require_revision(expected_revision)
-    with _save_lock(path):
-        ok, existing = read_file_bytes(path)
-        if not ok:
-            raise OSError(existing)
-        if revision(existing) != expected_revision:
-            raise NotebookConflict("The notebook changed on disk. Reload it before saving; your edits are still here.")
-        ok, message = write_file_bytes(path, content)
-        if not ok:
-            raise OSError(message)
+    ok, message = write_file_bytes(path, content, expected_revision=expected_revision)
+    if not ok:
+        raise OSError(message)
     return revision(content)
 
 

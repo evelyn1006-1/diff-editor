@@ -63,6 +63,7 @@ access_logger.addHandler(_access_handler)
 from utils.file_ops import (
     RECYCLE_BIN,
     RECYCLE_META_DIR,
+    FileConflict,
     bytes_to_hex_view,
     cleanup_temp_path,
     copy_directory,
@@ -75,6 +76,7 @@ from utils.file_ops import (
     detect_language_for_path,
     ensure_directory,
     extract_zip_archive,
+    file_revision,
     get_extended_file_info,
     get_recycle_metadata,
     get_zip_info,
@@ -98,7 +100,6 @@ from utils.file_ops import (
     set_path_ownership,
     set_path_permissions,
     stat_path,
-    write_file,
     write_file_bytes,
     zip_directory,
     zip_paths,
@@ -1641,12 +1642,6 @@ def create_app() -> Flask:
         )
 
         language = detect_language_for_path(path, content=content, is_binary=is_binary)
-        notebook_revision = {}
-        if path.suffix.lower() == ".ipynb":
-            operations, _ = notebook_tools()
-            if operations is not None:
-                notebook_revision["revision"] = operations.revision(content_bytes)
-
         return jsonify({
             "path": str(path),
             "content": content,
@@ -1657,7 +1652,7 @@ def create_app() -> Flask:
             "is_binary": is_binary,
             "is_git": is_git_tracked,
             "writable": is_writable_by_user(path),
-            **notebook_revision,
+            "revision": file_revision(content_bytes),
         })
 
     @app.get("/api/run-tooling")
@@ -3298,8 +3293,8 @@ def create_app() -> Flask:
         if not validate_csrf_token(csrf):
             return jsonify({"error": "Invalid CSRF token"}), 403
 
-        data = request.get_json()
-        if not data:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not data:
             return jsonify({"error": "No data provided"}), 400
 
         file_path = data.get("path", "")
@@ -3307,8 +3302,8 @@ def create_app() -> Flask:
 
         if not file_path:
             return jsonify({"error": "No path specified"}), 400
-        if content is None:
-            return jsonify({"error": "No content provided"}), 400
+        if not isinstance(content, str):
+            return jsonify({"error": "Specify file content as text"}), 400
 
         path, error = resolve_request_path(file_path, "path")
         if error:
@@ -3339,16 +3334,27 @@ def create_app() -> Flask:
                 except OSError as exception:
                     return jsonify({"error": str(exception)}), 500
 
-        if is_likely_binary(existing_bytes):
+        binary_mode = data.get("is_binary", is_likely_binary(existing_bytes))
+        if type(binary_mode) is not bool:
+            return jsonify({"error": "Invalid editor content format"}), 400
+        if binary_mode:
             parse_ok, parsed_or_error = parse_hex_view(content)
             if not parse_ok:
                 return jsonify({"error": parsed_or_error}), 400
-            success, message = write_file_bytes(path, parsed_or_error)
+            saved_bytes = parsed_or_error
         else:
-            success, message = write_file(path, content)
+            saved_bytes = content.encode("utf-8")
+
+        size_limit = MAX_NOTEBOOK_SIZE if path.suffix.lower() == ".ipynb" else MAX_FILE_SIZE
+        if len(saved_bytes) > size_limit:
+            return jsonify({"error": f"File too large (max {size_limit // 1024 // 1024}MB)"}), 400
+        try:
+            success, message = write_file_bytes(path, saved_bytes, expected_revision=data.get("revision"))
+        except FileConflict as exception:
+            return jsonify({"error": str(exception)}), 409
 
         if success:
-            return jsonify({"success": True, "message": message})
+            return jsonify({"success": True, "message": message, "revision": file_revision(saved_bytes)})
         else:
             return jsonify({"error": message}), 500
 

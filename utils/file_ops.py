@@ -3,17 +3,22 @@ Filesystem helpers and file operations with sudo support.
 """
 
 import errno
+import fcntl
+import hashlib
 import io
 import json
 import mimetypes
 import os
+import pwd
 import re
 import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from stat import S_ISDIR, S_ISLNK, S_ISREG
@@ -21,6 +26,137 @@ from stat import S_ISDIR, S_ISLNK, S_ISREG
 HOME_DIR = Path.home()
 RECYCLE_BIN = Path("/var/tmp/RECYCLE_BIN")
 RECYCLE_META_DIR = Path("/var/lib/recycle-bin")
+EDITOR_UID = int(os.environ.get("SUDO_UID", os.getuid())) if os.geteuid() == 0 else os.getuid()
+EDITOR_GID = int(os.environ.get("SUDO_GID", os.getgid())) if os.geteuid() == 0 else os.getgid()
+_ANY_REVISION = object()
+_FILE_APPEARED = "A file now exists at this path. Preview it again before restoring."
+
+
+class FileConflict(ValueError):
+    """The editor's revision no longer matches the file on disk."""
+
+
+def file_revision(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def require_file_revision(expected_revision: str) -> None:
+    if not isinstance(expected_revision, str) or not re.fullmatch(r"[a-f0-9]{64}", expected_revision):
+        raise FileConflict("Reload the file before saving or executing it; your edits are still here.")
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _private_directory(path: Path) -> Path:
+    missing = []
+    parent = path
+    while not parent.exists():
+        missing.append(parent)
+        parent = parent.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        else:
+            if os.geteuid() == 0:
+                os.chown(directory, EDITOR_UID, EDITOR_GID)
+            _sync_directory(directory.parent)
+    info = path.lstat()
+    if not S_ISDIR(info.st_mode) or info.st_uid != EDITOR_UID:
+        raise OSError("Save backup directories must be real directories owned by the editor account")
+    if info.st_mode & 0o077:
+        path.chmod(0o700)
+    return path
+
+
+def file_backup_directory(path: Path, *, create: bool = False) -> Path:
+    editor_home = Path(pwd.getpwuid(EDITOR_UID).pw_dir)
+    configured = os.environ.get("FILE_BACKUP_ROOT") or str(editor_home / ".local/share/diff-editor/backups")
+    # sudo may change HOME. A configured ~/ path must still identify the same
+    # store in the web process and an elevated notebook worker.
+    if configured == "~":
+        root = editor_home
+    elif configured.startswith("~/"):
+        root = editor_home / configured[2:]
+    else:
+        root = Path(configured).expanduser()
+    root = root.absolute()
+    key = file_revision(os.fsencode(resolve_path_with_sudo(path)))
+    if create:
+        _private_directory(root)
+        return _private_directory(root / key)
+    return root / key
+
+
+@contextmanager
+def _file_save_lock(path: Path):
+    directory = file_backup_directory(path, create=True)
+    # Serialize the destructive save step across names as well: hard links can
+    # refer to the same inode even when their canonical paths differ.
+    descriptor = os.open(directory.parent / "save.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a") as lock:
+        if os.geteuid() == 0:
+            os.fchown(lock.fileno(), EDITOR_UID, EDITOR_GID)
+        # A protected-file save can yield while sudo runs. Never block the
+        # gevent event loop waiting for another request in the same worker.
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(0.01)
+        yield directory
+
+
+def _durable_private_file(path: Path, content: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        if os.geteuid() == 0:
+            os.fchown(stream.fileno(), EDITOR_UID, EDITOR_GID)
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _backup_before_save(directory: Path, path: Path, content: bytes) -> None:
+    # Publish only complete, durable backups. A failed backup must prevent the
+    # destructive write; its unpublished staging file remains for recovery.
+    backup_id = f"{time.time_ns():020d}-{secrets.token_hex(8)}"
+    staging = directory / f"{backup_id}.pending"
+    _durable_private_file(staging, content)
+    staging.replace(directory / f"{backup_id}.bak")
+    metadata = directory / "original-path.txt"
+    if not metadata.exists():
+        _durable_private_file(metadata, os.fsencode(resolve_path_with_sudo(path)))
+    _sync_directory(directory)
+
+
+def list_file_backups(path: Path) -> list[dict]:
+    directory = file_backup_directory(path)
+    backups = []
+    for backup in sorted(directory.glob("*.bak"), reverse=True):
+        if re.fullmatch(r"[0-9]{20}-[a-f0-9]{16}\.bak", backup.name) and S_ISREG(backup.lstat().st_mode):
+            info = backup.stat()
+            backups.append({"id": backup.name, "size": info.st_size,
+                            "created": datetime.fromtimestamp(int(backup.stem.split("-")[0]) / 1e9,
+                                                              timezone.utc).isoformat(timespec="seconds")})
+    return backups
+
+
+def file_backup_path(path: Path, backup_id: str) -> Path:
+    if not re.fullmatch(r"[0-9]{20}-[a-f0-9]{16}\.bak", backup_id):
+        raise ValueError("Invalid backup ID")
+    backup = file_backup_directory(path) / backup_id
+    if not S_ISREG(backup.lstat().st_mode):
+        raise FileNotFoundError("Backup not found")
+    return backup
 
 
 def _normalize_path(path: Path | str) -> Path:
@@ -369,72 +505,80 @@ def read_file(path: Path) -> tuple[bool, str]:
     return True, data.decode("utf-8", errors="replace")
 
 
-def write_file(path: Path, content: str) -> tuple[bool, str]:
-    """
-    Write content to file. Uses sudo tee if not directly writable.
-    Returns (success, message).
-    """
-    path = Path(os.path.abspath(path))
+def write_file(path: Path, content: str, *, as_root: bool = False) -> tuple[bool, str]:
+    """Save UTF-8 text through the shared backup and byte-writing path."""
+    return write_file_bytes(path, content.encode("utf-8"), as_root=as_root)
 
-    # Try direct write first
-    if is_writable_by_user(path):
-        try:
-            path.write_text(content, encoding="utf-8")
-            return True, "File saved"
-        except Exception as e:
-            return False, str(e)
 
-    # Fall back to sudo tee
+def _write_file_content(path: Path | str, content: bytes, *, exclusive: bool = False) -> None:
+    # Preserve symlinks, hard links, ownership, modes and extended attributes.
+    # The durable pre-save backup protects against interrupted in-place writes.
+    # Recovery creates missing files exclusively and privately, regardless of umask.
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_EXCL if exclusive else os.O_TRUNC)
+    descriptor = os.open(path, flags, 0o600 if exclusive else 0o666)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(content)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def write_file_bytes(path: Path, content: bytes, *, expected_revision=_ANY_REVISION,
+                     expected_missing: bool = False, as_root: bool = False) -> tuple[bool, str]:
+    """Serialize saves, back up overwritten bytes, and optionally reject stale editors."""
+    path = _normalize_path(path)
+    if expected_missing and expected_revision is not _ANY_REVISION:
+        raise ValueError("Specify either an existing revision or an expected missing file")
+    if expected_revision is not _ANY_REVISION:
+        require_file_revision(expected_revision)
     try:
-        result = subprocess.run(
-            ["sudo", "-n", "tee", str(path)],
-            input=content.encode("utf-8"),
-            capture_output=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
+        with _file_save_lock(path) as directory:
+            exists, error, status = check_path_exists(resolve_path_with_sudo(path))
+            if not exists and status != 404:
+                raise OSError(error)
+            if expected_missing and exists:
+                raise FileConflict(_FILE_APPEARED)
+            if exists:
+                ok, existing = read_file_bytes(path)
+                if not ok:
+                    raise OSError(existing)
+            else:
+                existing = b""
+            if expected_revision is not _ANY_REVISION:
+                if not exists or file_revision(existing) != expected_revision:
+                    raise FileConflict("The file changed on disk. Reload it before saving; your edits are still here.")
+            if exists and existing == content:
+                return True, "File already saved"
+            if exists:
+                _backup_before_save(directory, path, existing)
+            if not as_root and is_writable_by_user(path):
+                _write_file_content(path, content, exclusive=expected_missing)
+                return True, "File saved"
+            # Run the exact same writer with the required privileges. No shell
+            # interprets paths, and the backup remains owned by the editor.
+            script = ("import errno, sys; sys.path.insert(0, sys.argv[1]); "
+                      "from utils.file_ops import _write_file_content; "
+                      "\ntry:\n _write_file_content(sys.argv[2], sys.stdin.buffer.read(), exclusive=sys.argv[3] == '1')"
+                      "\nexcept FileExistsError:\n sys.exit(errno.EEXIST)\n")
+            result = subprocess.run(
+                ["sudo", "-n", sys.executable, "-c", script, str(Path(__file__).resolve().parent.parent), str(path),
+                 "1" if expected_missing else "0"],
+                input=content, capture_output=True, timeout=30,
+            )
+            if expected_missing and result.returncode == errno.EEXIST:
+                raise FileConflict(_FILE_APPEARED)
+            if result.returncode:
+                raise OSError(result.stderr.decode("utf-8", errors="replace") or "sudo write failed")
             return True, "File saved (with sudo)"
-        else:
-            error = result.stderr.decode("utf-8", errors="replace")
-            return False, f"sudo tee failed: {error}"
+    except FileConflict:
+        raise
+    except FileExistsError as error:
+        if expected_missing:
+            raise FileConflict(_FILE_APPEARED) from None
+        return False, str(error)
     except subprocess.TimeoutExpired:
-        return False, "Write operation timed out"
-    except Exception as e:
-        return False, str(e)
-
-
-def write_file_bytes(path: Path, content: bytes) -> tuple[bool, str]:
-    """
-    Write raw bytes to file. Uses sudo tee if not directly writable.
-    Returns (success, message).
-    """
-    path = Path(os.path.abspath(path))
-
-    # Try direct write first
-    if is_writable_by_user(path):
-        try:
-            path.write_bytes(content)
-            return True, "File saved"
-        except Exception as e:
-            return False, str(e)
-
-    # Fall back to sudo tee
-    try:
-        result = subprocess.run(
-            ["sudo", "-n", "tee", str(path)],
-            input=content,
-            capture_output=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            return True, "File saved (with sudo)"
-        else:
-            error = result.stderr.decode("utf-8", errors="replace")
-            return False, f"sudo tee failed: {error}"
-    except subprocess.TimeoutExpired:
-        return False, "Write operation timed out"
-    except Exception as e:
-        return False, str(e)
+        return False, "Write operation timed out; the pre-save backup is available for recovery"
+    except (OSError, ValueError) as error:
+        return False, str(error)
 
 
 def create_dir(path: Path) -> tuple[bool, str]:

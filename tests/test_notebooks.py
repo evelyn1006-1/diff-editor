@@ -115,7 +115,8 @@ def test_missing_notebook_tools_falls_back_and_saves_regularly(setup_notebook, m
     regular = client.get("/api/file", query_string={"path": str(path)})
     assert regular.status_code == 200
     assert regular.get_json()["language"] == "json"
-    response = client.post("/api/file", json={"path": str(path), "content": "ordinary text edit"})
+    response = client.post("/api/file", json={"path": str(path), "content": "ordinary text edit",
+                                             "revision": regular.get_json()["revision"]})
     assert response.status_code == 200
     assert path.read_text() == "ordinary text edit"
     assert client.get("/api/notebook", query_string={"path": str(path)}).status_code == 503
@@ -149,17 +150,18 @@ def test_contended_saves_keep_gevent_worker_responsive(setup_notebook):
         from pathlib import Path
         import gevent
         from gevent.event import Event
+        from utils import file_ops
         from utils import notebook_ops as notebooks
 
         path = Path(sys.argv[1])
         notebook, revision = notebooks.read_notebook(path)
         reading = Event()
-        read_file_bytes = notebooks.read_file_bytes
+        read_file_bytes = file_ops.read_file_bytes
         def yielding_read(path):
             reading.set()
             gevent.sleep(0.05)
             return read_file_bytes(path)
-        notebooks.read_file_bytes = yielding_read
+        file_ops.read_file_bytes = yielding_read
         outcomes = []
         def save(source):
             edited = copy.deepcopy(notebook)

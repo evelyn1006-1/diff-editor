@@ -1927,23 +1927,7 @@ def editor_response():
 
 
 def _write_file_for_terminal(path: Path, content: str, *, as_root: bool = False) -> tuple[bool, str]:
-    if not as_root:
-        return write_file(path, content)
-
-    try:
-        result = subprocess.run(
-            ["sudo", "-n", "tee", str(path)],
-            input=content.encode("utf-8"),
-            capture_output=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            return True, "File saved"
-        return False, result.stderr.decode("utf-8", errors="replace") or "Failed to save file"
-    except subprocess.TimeoutExpired:
-        return False, "Write operation timed out"
-    except Exception as exc:
-        return False, str(exc)
+    return write_file(path, content, as_root=as_root)
 
 
 def _get_completion_context(session_id: str) -> tuple[str, bool]:

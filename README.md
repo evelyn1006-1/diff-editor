@@ -180,6 +180,20 @@ editable notebook. Finished jobs and their recovery downloads reappear on refres
 `/tmp/diff-editor-notebooks-<uid>`). Each run preserves its worker log and executed
 notebook there for recovery; these files are temporary and are not version history.
 
+File saves also preserve the previous on-disk bytes under
+`~/.local/share/diff-editor/backups` for the editor account, including saves that
+need sudo and direct terminal-editor saves. Set `FILE_BACKUP_ROOT` to use another
+location. Backups are written and flushed before an overwrite; a backup failure
+aborts the save. Backups contain saved versions,
+not unsaved drafts, and persist until explicitly removed; there is no automatic
+pruning. Files are updated in place to preserve symlinks, hard links, ownership,
+and file attributes; an interrupted overwrite can be recovered from its backup.
+
+Clients saving through `POST /api/file` must include the `revision` returned by
+`GET /api/file`; stale or missing revisions receive HTTP 409. Hex editors should
+also send the returned `is_binary` flag so the representation stays consistent
+if the edited bytes become valid text.
+
 ## Configuration
 
 Environment variables are loaded from `.env` via `python-dotenv`. All variables are read at startup.
@@ -190,6 +204,7 @@ Environment variables are loaded from `.env` via `python-dotenv`. All variables 
 | `DEFAULT_ROOT` | `/home/evelyn` | Starting directory shown in the file browser. |
 | `MAX_FILE_SIZE` | `10485760` (10 MB) | Maximum file size accepted by the editor and image APIs. |
 | `MAX_PDF_FILE_SIZE` | `262144000` (250 MB) | Maximum PDF size accepted by the editor and PDF API. |
+| `FILE_BACKUP_ROOT` | `~/.local/share/diff-editor/backups` | Private, persistent pre-save backup directory owned by the editor account. |
 | `EDITOR_BIND` | `127.0.0.1:8005` | Bind address for the editor gunicorn process. |
 | `TERMINAL_BIND` | `127.0.0.1:8006` | Bind address for the terminal gunicorn process. |
 | `TERMINAL_SERVER_URL` | `http://127.0.0.1:8006` | Base URL the editor wrapper and pager wrapper post back to. |
