@@ -417,7 +417,7 @@ def list_directory_entries(path: Path) -> list[dict]:
 
     try:
         result = subprocess.run(
-            ["sudo", "-n", sys.executable, "-c", script, str(path)],
+            ["sudo", "-n", sys.executable, "-I", "-c", script, str(path)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -560,7 +560,7 @@ def write_file_bytes(path: Path, content: bytes, *, expected_revision=_ANY_REVIS
                       "\ntry:\n _write_file_content(sys.argv[2], sys.stdin.buffer.read(), exclusive=sys.argv[3] == '1')"
                       "\nexcept FileExistsError:\n sys.exit(errno.EEXIST)\n")
             result = subprocess.run(
-                ["sudo", "-n", sys.executable, "-c", script, str(Path(__file__).resolve().parent.parent), str(path),
+                ["sudo", "-n", sys.executable, "-I", "-c", script, str(Path(__file__).resolve().parent.parent), str(path),
                  "1" if expected_missing else "0"],
                 input=content, capture_output=True, timeout=30,
             )
@@ -868,7 +868,7 @@ def _change_path_metadata(path: Path, operation: str, values: list[int]) -> tupl
     )
     try:
         result = subprocess.run(
-            ["sudo", "-n", sys.executable, "-c", script, operation, str(path), *map(str, values)],
+            ["sudo", "-n", sys.executable, "-I", "-c", script, operation, str(path), *map(str, values)],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
