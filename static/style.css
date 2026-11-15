@@ -286,6 +286,31 @@ button:disabled {
 }
 
 /* Main content */
+.save-split-button { display: inline-flex; position: relative; align-items: stretch; flex-shrink: 0; }
+.save-split-button > button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.save-split-button > .save-menu-toggle { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 0; min-width: 38px; }
+.save-options {
+    position: absolute; right: 0; top: calc(100% + 4px); z-index: 1300;
+    min-width: 220px; max-width: calc(100vw - 32px); padding: 0.35rem;
+    border: 1px solid var(--border); border-radius: 10px; background: var(--bg-primary);
+    box-shadow: 0 5px 20px rgba(0, 0, 0, 0.18);
+}
+.save-options > button, .save-options > a {
+    display: block; width: 100%; text-align: left; color: var(--text-primary);
+    padding: 0.65rem; border: 0; border-radius: 6px; text-decoration: none; font: inherit;
+}
+.save-options > :hover { background: var(--bg-secondary); }
+.draft-recovery { flex-shrink: 0; padding: 0.6rem 1rem; background: var(--panel-bg); border-bottom: 1px solid var(--border); overflow-wrap: anywhere; max-height: 30vh; overflow-y: auto; }
+.draft-recovery p { margin: 0 0 0.35rem; }
+.draft-recovery-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0.35rem 0; }
+.editor-popup .save-options { top: auto; bottom: calc(100% + 4px); }
+header:has(+ main #editor-container) nav {
+    height: auto;
+    min-height: 48px;
+    flex-wrap: wrap;
+    padding: 0.35rem 0;
+}
+header:has(+ main #editor-container) .status { max-width: 100%; overflow-wrap: anywhere; }
 .save-backups { overflow: auto; width: 100%; padding: 1rem; }
 .save-backups table { border-collapse: collapse; }
 .save-backups th, .save-backups td { padding: 0.6rem; border-bottom: 1px solid var(--border); text-align: left; }
@@ -1874,6 +1899,9 @@ body.terminal-compact .terminal-input {
 
 /* Mobile optimizations */
 @media (max-width: 600px) {
+    /* Only the status slot changes; retain the existing toolbar layout. */
+    header:has(+ main #editor-container) #status { font-size: 0; cursor: pointer; }
+    header:has(+ main #editor-container) #status::before { content: attr(data-status-icon); font-size: 0.85rem; }
     .file-path {
         display: none;
     }

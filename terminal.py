@@ -530,6 +530,7 @@ def init_terminal_socketio(socketio):
                     "editorCommand": editor_cmd,
                     "filePath": file_path or "",
                     "needsPath": needs_path,
+                    "recoveryCwd": context_cwd,
                 },
             )
             session.write("\n")
@@ -1862,7 +1863,8 @@ def editor_request():
     if _socketio_ref:
         _socketio_ref.emit(
             "editor_modal",
-            {"title": title, "content": content},
+            {"title": title, "content": content,
+             "recoveryPath": file_path if os.path.isabs(file_path) else None},
             room=session_id,
             namespace="/terminal",
         )

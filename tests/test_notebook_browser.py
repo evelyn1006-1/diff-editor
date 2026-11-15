@@ -53,32 +53,11 @@ def notebook_page(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("save_mode", ["save", "before_action"])
-def test_raw_json_editor_keeps_revisions_for_all_save_paths(notebook_page, save_mode):
+def test_raw_json_editor_keeps_revisions_for_all_save_paths(notebook_page, save_mode, offline_monaco):
     page, path, url = notebook_page
     # Supply a minimal Monaco widget for offline runs. Exercise the real page,
     # initialization, save handlers, session, and API through its model interface.
-    page.add_init_script("""
-        window.require = (dependencies, callback) => callback();
-        window.require.config = () => {};
-        window.monaco = { editor: {
-            defineTheme() {},
-            createModel(value) {
-                const listeners = [];
-                return {
-                    getValue: () => value,
-                    setValue(next) { value = next; listeners.forEach(listener => listener()); },
-                    onDidChangeContent(listener) { listeners.push(listener); },
-                };
-            },
-            createDiffEditor() {
-                let models;
-                return {
-                    setModel(next) { models = next; },
-                    getModifiedEditor: () => ({ getModel: () => models.modified }),
-                };
-            },
-        } };
-    """)
+    page.add_init_script(offline_monaco)
     page.goto(url + "&raw=1")
     playwright.expect(page.locator("#btn-save")).to_be_enabled()
 

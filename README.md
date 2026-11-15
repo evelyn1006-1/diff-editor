@@ -27,6 +27,11 @@ It combines a Git-aware Monaco editor with a mobile-friendly PTY terminal, a bui
 - Textbox mode for mobile or simpler editing — syntax-highlighted via Monaco tokenization, with synchronized line numbers and an inline unified diff panel on wide screens
 - Auto-refresh for log files (`.log`, `.jsonl`, `.err`, `.out`, `.trace`, and more) every 1.5 seconds
 - Save with Ctrl+S; wrap toggle; keyboard-driven workflow
+- Warn before closing, refreshing, or navigating away with unsaved changes or a save in progress
+- Detect stale revisions for text, binary, and notebook saves; keep newer edits marked unsaved when an earlier save finishes
+- Split **Save ▾** menu for saved-version backups, browser draft recovery, and downloading the current draft
+- Phone-only status icon for comparison, edits, saving/loading, success, and errors; activate it to read the full status message
+- Browser-only recovery drafts for text, hex, notebook, and terminal editors; reopening offers **Restore draft** without changing the actual file
 
 ### Python Notebooks
 
@@ -184,11 +189,20 @@ File saves also preserve the previous on-disk bytes under
 `~/.local/share/diff-editor/backups` for the editor account, including saves that
 need sudo and direct terminal-editor saves. Set `FILE_BACKUP_ROOT` to use another
 location. Backups are written and flushed before an overwrite; a backup failure
-aborts the save. Backups contain saved versions,
+aborts the save. **Save ▾ → Backups** opens the saved versions in a separate tab for download,
+including after the original file has been removed. Backups contain saved versions,
 not unsaved drafts, and persist until explicitly removed; there is no automatic
 pruning. Files are updated in place to preserve symlinks, hard links, ownership,
 and file attributes; an interrupted overwrite can be recovered from its backup.
-
+Browser close warnings depend on the browser and cannot protect against a crash
+or an abrupt mobile-app shutdown. iPhone/iPad Safari can skip these warnings even
+on ordinary refreshes. Browser recovery therefore stores separate drafts in
+IndexedDB while editing (coalesced about every 150 ms, with an additional attempt
+when the page becomes hidden). Reopen the same file in the same browser profile
+and choose **Restore draft**, or use **Save ▾ → Recover browser drafts**. Each tab
+keeps its own draft; older copies remain available until explicitly discarded.
+The recovery command brings the recovery panel into view, including an explicit
+message when no earlier drafts are available.
 Saved versions and browser drafts have **Preview / compare** and **Restore to file**
 actions. Preview shows the selected contents; comparison shows the changes against
 the current disk file. Binary contents use the existing hex view, and notebooks
@@ -207,6 +221,14 @@ If the editor already matches the restored draft, its saved revision is updated;
 otherwise, use **Open restored file** to load the restored contents in a new tab.
 Restoring a draft preserves its base revision so a newer disk file is not silently
 overwritten. **Save** is still required to write the file.
+
+Browser drafts stay on that device and can contain the edited file's full content.
+Explicit preview/comparison or direct restore sends the selected draft to the
+editor server; ordinary draft capture remains local to the browser.
+They are best-effort recovery: clearing browser data, private browsing, storage
+limits, or abrupt shutdown before a write completes can make them unavailable.
+The editor shows storage failures and still supports manual Save and draft download.
+Binary drafts download as hex text; notebook drafts download as `.ipynb` files.
 
 Clients saving through `POST /api/file` must include the `revision` returned by
 `GET /api/file`; stale or missing revisions receive HTTP 409. Hex editors should

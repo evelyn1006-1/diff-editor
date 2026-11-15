@@ -8,7 +8,7 @@
 {% endblock %}
 {% block nav %}
 <span class="file-path" title="{{ file_path }}">{{ file_path | basename }}</span>
-<button id="notebook-save" class="btn-primary" disabled>Save</button>
+<button id="notebook-save" class="btn-primary" data-backups-url="{{ url_for('file_backups') }}" disabled>Save</button>
 <button id="notebook-run" class="btn-primary" disabled>Execute All &amp; Save</button>
 {% endblock %}
 {% block content %}

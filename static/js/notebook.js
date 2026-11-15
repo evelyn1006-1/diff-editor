@@ -27,6 +27,7 @@
     let timer = null;
     let monacoPromise = null;
     let editorMode = mobile.matches ? 'textbox' : 'code';
+    let recovery = null;
 
     const text = value => Array.isArray(value) ? value.join('') : String(value ?? '');
     const ansiFree = value => text(value).replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
@@ -71,6 +72,7 @@
 
     function changed() {
         dirty = true;
+        recovery?.changed();
         message('Unsaved changes');
         saveBtn.disabled = busy || !notebook;
     }
@@ -279,6 +281,36 @@
         changed();
     }
 
+    function initializeRecovery() {
+        if (!recovery) {
+            recovery = createDraftRecovery({
+                kind: 'notebook', path: FILE_PATH, container: cellsEl.parentElement,
+                dirty: () => dirty, busy: () => busy,
+                resolvePath: () => FILE_PATH,
+                saved: (record, result) => acceptNotebookSave(result.revision, 'Version restored to file'),
+                snapshot: () => ({content: JSON.stringify(notebook), revision,
+                    summary: text(notebook.cells.find(cell => text(cell.source).trim())?.source).slice(0, 100)}),
+                restore: (record, changedOnDisk) => {
+                    const restored = JSON.parse(record.content);
+                    if (restored.nbformat !== 4 || !Array.isArray(restored.cells)) throw new Error('Invalid notebook draft');
+                    notebook = restored;
+                    revision = record.revision;
+                    dirty = true;
+                    undo = [];
+                    activeCell = null;
+                    renderCells();
+                    message(changedOnDisk
+                        ? 'Draft restored. The disk file changed; download the draft or resolve the save conflict before overwriting it.'
+                        : 'Browser draft restored — use Save to update the file.');
+                },
+            });
+            bindSaveMenu(saveBtn, {
+                path: () => FILE_PATH, recovery: () => recovery,
+                snapshot: () => ({content: JSON.stringify(notebook)}),
+            });
+        }
+    }
+
     function button(label, title, handler) {
         const element = document.createElement('button');
         element.type = 'button';
@@ -412,6 +444,8 @@
         } catch { /* Use the default Python environment. */ }
         applyEnvironmentVisibility();
         renderCells();
+        initializeRecovery();
+        if (!dirty) void recovery.flush();
         message(data.empty ? 'New notebook — save to initialize it.' : 'Notebook loaded');
         reloadBtn.classList.add('hidden');
         if (resume && data.job) {
@@ -422,6 +456,14 @@
         }
     }
 
+    function acceptNotebookSave(savedRevision, feedback = 'Notebook saved') {
+        revision = savedRevision;
+        dirty = false;
+        void recovery?.flush();
+        controls();
+        message(feedback);
+    }
+
     async function save() {
         if (busy || !notebook || !dirty) return;
         busy = true;
@@ -429,9 +471,7 @@
         message('Saving notebook…');
         try {
             const data = await request('api/file', { path: FILE_PATH, content: JSON.stringify(notebook), revision });
-            revision = data.revision;
-            dirty = false;
-            message('Notebook saved');
+            acceptNotebookSave(data.revision);
         } catch (error) {
             message(error.message, true);
             if (error.status === 409) reloadBtn.classList.remove('hidden');
@@ -496,6 +536,7 @@
             });
             revision = job.input_revision;
             dirty = false;
+            void recovery?.flush();
             await poll();
         } catch (error) {
             // Only an uncertain response to this exact launch can be recovered.
@@ -507,6 +548,7 @@
                         job = remote.job;
                         revision = job.input_revision;
                         dirty = false;
+                        void recovery?.flush();
                         await poll();
                         return;
                     }
@@ -556,9 +598,7 @@
         editorMode = mobile.matches ? 'textbox' : 'code';
         if (notebook) renderCells();
     });
-    window.addEventListener('beforeunload', event => {
-        if (dirty || busy) { event.preventDefault(); event.returnValue = ''; }
-    });
+    guardUnsavedChanges(() => dirty || busy);
     window.addEventListener('notebook-math-ready', () => {
         document.querySelectorAll('.notebook-latex').forEach(block => {
             window.katex.render(block._latex, block, { throwOnError: false, trust: false, displayMode: true });

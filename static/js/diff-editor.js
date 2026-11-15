@@ -7,10 +7,13 @@ let originalContent = '';
 let currentContent = '';
 let fileRevision = null;
 let isModified = false;
+let fileSaveInFlight = false;
+let fileRecovery = null;
 let wordWrapEnabled = false;
 let fileLanguage = 'plaintext';
 let isImageFile = false;
 let isPdfFile = false;
+let isBinaryFile = false;
 let isTextboxMode = false;
 let savedScrollInfo = null;
 let previewNetworkEnabled = false;
@@ -18,6 +21,9 @@ let pdfScale = 1.35;
 const PDF_MIN_SCALE = 0.5;
 const PDF_MAX_SCALE = 3.0;
 const PDF_SCALE_STEP = 0.15;
+
+guardUnsavedChanges(() => fileSaveInFlight
+    || (diffEditor && getCurrentModifiedContent() !== currentContent));
 
 // Configure Monaco loader
 require.config({
@@ -49,6 +55,35 @@ async function initDiffEditor() {
     const container = document.getElementById('editor-container');
     const statusEl = document.getElementById('status');
     const saveBtn = document.getElementById('btn-save');
+    const phoneStatus = matchMedia('(max-width: 600px)');
+    const updateStatusIcon = () => {
+        const message = statusEl.textContent;
+        statusEl.dataset.statusIcon = statusEl.classList.contains('error') ? '!'
+            : statusEl.classList.contains('saved') ? '✓'
+                : statusEl.classList.contains('modified') ? '✎'
+                    : /^\s*(Saving|Loading)/i.test(message) ? '↻' : '⇄';
+        if (phoneStatus.matches) {
+            statusEl.setAttribute('role', 'button');
+            statusEl.setAttribute('tabindex', '0');
+            statusEl.setAttribute('aria-label', `File status: ${message}. Activate for details.`);
+        } else {
+            for (const name of ['role', 'tabindex', 'aria-label']) statusEl.removeAttribute(name);
+        }
+    };
+    const statusObserver = new MutationObserver(updateStatusIcon);
+    statusObserver.observe(statusEl, {childList: true, characterData: true, subtree: true,
+                                      attributes: true, attributeFilter: ['class']});
+    phoneStatus.addEventListener('change', updateStatusIcon);
+    updateStatusIcon();
+    statusEl.addEventListener('click', () => {
+        if (phoneStatus.matches) alert(statusEl.textContent);
+    });
+    statusEl.addEventListener('keydown', event => {
+        if (phoneStatus.matches && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault();
+            alert(statusEl.textContent);
+        }
+    });
 
     statusEl.textContent = 'Loading file...';
 
@@ -68,6 +103,7 @@ async function initDiffEditor() {
         fileLanguage = data.language;
         isImageFile = Boolean(data.is_image);
         isPdfFile = Boolean(data.is_pdf);
+        isBinaryFile = Boolean(data.is_binary);
 
         if (isImageFile) {
             renderImagePreview(container, data.image_url);
@@ -136,7 +172,32 @@ async function initDiffEditor() {
         modifiedModel.onDidChangeContent(() => {
             const newContent = modifiedModel.getValue();
             isModified = newContent !== currentContent;
+            fileRecovery?.changed();
             updateStatus();
+        });
+
+        fileRecovery = createDraftRecovery({
+            kind: 'diff', path: FILE_PATH, container: document.querySelector('main'),
+            dirty: () => getCurrentModifiedContent() !== currentContent,
+            busy: () => fileSaveInFlight,
+            resolvePath: () => FILE_PATH,
+            saved: (record, result) => acceptFileSave(record.content, result.revision, 'Version restored to file'),
+            snapshot: () => ({content: getCurrentModifiedContent(), revision: fileRevision, is_binary: isBinaryFile}),
+            restore: (record, changedOnDisk) => {
+                isBinaryFile = Boolean(record.is_binary);
+                fileRevision = record.revision;
+                modifiedModel.setValue(record.content);
+                if (isTextboxMode) syncTextboxModeExternalContent(record.content);
+                isModified = getCurrentModifiedContent() !== currentContent;
+                updateStatus();
+                statusEl.textContent = changedOnDisk
+                    ? 'Draft restored. The disk file changed; download the draft or resolve the save conflict before overwriting it.'
+                    : 'Browser draft restored — use Save to update the file.';
+            },
+        });
+        bindSaveMenu(saveBtn, {
+            path: () => FILE_PATH, recovery: () => fileRecovery,
+            snapshot: () => ({content: getCurrentModifiedContent(), is_binary: isBinaryFile}),
         });
 
         // Update status
@@ -275,12 +336,18 @@ async function initDiffEditor() {
             const models = diffEditor.getModel();
             let logRefreshInFlight = false;
             setInterval(async () => {
-                if (isModified || logRefreshInFlight) return;
+                if (isModified || fileSaveInFlight || logRefreshInFlight) return;
                 logRefreshInFlight = true;
+                const requestedRevision = fileRevision;
                 try {
                     const resp = await fetch(`api/file?path=${encodeURIComponent(FILE_PATH)}`);
                     if (!resp.ok) return;
                     const d = await resp.json();
+                    // Edits or saves may have happened while the read was in flight.
+                    if (fileSaveInFlight || fileRevision !== requestedRevision
+                        || getCurrentModifiedContent() !== currentContent) return;
+                    fileRevision = d.revision ?? null;
+                    isBinaryFile = Boolean(d.is_binary);
                     if (d.content !== currentContent) {
                         const editor = diffEditor.getModifiedEditor();
                         const textarea = isTextboxMode ? document.getElementById('textbox-editor') : null;
@@ -706,25 +773,43 @@ function updateStatus() {
     }
 }
 
+function acceptFileSave(content, revision, message = 'File saved') {
+    fileRevision = revision;
+    currentContent = content;
+    isModified = getCurrentModifiedContent() !== currentContent;
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = isModified ? 'Saved earlier edits; newer changes are still unsaved.' : message;
+    statusEl.className = isModified ? 'status modified' : 'status saved';
+    void fileRecovery?.flush();
+}
+
 async function persistFileContent(content) {
-    const response = await fetch('api/file', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'X-CSRF-Token': CSRF_TOKEN,
-        },
-        body: JSON.stringify({ path: FILE_PATH, content, revision: fileRevision }),
-    });
-    const data = await response.json();
-    if (response.ok) fileRevision = data.revision ?? null;
-    return { response, data };
+    if (fileSaveInFlight) throw new Error('A save is already in progress. Wait for it to finish.');
+    fileSaveInFlight = true;
+    try {
+        const response = await fetch('api/file', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-Token': CSRF_TOKEN,
+            },
+            body: JSON.stringify({ path: FILE_PATH, content, revision: fileRevision, is_binary: isBinaryFile }),
+        });
+        const data = await response.json();
+        if (response.ok) {
+            acceptFileSave(content, data.revision ?? null, data.message || 'Saved');
+        }
+        return { response, data };
+    } finally {
+        fileSaveInFlight = false;
+    }
 }
 
 async function saveFile() {
     const statusEl = document.getElementById('status');
     const saveBtn = document.getElementById('btn-save');
 
-    if (!diffEditor) return;
+    if (!diffEditor || fileSaveInFlight) return;
 
     const newContent = getCurrentModifiedContent();
 
@@ -740,13 +825,6 @@ async function saveFile() {
             statusEl.className = 'status error';
             return;
         }
-
-        // Update current content reference
-        currentContent = newContent;
-        isModified = false;
-
-        statusEl.textContent = data.message || 'Saved';
-        statusEl.className = 'status saved';
 
         // Reset status after a moment
         setTimeout(() => {
@@ -1474,6 +1552,12 @@ function renderedFileUrl(filePath, options = {}) {
 
 async function saveBeforeAction(button, actionLabel) {
     const statusEl = document.getElementById('status');
+    if (fileSaveInFlight) {
+        statusEl.textContent = 'A save is already in progress. Wait for it to finish.';
+        statusEl.className = 'status error';
+        button.disabled = false;
+        return false;
+    }
     const newContent = getCurrentModifiedContent();
     const hasUnsavedChanges = newContent !== currentContent;
 
@@ -1492,9 +1576,12 @@ async function saveBeforeAction(button, actionLabel) {
             return false;
         }
 
-        currentContent = newContent;
-        isModified = false;
         updateStatus();
+        if (isModified) {
+            statusEl.textContent = `Newer changes are still unsaved. Save again before ${actionLabel}.`;
+            button.disabled = false;
+            return false;
+        }
         return true;
     } catch (err) {
         statusEl.textContent = `Error: ${err.message}`;
@@ -2257,6 +2344,7 @@ function enterTextboxMode() {
 
         // Track modifications
         isModified = textarea.value !== currentContent;
+        fileRecovery?.changed();
         updateStatus();
 
         scheduleTextboxHighlightUpdate(highlightEl, textarea.value);

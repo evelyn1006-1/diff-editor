@@ -1139,6 +1139,13 @@ let editorNanoCutBuffer = '';
 let editorCommandName = '';
 let editorUndoStack = [];
 let editorRedoStack = [];
+let editorRecovery = null;
+
+guardUnsavedChanges(() => {
+    const overlay = document.getElementById('editor-overlay');
+    return overlay && !overlay.classList.contains('hidden')
+        && (editorContentChanged() || getEditorTextarea()?.readOnly);
+});
 
 function getEditorLineBounds(text, index) {
     const safeIndex = Math.max(0, Math.min(index, text.length));
@@ -1217,6 +1224,7 @@ function recordEditorMutation(beforeSnapshot) {
         editorUndoStack.shift();
     }
     editorRedoStack = [];
+    editorRecovery?.changed();
     return true;
 }
 
@@ -1998,6 +2006,7 @@ function initializeEditorModal() {
     const replaceInput = document.getElementById('editor-replace-input');
 
     textarea?.addEventListener('input', () => {
+        editorRecovery?.changed();
         setEditorStatus('Ctrl+Enter to save · Esc to cancel');
         refreshEditorSearch();
         if (editorDiffMode) {
@@ -2064,6 +2073,8 @@ function initializeEditorModal() {
 }
 
 function openEditorModal(title, content, options = {}) {
+    editorRecovery?.dispose();
+    editorRecovery = null;
     initializeEditorModal();
 
     const overlay = document.getElementById('editor-overlay');
@@ -2111,13 +2122,48 @@ function openEditorModal(title, content, options = {}) {
     textarea.setSelectionRange(0, 0);
     textarea.scrollTop = 0;
 
+    const recoveryCwd = options.recoveryCwd || currentCwd;
+    const resolveRecoveryPath = path => path.startsWith('/') || path.startsWith('~')
+        ? path : `${recoveryCwd}/${path}`;
+    const recoveryKey = resolveRecoveryPath(options.recoveryPath || editorFilePath || title || 'untitled');
+    editorRecovery = createDraftRecovery({
+        kind: 'terminal', path: recoveryKey, container: document.querySelector('.editor-body'),
+        dirty: editorContentChanged, busy: () => textarea.readOnly,
+        resolvePath: async () => {
+            const selected = options.recoveryPath || editorFilePath || await showEditorSavePathModal('');
+            return selected ? resolveRecoveryPath(selected) : null;
+        },
+        saved: (record, result) => {
+            editorOriginalContent = record.content;
+            if (editorModalMode === 'direct') {
+                editorFilePath = result.path;
+                editorNeedsPath = false;
+            }
+            updateEditorSummary();
+            setEditorStatus('Version restored to file');
+        },
+        snapshot: () => ({content: textarea.value, revision: editorOriginalContent}),
+        restore: (record, changedOnDisk) => {
+            textarea.value = record.content;
+            textarea.dispatchEvent(new Event('input', {bubbles: true}));
+            setEditorStatus(changedOnDisk ? 'Draft restored from a different file version. Review changes before saving.'
+                : 'Browser draft restored — use Save to update the file.');
+        },
+    });
+    bindSaveMenu(document.getElementById('editor-save'), {
+        path: () => recoveryKey, recovery: () => editorRecovery,
+        snapshot: () => ({content: textarea.value}),
+    });
+
     document.getElementById('editor-save').onclick = () => submitEditorModal(true);
-    document.getElementById('editor-cancel').onclick = () => submitEditorModal(false);
-    document.getElementById('editor-close').onclick = () => submitEditorModal(false);
+    document.getElementById('editor-cancel').onclick = () => requestEditorCancel();
+    document.getElementById('editor-close').onclick = () => requestEditorCancel();
     document.addEventListener('keydown', handleEditorKeydown);
 }
 
 function closeEditorModal() {
+    editorRecovery?.dispose(true);
+    editorRecovery = null;
     const overlay = document.getElementById('editor-overlay');
     if (overlay) overlay.classList.add('hidden');
     editorPanelMode = 'hidden';
@@ -2376,6 +2422,7 @@ function showEditorNanoGotoModal() {
 }
 
 async function requestEditorWriteOut() {
+    if (getEditorTextarea()?.readOnly) return;
     if (editorModalMode === 'direct') {
         const chosenPath = await showEditorNanoWriteModal(editorFilePath, {
             showPath: true,
@@ -2400,7 +2447,8 @@ async function requestEditorWriteOut() {
 }
 
 async function requestEditorCancel(options = {}) {
-    const { confirmDiscard = false } = options;
+    if (getEditorTextarea()?.readOnly) return;
+    const { confirmDiscard = true } = options;
     if (confirmDiscard && editorContentChanged()) {
         const action = await showEditorNanoExitModal();
         if (action === 'save') {
@@ -2636,7 +2684,7 @@ function handleEditorKeydown(e) {
             return;
         }
         e.preventDefault();
-        submitEditorModal(false);
+        requestEditorCancel();
     } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         submitEditorModal(true);
@@ -2644,6 +2692,7 @@ function handleEditorKeydown(e) {
 }
 
 async function submitEditorModal(saved, options = {}) {
+    if (getEditorTextarea()?.readOnly) return;
     if (!socket || !socket.id || !terminalToken) {
         setEditorStatus('Connection lost. Reconnect before trying again.', true);
         return;

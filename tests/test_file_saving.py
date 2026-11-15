@@ -373,6 +373,28 @@ def test_recovery_uses_sudo_and_preserves_protected_file_metadata(editable):
                        check=True, capture_output=True)
 
 
+def test_wrapper_reports_the_real_file_path_for_recovery(tmp_path, monkeypatch):
+    import io
+    from urllib.parse import parse_qs
+    from utils import editor_wrapper
+
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "actual.txt"
+    path.write_text("wrapper source")
+    monkeypatch.setenv("TERMINAL_SESSION_ID", "test")
+    monkeypatch.setattr(editor_wrapper.sys, "argv", ["editor_wrapper", "actual.txt"])
+    sent = []
+
+    def response(request, **kwargs):
+        sent.append(parse_qs(request.data.decode()))
+        return io.BytesIO(b'{"saved":false}')
+
+    monkeypatch.setattr(editor_wrapper.urllib.request, "urlopen", response)
+    with pytest.raises(SystemExit):
+        editor_wrapper.main()
+    assert sent[0]["file"] == [str(path)]
+
+
 def test_recovery_size_limits_and_invalid_hex_leave_files_unchanged(editable, monkeypatch):
     path, client = editable
     for source in ({"source": "draft", "kind": "diff", "content": "not hex", "is_binary": True},

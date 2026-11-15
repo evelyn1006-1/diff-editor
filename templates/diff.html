@@ -21,7 +21,7 @@
 <button id="btn-textbox" title="Switch to simple textbox (mobile-friendly)"><span class="btn-icon">📝</span><span class="btn-text">Textbox</span></button>
 <button id="btn-run" class="btn-primary hidden" title="Save and run this file">Run</button>
 <button id="btn-render" class="btn-primary hidden" title="Save and render this file">Render</button>
-<button id="btn-save" class="btn-primary" disabled>Save</button>
+<button id="btn-save" class="btn-primary" data-backups-url="{{ url_for('file_backups') }}" disabled>Save</button>
 {% endblock %}
 
 {% block content %}

@@ -71,7 +71,7 @@ def main() -> None:
 
     payload = urllib.parse.urlencode({
         "session_id": session_id,
-        "file": file_path,
+        "file": os.path.abspath(file_path),
         "content": content,
     }).encode()
 
